@@ -1348,8 +1348,15 @@ impl ViewerCore {
             if inventory.index(source).is_none() {
                 continue;
             }
-            if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
-                return retryable(reply);
+            if view.evidence.storage.is_postgres() {
+                if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                    return retryable(reply);
+                }
+            } else {
+                if view.evidence.validate_configuration().is_err() {
+                    return catalog_unavailable();
+                }
+                let _ = view.note_catalog_read();
             }
             let resolution = match crate::session_catalog_resolve_native(
                 view.options(),
@@ -1401,7 +1408,7 @@ impl ViewerCore {
     }
 
     fn session_page(&self, path: &str, query: &str) -> ViewerReply {
-        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
+        use crate::session_route::SessionRoute;
         let route = match SessionRoute::parse(path, query) {
             Ok(route) => route,
             Err(_) => return text(400, "Malformed session address"),
@@ -1420,142 +1427,70 @@ impl ViewerCore {
             );
         }
         let inventory = self.source_inventory(&views);
-        let shell = || {
-            let selected = inventory
-                .index(&route.source)
-                .and_then(|index| views.get(index))
-                .or_else(|| views.first());
-            selected
-                .map(|(_, view)| view.respond("GET", "/", "", None))
-                .unwrap_or_else(|| text(404, "Not found"))
+        let Some((_, view)) = inventory
+            .index(&route.source)
+            .and_then(|index| views.get(index))
+        else {
+            return text(404, "Not found");
         };
-        let mut candidates = Vec::<Candidate>::new();
-        let mut unavailable = false;
-        let mut work_guards = Vec::new();
-        for (index, (internal, view)) in views.iter().enumerate() {
-            let source = if internal.is_empty() {
-                "local"
+        if !inventory.valid() || view.evidence.validate_configuration().is_err() {
+            return catalog_unavailable();
+        }
+        let _ = view.note_catalog_read();
+        let configured = crate::catalog::warehouse::host_source(view.options(), &route.source);
+        use crate::catalog::warehouse::http;
+        let mut selected = vec![("sid", route.key.as_str())];
+        if let Some(scope) = route.controls.get("scope") {
+            selected.push(("scope", scope));
+        }
+        let address = route.controls.get("address");
+        let peer = route.controls.get("peer");
+        let reply = if let Some(turn) = &route.turn {
+            selected.push(("turn", turn));
+            if let Some(address) = address {
+                selected.push(("address", address));
+                if let Some(peer) = peer {
+                    selected.push(("peer", peer));
+                }
+                http::trace(
+                    &configured,
+                    &crate::native_html::query(&selected),
+                    None,
+                    None,
+                )
             } else {
-                internal
-            };
-            if route.source != source {
-                continue;
-            }
-            // Inventory qualification also rejects duplicated or unstable source keys.
-            if !inventory.valid() || inventory.index(source) != Some(index) {
-                continue;
-            }
-            let work_guard = match view.evidence.storage.work.try_lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    unavailable = true;
-                    continue;
-                }
-            };
-            work_guards.push(work_guard);
-            let reply = crate::session_bookmark(
-                view.options(),
-                source,
-                &format!("sid={}", percent_encode(&route.key)),
-            );
-            let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
-            if reply.status >= 500 || value["unavailable"].as_u64().is_some_and(|n| n > 0) {
-                unavailable = true;
-            }
-            for candidate in value["matches"].as_array().into_iter().flatten() {
-                if let Ok(candidate) = serde_json::from_value(candidate.clone()) {
-                    candidates.push(candidate);
-                }
-            }
-        }
-        if unavailable {
-            drop(work_guards);
-            // A valid address can load before its bounded source observation
-            // finishes. Keep the shell available so the selected APIs own the
-            // retry state and content still waits for exact resolution.
-            return shell();
-        }
-        let resolution = resolve(&route, &candidates);
-        match resolution {
-            Resolution::Valid(index) => {
-                let candidate = &candidates[index];
-                if let Some(turn) = &route.turn
-                    && !route.controls.contains_key("generation")
+                let anchor = http::anchor(
+                    &configured,
+                    &crate::native_html::query(&selected),
+                    None,
+                    None,
+                );
+                if anchor.status == 200
+                    && serde_json::from_slice::<Value>(&anchor.body)
+                        .is_ok_and(|value| value["address"].is_null())
                 {
-                    let Some(source_index) = inventory.index(&candidate.source_key) else {
-                        return text(404, "Not found");
-                    };
-                    // Page validation reads the indexed anchor under the same
-                    // producer guards; only focused APIs schedule observation.
-                    let anchor = crate::session_turn_anchor(
-                        views[source_index].1.options(),
-                        &candidate.source_key,
-                        &crate::native_html::query(&[
-                            ("machine", &candidate.source_key),
-                            ("sid", &candidate.catalog_key),
-                            ("turn", turn),
-                            ("scope", "retained_history"),
-                        ]),
-                    );
-                    if anchor.status == 404 {
-                        return anchor;
-                    }
-                    if anchor.status != 200 {
-                        if anchor.status >= 500 || matches!(anchor.status, 409 | 423 | 429) {
-                            return shell();
-                        }
-                        return anchor;
-                    }
-                    let anchor_body = serde_json::from_slice::<Value>(&anchor.body).ok();
-                    let exact_anchor =
-                        anchor_body
-                            .as_ref()
-                            .and_then(Value::as_object)
-                            .is_some_and(|object| {
-                                object.get("api").and_then(Value::as_u64) == Some(1)
-                                    && object.get("source_key").and_then(Value::as_str)
-                                        == Some(candidate.source_key.as_str())
-                                    && object.get("catalog_key").and_then(Value::as_str)
-                                        == Some(candidate.catalog_key.as_str())
-                                    && object.get("turn").and_then(Value::as_str)
-                                        == Some(turn.as_str())
-                                    && object
-                                        .get("generation")
-                                        .and_then(Value::as_str)
-                                        .is_some_and(|value| !value.is_empty())
-                                    && object.contains_key("slot")
-                                    && object
-                                        .get("unavailable")
-                                        .is_none_or(|value| value.as_u64() == Some(0))
-                                    && object.get("busy").and_then(Value::as_bool) != Some(true)
-                                    && object.get("incomplete").and_then(Value::as_bool)
-                                        != Some(true)
-                                    && object
-                                        .get("freshness")
-                                        .and_then(|value| value.get("state"))
-                                        .and_then(Value::as_str)
-                                        != Some("incomplete")
-                            });
-                    if !exact_anchor {
-                        return shell();
-                    }
-                    match anchor_body.as_ref().and_then(|value| value.get("slot")) {
-                        Some(slot) if slot.is_null() => return text(404, "Not found"),
-                        Some(slot) if slot.as_u64().is_some() => {}
-                        _ => {
-                            return shell();
-                        }
-                    }
+                    return text(404, "Not found");
                 }
-                drop(work_guards);
-                if let Some((_, view)) = views.first() {
-                    view.respond("GET", "/", "", None)
-                } else {
-                    text(404, "Not found")
-                }
+                anchor
             }
-            Resolution::Ambiguous | Resolution::NotFound => text(404, "Not found"),
+        } else if let Some(address) = address {
+            selected.push(("address", address));
+            if let Some(peer) = peer {
+                selected.push(("peer", peer));
+            }
+            http::transcript(
+                &configured,
+                &crate::native_html::query(&selected),
+                None,
+                None,
+            )
+        } else {
+            http::identity(&configured, &crate::native_html::query(&selected))
+        };
+        if reply.status == 200 || reply.status >= 500 || matches!(reply.status, 409 | 423 | 429) {
+            return view.respond("GET", "/", "", None);
         }
+        reply
     }
 
     /// Focused lists are scoped by the embedder's stable machine key. A
@@ -1565,8 +1500,8 @@ impl ViewerCore {
         views: &Arc<Views>,
         path: &str,
         query: &str,
-        deadline: Instant,
-        allow_catalog_wait: bool,
+        _deadline: Instant,
+        _allow_catalog_wait: bool,
     ) -> ViewerReply {
         if path == "/api/session-locate"
             && query_value(query, "machine").is_none()
@@ -1580,10 +1515,15 @@ impl ViewerCore {
             let mut unavailable = 0_u64;
             for (source, view) in views.iter() {
                 let source = if source.is_empty() { "local" } else { source };
-                let reply =
-                    crate::session_bookmark_with_gate(view.options(), source, query, || {
-                        wait_for_catalog_read(view, deadline, allow_catalog_wait).map(|_| ())
-                    });
+                let configured = crate::catalog::warehouse::host_source(view.options(), source);
+                if view.evidence.storage.is_postgres()
+                    || view.evidence.validate_configuration().is_err()
+                {
+                    unavailable += 1;
+                    continue;
+                }
+                let _ = view.note_catalog_read();
+                let reply = crate::catalog::warehouse::http::locate(&configured, query);
                 if reply.status != 200 {
                     return reply;
                 }
@@ -1604,14 +1544,6 @@ impl ViewerCore {
                 extra_headers: Vec::new(),
             };
         }
-        let request = if path == "/api/sessions" {
-            match crate::catalog::Request::parse(query) {
-                Ok(request) => Some(request),
-                Err(reply) => return reply,
-            }
-        } else {
-            None
-        };
         // The original single-machine Viewer uses an empty internal key.
         // Its additive catalog contract has a stable explicit local alias.
         // This never derives source authority from hostnames or session ids.
@@ -1673,15 +1605,14 @@ impl ViewerCore {
         }
         #[cfg(feature = "postgres")]
         if view.evidence.storage.is_postgres() {
-            if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+            if let Err(reply) = wait_for_catalog_read(view, _deadline, _allow_catalog_wait) {
                 return reply;
             }
             return match path {
-                "/api/sessions" => {
-                    view.evidence
-                        .storage
-                        .page(key, &request.expect("Catalog request"), None)
-                }
+                "/api/sessions" => match crate::catalog::Request::parse(query) {
+                    Ok(request) => view.evidence.storage.page(key, &request, None),
+                    Err(reply) => reply,
+                },
                 "/api/session-transcript" | "/api/session-entry" => {
                     view.evidence.storage.transcript(key, query, None)
                 }
@@ -1704,152 +1635,30 @@ impl ViewerCore {
                 ),
             };
         }
-        let mut refresh_error = None;
-        let mut reply = match path {
-            "/api/session-locate" => {
-                crate::session_bookmark_with_gate(view.options(), key, query, || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                })
+        let configured = crate::catalog::warehouse::host_source(view.options(), key);
+        use crate::catalog::warehouse::http;
+        if path != "/api/session-capabilities" {
+            if view.evidence.validate_configuration().is_err() {
+                return catalog_unavailable();
             }
-            "/api/session-observe" => {
-                crate::session_overview_observe_with_gate(view.options(), key, query, || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                })
+            if path == "/api/sessions" {
+                http::note_list_search(query, &view.evidence);
             }
-            "/api/session-home" => crate::session_home_details_with_gate(
-                view.options(),
-                key,
-                query,
-                None,
-                crate::SessionSourceReadMode::ProviderOnly,
-                true,
-                || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                },
-            ),
-            "/api/session-anchor" => {
-                crate::session_turn_anchor_with_gate(view.options(), key, query, || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                })
-            }
-            "/api/session-activity-anchor" => {
-                crate::transcript_range::session_activity_anchor_with_gate(
-                    view.options(),
-                    key,
-                    query,
-                    || {
-                        refresh_error =
-                            Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                        Ok(())
-                    },
-                )
-            }
-            "/api/session-annotations" => {
-                crate::session_annotations_with_gate(view.options(), key, query, || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                })
-            }
-            "/api/session-trace" => {
-                crate::session_causal_trace_with_gate(view.options(), key, query, || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                })
-            }
-            "/api/session-resolve" => {
-                crate::session_catalog_resolve_page_with_gate(view.options(), key, query, || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                })
-            }
-            "/api/session-identity" => {
-                let sid = query_value(query, "sid").and_then(decoded);
-                let Some(sid) = sid.filter(|sid| !sid.is_empty() && sid.len() <= 4096) else {
-                    return crate::catalog::error(
-                        400,
-                        "invalid_arguments",
-                        "A canonical sid is required.",
-                        false,
-                    );
-                };
-                refresh_error = Some(
-                    match wait_for_catalog_read(view, deadline, allow_catalog_wait) {
-                        Ok(error) => error,
-                        Err(reply) => return reply,
-                    },
-                );
-                match crate::session_catalog_identity(view.options(), key, &sid) {
-                    Ok(Some(identity)) => ViewerReply {
-                        status: 200,
-                        content_type: "application/json; charset=utf-8",
-                        body: json!({"api":1,"identity":identity})
-                            .to_string()
-                            .into_bytes(),
-                        etag: None,
-                        extra_headers: Vec::new(),
-                    },
-                    Ok(None) => crate::catalog::error(
-                        404,
-                        "session_not_found",
-                        "The selected session is absent from this catalog.",
-                        false,
-                    ),
-                    Err(crate::CatalogIdentityError::ScopeChanged) => crate::catalog::error(
-                        503,
-                        "catalog_scope_changed",
-                        "The configured native source authority changed.",
-                        true,
-                    ),
-                    Err(crate::CatalogIdentityError::Unavailable) => crate::catalog::error(
-                        503,
-                        "catalog_unavailable",
-                        "The selected identity observation is unavailable.",
-                        true,
-                    ),
-                    Err(crate::CatalogIdentityError::InvalidArguments) => crate::catalog::error(
-                        400,
-                        "invalid_arguments",
-                        "A canonical sid is required.",
-                        false,
-                    ),
-                }
-            }
-            "/api/session-transcript" => crate::session_transcript_range_with_gate(
-                view.options(),
-                key,
-                query,
-                None,
-                crate::SessionSourceReadMode::ProviderOnly,
-                || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                },
-            ),
-            "/api/session-entry" => crate::session_entry_field_with_gate(
-                view.options(),
-                key,
-                query,
-                None,
-                crate::SessionSourceReadMode::ProviderOnly,
-                || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                },
-            ),
-            "/api/session-capabilities" => crate::session_catalog_capabilities(
+            let _ = view.note_catalog_read();
+        }
+        match path {
+            "/api/session-locate" => http::locate(&configured, query),
+            "/api/session-observe" => http::observe(&configured, query),
+            "/api/session-home" => http::home(&configured, query, None, None),
+            "/api/session-anchor" => http::anchor(&configured, query, None, None),
+            "/api/session-activity-anchor" => http::activity_anchor(&configured, query, None, None),
+            "/api/session-annotations" => http::annotations(&configured, query, None, None),
+            "/api/session-trace" => http::trace(&configured, query, None, None),
+            "/api/session-resolve" => http::resolve_native(&configured, query),
+            "/api/session-identity" => http::identity(&configured, query),
+            "/api/session-transcript" => http::transcript(&configured, query, None, None),
+            "/api/session-entry" => http::entry(&configured, query, None, None),
+            "/api/session-capabilities" => crate::read_capabilities::capabilities(
                 key,
                 crate::SessionReadEndpoints {
                     selected_identity: true,
@@ -1857,45 +1666,10 @@ impl ViewerCore {
                     selected_transcript: true,
                     selected_entry: true,
                 },
+                views.len() > 1,
             ),
-            _ => {
-                let epoch = std::cell::Cell::new(None);
-                let mut on_search = |admission: crate::catalog::CatalogSearchAdmission| {
-                    view.evidence.note_catalog_search_result(
-                        epoch
-                            .get()
-                            .expect("Catalog read gate captured search epoch"),
-                        Some((&admission.query, admission.harness.as_deref())),
-                        admission.paths,
-                    )
-                };
-                refresh_error = Some(
-                    match wait_for_catalog_read(view, deadline, allow_catalog_wait) {
-                        Ok(error) => error,
-                        Err(reply) => return reply,
-                    },
-                );
-                epoch.set(Some(view.evidence.catalog_search_epoch()));
-                view.evidence.storage.page(
-                    key,
-                    &request.expect("catalog route parsed request"),
-                    Some(&mut on_search),
-                )
-            }
-        };
-        if let Ok(mut body) = serde_json::from_slice::<Value>(&reply.body) {
-            if path == "/api/session-capabilities" {
-                body["source_candidates"] = json!(views.len() > 1);
-            }
-            if let Some(refresh_error) = refresh_error {
-                body["refresh"] = match refresh_error {
-                    Some(_) => json!({"state":"unavailable","retryable":true}),
-                    None => json!({"state":"updating"}),
-                };
-            }
-            reply.body = body.to_string().into_bytes();
+            _ => http::list(&[configured], key, query, false),
         }
-        reply
     }
     /// The first view whose ids an earlier view's win over: the first
     /// received machine's.

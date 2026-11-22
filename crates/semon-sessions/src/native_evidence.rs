@@ -516,11 +516,11 @@ impl NativeEvidence {
 
     /// Search interest only changes producer scheduling. HTTP readers neither
     /// open native files nor acquire the producer's Work/publication fence.
-    pub(crate) fn catalog_search_epoch(&self) -> u64 {
+    fn catalog_search_epoch(&self) -> u64 {
         lock(&self.catalog_search).epoch
     }
 
-    pub(crate) fn note_catalog_search_result(
+    fn note_catalog_search_result(
         &self,
         epoch: u64,
         interest: Option<(&str, Option<&str>)>,
@@ -531,6 +531,11 @@ impl NativeEvidence {
             return true;
         }
         queue.note(interest, paths)
+    }
+
+    pub(crate) fn note_warehouse_search(&self, interest: (&str, Option<&str>)) {
+        let epoch = self.catalog_search_epoch();
+        self.note_catalog_search_result(epoch, Some(interest), Err(()));
     }
 
     #[cfg(test)]

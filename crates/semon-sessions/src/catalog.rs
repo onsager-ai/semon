@@ -67,131 +67,7 @@ pub fn session_source_proof(
     root: &str,
     path: &str,
 ) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
-    let namespace = crate::storage::Namespace::new(source_key)
-        .map_err(|_| CatalogIdentityError::InvalidArguments)?;
-    use CatalogIdentityError::{InvalidArguments, Unavailable};
-    if !crate::is_input_path(root, path) || path.len() > 4096 {
-        return Err(InvalidArguments);
-    }
-    let home = match root {
-        "claude" => &options.claude_home,
-        "codex" => &options.codex_home,
-        "copilot" => &options.copilot_home,
-        _ => return Err(InvalidArguments),
-    };
-    // Recorded roots/native manifests must remain observable. Missing facts
-    // cannot be treated as permission to reuse a formerly selected rollout.
-    let current = options
-        .facts
-        .as_ref()
-        .map(|file| {
-            crate::facts::source_authority::CurrentSources::open(file).map_err(|_| Unavailable)
-        })
-        .transpose()?;
-    if current.as_ref().is_some_and(|source| {
-        !source.facts_known() || (root == "codex" && !source.selection_known())
-    }) {
-        return Err(Unavailable);
-    }
-    let absolute = home.join(path);
-    let absolute = absolute.to_str().ok_or(InvalidArguments)?;
-    let read = || -> Result<Option<SessionSourceProof>, Box<dyn std::error::Error>> {
-        let mut connection = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.busy_timeout(Duration::from_millis(100))?;
-        let transaction = connection.transaction()?;
-        crate::events::store::require_current(&transaction)?;
-        crate::storage::sqlite::qualify(&transaction, &namespace)?;
-        let encoded: Option<(String, Option<String>)> = transaction.query_row(
-            "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
-            [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?;
-        let Some((key, encoded)) = encoded else {
-            return Ok(None);
-        };
-        let encoded = encoded.ok_or_else(|| io::Error::other("source metadata bound"))?;
-        // Decode only the selected relationship metadata, never a native body.
-        if encoded.len() > 1024 * 1024 {
-            return Err(io::Error::other("source metadata bound").into());
-        }
-        let row: CatalogRow = serde_json::from_str(&encoded)?;
-        if row.key != key || row.harness != root || row.sources.len() > 64 {
-            return Err(io::Error::other("source mapping changed").into());
-        }
-        let source = row
-            .sources
-            .iter()
-            .find(|source| source.path.to_str() == Some(absolute))
-            .ok_or_else(|| io::Error::other("source mapping absent"))?;
-        type Revision = (
-            u64,
-            u64,
-            u64,
-            [u8; 16],
-            u64,
-            [u8; 32],
-            [u8; 32],
-            Option<[u8; 16]>,
-        );
-        let revision: Option<Revision> = transaction.query_row(
-            "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns FROM files WHERE path=?1",
-            [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?,row.get(7)?)),
-        ).optional()?;
-        if revision
-            != Some((
-                source.dev,
-                source.ino,
-                source.size,
-                source.modified_ns.to_be_bytes(),
-                source.offset,
-                source.prefix_sha256,
-                source.tail_sha256,
-                source.changed_ns.map(i128::to_be_bytes),
-            ))
-        {
-            return Err(io::Error::other("source ledger changed").into());
-        }
-        let generation: String = transaction.query_row(
-            "SELECT value FROM meta WHERE key='catalog_generation'",
-            [],
-            |row| row.get(0),
-        )?;
-        transaction.commit()?;
-        // Reuse the catalog's current-root/native-selection validation. A
-        // publication race fails closed rather than mixing catalog generations.
-        let identity = session_catalog_identity(options, namespace.binding(), &key)?
-            .ok_or_else(|| io::Error::other("source catalog changed"))?;
-        let observed = identity
-            .source_refs
-            .iter()
-            .find(|observed| observed.source.root == root && observed.source.path == path)
-            .ok_or_else(|| io::Error::other("source scope changed"))?;
-        if identity.generation != generation
-            || !matches!(observed.state.as_str(), "cached" | "incomplete")
-            || observed.source.native_id != source.native_id
-            || observed.source.offset != source.offset
-            || observed.source.prefix_sha256 != source.prefix_sha256
-        {
-            return Err(io::Error::other("source observation changed").into());
-        }
-        if let Some(current) = &current {
-            current.validate()?;
-        }
-        Ok(Some(SessionSourceProof {
-            source: observed.source.clone(),
-            dev: source.dev,
-            ino: source.ino,
-            size: source.size,
-            modified_ns: source.modified_ns,
-            changed_ns: source.changed_ns,
-            freshness: CatalogFreshness {
-                state: observed.state.clone(),
-            },
-        }))
-    };
-    read().map_err(|_| Unavailable)
+    warehouse::host_source_proof(options, source_key, root, path)
 }
 
 /// Read intent is separate from native control/source-selection authority.
@@ -240,6 +116,7 @@ pub struct CatalogSessionIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogIdentityError {
     InvalidArguments,
+    RetainedUnverified,
     Unavailable,
     ScopeChanged,
 }
@@ -247,6 +124,7 @@ impl std::fmt::Display for CatalogIdentityError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::InvalidArguments => "Invalid scoped catalog identity arguments.",
+            Self::RetainedUnverified => "retained_identity_unverified: no verified original warehouse identity is available for this key.",
             Self::Unavailable => "The selected catalog observation is unavailable.",
             Self::ScopeChanged => "The configured native source authority changed.",
         })
@@ -263,12 +141,11 @@ pub fn session_catalog_identity(
     source_key: &str,
     canonical_catalog_key: &str,
 ) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
-    catalog_identity(
+    warehouse::host_identity(
         options,
         source_key,
-        canonical_catalog_key,
         CatalogReadScope::Current,
-        false,
+        canonical_catalog_key,
     )
 }
 
@@ -280,12 +157,11 @@ pub fn session_catalog_history_identity(
     source_key: &str,
     canonical_catalog_key: &str,
 ) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
-    catalog_identity(
+    warehouse::host_identity(
         options,
         source_key,
-        canonical_catalog_key,
         CatalogReadScope::RetainedHistory,
-        false,
+        canonical_catalog_key,
     )
 }
 
@@ -492,11 +368,12 @@ pub(crate) fn selection_from_reply(
 /// metadata is labelled cached; source disappearance and changed generations
 /// remain explicit. The query contract matches GET /api/sessions.
 pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> ViewerReply {
-    match Request::parse(query) {
-        Ok(request) => crate::index_rebuild::history_reply(options)
-            .unwrap_or_else(|| page(options, machine, request)),
-        Err(reply) => reply,
-    }
+    warehouse::http::list(
+        &[warehouse::host_source(options, machine)],
+        machine,
+        query,
+        false,
+    )
 }
 
 /// Validate focused catalog arguments before selecting source custody. This
@@ -504,7 +381,7 @@ pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> Vi
 /// It grants no authority; source scope, cursor generation and access still
 /// require validation by the host and `session_catalog_page`.
 pub fn validate_session_catalog_query(query: &str) -> Result<(), ViewerReply> {
-    Request::parse(query).map(|_| ())
+    warehouse::http::validate_list(query)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -976,39 +853,40 @@ pub(crate) fn relative_status(
     .unwrap_or_else(|_| unavailable())
 }
 
-pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
-    page_with_gate(options, machine, request, || Ok(()), None)
-}
-
 pub(crate) struct CatalogSearchAdmission {
     pub(crate) query: String,
     pub(crate) harness: Option<String>,
     pub(crate) paths: Result<Vec<String>, ()>,
 }
 
-pub(crate) fn page_with_gate(
-    options: &Options,
-    machine: &str,
-    request: Request,
-    before_read: impl FnOnce() -> Result<(), ViewerReply>,
-    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
-) -> ViewerReply {
-    if let Err(reply) = before_read() {
-        return reply;
-    }
-    crate::storage::catalog_page(options, machine, &request, on_search)
-}
-
 /// Whether a normal first Catalog page can read the current persisted
-/// publication. Completeness is deliberately not required: source-scoped
-/// consumers can read a published partial Catalog while the producer continues.
-/// Missing, blank or unpublished stores return `false`; invalid, unsupported and
+/// warehouse. Source-scoped consumers can read committed partial coverage
+/// while the producer continues. Missing or blank stores return `false`; invalid, unsupported and
 /// I/O failures propagate. This check does not admit or start an observer.
 pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
-    crate::storage::runtime::RuntimeStore::sqlite(options, None).page_ready()
+    sqlite_readiness(options, |_| Ok(true))
 }
 
 pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
+    sqlite_readiness(options, |transaction| {
+        let (version, generation): (Option<String>, Option<String>) = transaction.query_row(
+            "SELECT (SELECT value FROM meta WHERE key='catalog_version'), (SELECT value FROM meta WHERE key='catalog_generation')",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(io::Error::other)?;
+        if generation.is_none() {
+            return Ok(false);
+        }
+        if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
+            return Err(io::Error::other("catalog version"));
+        }
+        Ok(true)
+    })
+}
+
+fn sqlite_readiness(
+    options: &Options,
+    ready: impl FnOnce(&Connection) -> io::Result<bool>,
+) -> io::Result<bool> {
     if crate::index_rebuild::status(&options.cache).is_some() {
         return Ok(false);
     }
@@ -1038,21 +916,7 @@ pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
     if !crate::events::store::current_or_fresh(&transaction)? {
         return Ok(false);
     }
-    let (version, generation): (Option<String>, Option<String>) = transaction
-        .query_row(
-            "SELECT (SELECT value FROM meta WHERE key='catalog_version'), (SELECT value FROM meta WHERE key='catalog_generation')",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(io::Error::other)?;
-    if generation.is_none() {
-        return Ok(false);
-    }
-    if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
-        return Err(io::Error::other("catalog version"));
-    }
-    transaction.commit().map_err(io::Error::other)?;
-    Ok(true)
+    ready(&transaction)
 }
 
 /// The SQLite snapshot behind the storage port's Catalog reader.
@@ -3767,7 +3631,12 @@ mod tests {
         }
         let reader = Reader(fs::read(&path).unwrap());
         fs::remove_file(&path).unwrap();
-        let archived_trace = crate::session_causal_trace(&fixture.options, "source", &trace_query);
+        let archived_trace = crate::causal_trace::session_causal_trace_with_gate(
+            &fixture.options,
+            "source",
+            &trace_query,
+            || Ok(()),
+        );
         assert_eq!(archived_trace.status, 200);
         let archived_trace: Value = serde_json::from_slice(&archived_trace.body).unwrap();
         assert_eq!(archived_trace["turns"], trace_body["turns"]);
@@ -5145,10 +5014,11 @@ mod tests {
                 evidence.retire();
             }));
         });
-        let observed = crate::session_overview_observe(
+        let observed = crate::overview_repair::session_overview_observe_with_gate(
             &fixture.options,
             "source",
             "sid=selected&scope=retained_history",
+            || Ok(()),
         );
         assert_eq!(observed.status, 503);
         let observed: Value = serde_json::from_slice(&observed.body).unwrap();
@@ -5158,10 +5028,11 @@ mod tests {
         // A later request can observe the committed producer revision and read
         // it normally; the rejected repair did not publish partial metadata.
         assert_eq!(
-            crate::session_overview_observe(
+            crate::overview_repair::session_overview_observe_with_gate(
                 &fixture.options,
                 "source",
-                "sid=selected&scope=retained_history"
+                "sid=selected&scope=retained_history",
+                || Ok(())
             )
             .status,
             200
@@ -9886,6 +9757,5 @@ mod tests {
 mod union;
 pub use union::session_catalog_union;
 
-#[cfg(test)]
 #[path = "catalog_warehouse.rs"]
-mod warehouse_fixture;
+pub(crate) mod warehouse;

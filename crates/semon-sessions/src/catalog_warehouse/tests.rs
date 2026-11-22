@@ -11,6 +11,32 @@ use std::{
     time::Duration,
 };
 
+fn read_list(
+    sources: &[Source<'_>],
+    workspace: &str,
+    request: &Request,
+    cursor: Option<&Continuation>,
+) -> Result<Page, ReadError> {
+    super::read_list(sources, workspace, request, cursor, sources.len() > 1)
+}
+
+fn semantic_transcript(
+    options: &Options,
+    source: &str,
+    query: &str,
+    reader: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+) -> crate::ViewerReply {
+    crate::transcript_range::session_transcript_range_with_gate(
+        options,
+        source,
+        query,
+        reader,
+        mode,
+        || Ok(()),
+    )
+}
+
 struct Fixture {
     dir: PathBuf,
     options: Options,
@@ -119,6 +145,7 @@ impl Fixture {
                 })
                 .collect(),
             repos: BTreeMap::new(),
+            mode: crate::SessionSourceReadMode::LocalThenProvider,
             current_provider: None,
             focused: None,
         }
@@ -140,6 +167,33 @@ fn keys(page: &Page) -> Vec<(&str, &str)> {
         .iter()
         .map(|row| (row.position.key.as_str(), row.position.source.as_str()))
         .collect()
+}
+
+#[test]
+fn workspace_catalog_reports_a_cold_source_alongside_committed_rows() {
+    let mut warm = Fixture::new("workspace-warm");
+    let mut cold = Fixture::new("workspace-cold");
+    warm.claude("ready", "Committed title");
+    let mut sources = [
+        super::host_source(&warm.options, warm.namespace.as_str()),
+        super::host_source(&cold.options, cold.namespace.as_str()),
+    ];
+    sources[1].options.cache = cold.dir.join("unopened.json");
+    let reply = crate::session_catalog_union(&sources, "workspace", "limit=10");
+    let json: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{json}");
+    assert_eq!(json["coverage"]["committed"], 1);
+    assert_eq!(json["coverage"]["pending"], 1);
+    assert_eq!(json["completeness"]["state"], "partial");
+    assert_eq!(json["items"][0]["key"], "ready");
+
+    cold.claude("later", "Newly committed title");
+    sources[1].options.cache = cold.options.cache.clone();
+    let reply = crate::session_catalog_union(&sources, "workspace", "limit=10");
+    let json: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{json}");
+    assert_eq!(json["coverage"]["committed"], 2);
+    assert_eq!(json["coverage"]["pending"], 0);
 }
 
 #[test]
@@ -246,7 +300,8 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
         )
         .unwrap();
         let expected =
-            crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), query);
+            super::super::read_page(&fixture.options, &fixture.namespace, &request(query), None)
+                .unwrap();
         assert_eq!(expected.status, 200, "{query}");
         let body: serde_json::Value = serde_json::from_slice(&expected.body).unwrap();
         let oracle: Vec<_> = body["items"]
@@ -1328,7 +1383,7 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             assert!(actual.model.is_none());
         }
         let mode = crate::SessionSourceReadMode::LocalOrPinnedProvider;
-        let oracle = crate::session_transcript_range_with_mode(
+        let oracle = semantic_transcript(
             &fixture.options,
             fixture.namespace.as_str(),
             &format!("sid={key}&after=0&limit=100"),
@@ -1374,7 +1429,7 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             )
             .unwrap()
             .unwrap();
-            let reply = crate::session_entry_field_with_mode(
+            let reply = crate::transcript_range::session_entry_field_with_gate(
                 &fixture.options,
                 fixture.namespace.as_str(),
                 &format!(
@@ -1384,6 +1439,7 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
                 ),
                 None,
                 mode,
+                || Ok(()),
             );
             assert_eq!(
                 reply.status,
@@ -1395,10 +1451,11 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             assert_eq!(field["text"].as_str(), expanded.text().as_deref());
         }
         let turn = expected[0]["turn"].as_str().unwrap();
-        let reply = crate::session_turn_anchor(
+        let reply = crate::transcript_range::session_turn_anchor_with_gate(
             &fixture.options,
             fixture.namespace.as_str(),
             &format!("sid={key}&turn={}", crate::viewer::percent_encode(turn)),
+            || Ok(()),
         );
         assert_eq!(reply.status, 200);
         let anchor: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
@@ -1493,7 +1550,7 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
     let found = &component.records[0];
     assert_eq!(found.text().as_deref(), Some("Review complete"));
     let oracle = |key| {
-        let reply = crate::session_transcript_range_with_mode(
+        let reply = semantic_transcript(
             &fixture.options,
             fixture.namespace.as_str(),
             &format!("sid={key}&after=0&limit=100"),
@@ -1885,7 +1942,7 @@ fn warehouse_relay_turn_carries_across_pages_at_the_selected_prefix() {
         crate::model::now_ms(),
     )
     .unwrap();
-    let oracle = crate::session_transcript_range_with_mode(
+    let oracle = semantic_transcript(
         &fixture.options,
         fixture.namespace.as_str(),
         "sid=receiver&after=0&limit=100",
@@ -2269,7 +2326,7 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         .unwrap();
     let turn = reply.causal.turn.as_ref().unwrap();
     assert_eq!(turn.address.offset, offsets[0]);
-    let oracle = crate::session_transcript_range_with_mode(
+    let oracle = semantic_transcript(
         &fixture.options,
         fixture.namespace.as_str(),
         "sid=root&after=0&limit=100",
@@ -3871,13 +3928,27 @@ fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
                 .as_ref()
                 .is_some_and(|turn| turn.handoff && turn.address == record.address)
     }));
-    let launch = selected::launch_call(&source, "child").unwrap().unwrap();
+    let launch = selected::launch_call(
+        &selected::ReadView::open(&source).unwrap(),
+        &source,
+        "child",
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(launch.id, "launch");
     assert_eq!(launch.name, "Bash");
     source
         .inventory
         .insert(parent.to_str().unwrap().into(), Availability::Unavailable);
-    assert!(selected::launch_call(&source, "child").unwrap().is_none());
+    assert!(
+        selected::launch_call(
+            &selected::ReadView::open(&source).unwrap(),
+            &source,
+            "child"
+        )
+        .unwrap()
+        .is_none()
+    );
 
     crate::model::observe_catalog(
         &fixture.options,

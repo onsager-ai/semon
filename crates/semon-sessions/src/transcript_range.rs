@@ -96,9 +96,16 @@ pub fn session_transcript_range_with_mode(
     if let Some(reply) = crate::index_rebuild::history_reply(options) {
         return reply;
     }
-    session_transcript_range_with_gate(options, source_key, query, reader, mode, || Ok(()))
+    crate::catalog::warehouse::http::transcript_with_mode(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        reader,
+        mode,
+        false,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_transcript_range_with_gate(
     options: &Options,
     source_key: &str,
@@ -118,9 +125,15 @@ pub(crate) fn session_transcript_range_with_gate(
 /// pass the returned projection generation into the subsequent range read so
 /// a rewrite cannot reinterpret the recorded slot address.
 pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> ViewerReply {
-    session_turn_anchor_with_gate(options, source_key, query, || Ok(()))
+    crate::catalog::warehouse::http::anchor(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        None,
+        None,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_turn_anchor_with_gate(
     options: &Options,
     source_key: &str,
@@ -230,129 +243,6 @@ pub(crate) fn session_turn_anchor_with_gate(
             200,
             json!({"api":1,"source_key":source_key,"catalog_key":key,"turn":turn,"slot":slot,"generation":projection}),
         ))
-    };
-    read().unwrap_or_else(|_| unavailable())
-}
-
-pub(crate) fn session_activity_anchor_with_gate(
-    options: &Options,
-    source_key: &str,
-    query: &str,
-    before_read: impl FnOnce() -> Result<(), ViewerReply>,
-) -> ViewerReply {
-    let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
-        let _scope = crate::selected_read::Scope::ensure();
-        let invalid = || {
-            catalog::error(
-                400,
-                "invalid_arguments",
-                "Supply a session and activity step.",
-                false,
-            )
-        };
-        for name in ["sid", "scope", "generation", "ordinal", "step", "machine"] {
-            if query
-                .split('&')
-                .filter(|part| part.split('=').next() == Some(name))
-                .count()
-                > 1
-            {
-                return Ok(invalid());
-            }
-        }
-        let Some(key) = query_value(query, "sid")
-            .and_then(decoded)
-            .filter(|s| !s.is_empty() && s.len() <= 4096)
-        else {
-            return Ok(invalid());
-        };
-        let Some(generation) = query_value(query, "generation")
-            .and_then(decoded)
-            .filter(|s| !s.is_empty() && s.len() <= 4096)
-        else {
-            return Ok(invalid());
-        };
-        let Some(ordinal) = query_value(query, "ordinal")
-            .and_then(decoded)
-            .and_then(|s| s.parse().ok())
-        else {
-            return Ok(invalid());
-        };
-        let Some(id) = query_value(query, "step")
-            .and_then(decoded)
-            .and_then(|s| serde_json::from_str(&s).ok())
-        else {
-            return Ok(invalid());
-        };
-        if query_value(query, "scope").is_some_and(|scope| scope != "retained_history") {
-            return Ok(invalid());
-        }
-        if let Err(response) = before_read() {
-            return Ok(response);
-        }
-        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
-            .selected_connection(source_key)?;
-        let tx = db.transaction()?;
-        let identity = match catalog::catalog_selection_in_snapshot(
-            options,
-            source_key,
-            &key,
-            crate::CatalogReadScope::RetainedHistory,
-            &tx,
-        ) {
-            Ok(Some((identity, _))) => identity,
-            Ok(None) => {
-                return Ok(catalog::error(
-                    404,
-                    "session_not_found",
-                    "Recorded session unavailable.",
-                    false,
-                ));
-            }
-            Err(_) => return Ok(unavailable()),
-        };
-        let current: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
-                [],
-                |record| record.get(0),
-            )
-            .optional()?;
-        if current.as_deref() != Some(identity.generation.as_str()) {
-            return Ok(reply(
-                200,
-                json!({"available":false,"reason":"stale_transcript"}),
-            ));
-        }
-        let history = crate::history_projection::catalog(&tx, &key)?;
-        let text: Option<String> = match history.as_ref() {
-            Some(text) => Some(text.clone()),
-            None => tx
-                .query_row(
-                    "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                    [&key],
-                    |record| record.get(0),
-                )
-                .optional()?,
-        };
-        let Some(text) = text else {
-            return Ok(reply(
-                200,
-                json!({"available":false,"reason":"stale_transcript"}),
-            ));
-        };
-        let row = serde_json::from_str(&text)?;
-        let result = resolve_step_slot(
-            &tx,
-            &row,
-            history.is_some(),
-            &StepAnchor {
-                generation,
-                ordinal,
-                id,
-            },
-        )?;
-        Ok(reply(200, result))
     };
     read().unwrap_or_else(|_| unavailable())
 }
@@ -517,174 +407,12 @@ pub(crate) fn resolve_step_slot(
 /// bodies are opened. Each page holds at most 100 identities, even when failures
 /// are spread throughout a large transcript.
 pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> ViewerReply {
-    session_annotations_with_gate(options, source_key, query, || Ok(()))
-}
-
-pub(crate) fn session_annotations_with_gate(
-    options: &Options,
-    source_key: &str,
-    query: &str,
-    before_read: impl FnOnce() -> Result<(), ViewerReply>,
-) -> ViewerReply {
-    let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
-        let argument = |name| query_value(query, name).and_then(decoded);
-        let invalid_arguments = || {
-            catalog::error(
-                400,
-                "invalid_arguments",
-                "Use one selected session, retained scope, errors or signals, and limit=1..100.",
-                false,
-            )
-        };
-        for name in [
-            "sid",
-            "machine",
-            "scope",
-            "kind",
-            "after",
-            "limit",
-            "generation",
-        ] {
-            if query
-                .split('&')
-                .filter(|part| part.split('=').next() == Some(name))
-                .count()
-                > 1
-                || query_value(query, name).is_some_and(|value| decoded(value).is_none())
-            {
-                return Ok(invalid_arguments());
-            }
-        }
-        let Some(key) = argument("sid").filter(|key| !key.is_empty() && key.len() <= 4096) else {
-            return Ok(invalid_arguments());
-        };
-        if argument("scope").as_deref() != Some("retained_history") {
-            return Ok(invalid_arguments());
-        }
-        let kind = argument("kind").unwrap_or_default();
-        if !matches!(kind.as_str(), "errors" | "signals") {
-            return Ok(invalid_arguments());
-        }
-        let limit = argument("limit")
-            .map(|value| value.parse::<usize>())
-            .transpose();
-        let after = argument("after")
-            .map(|value| value.parse::<usize>())
-            .transpose();
-        let (Ok(limit), Ok(after)) = (limit, after) else {
-            return Ok(invalid_arguments());
-        };
-        let limit = limit.unwrap_or(100);
-        let after = after.unwrap_or(0);
-        if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
-            return Ok(invalid_arguments());
-        }
-        if let Err(reply) = before_read() {
-            return Ok(reply);
-        }
-        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
-            .selected_connection(source_key)?;
-        let tx = db.transaction()?;
-        let (identity, session) = match catalog::catalog_selection_in_snapshot(
-            options,
-            source_key,
-            &key,
-            crate::CatalogReadScope::RetainedHistory,
-            &tx,
-        ) {
-            Ok(Some(selected)) => selected,
-            Ok(None) => {
-                return Ok(catalog::error(
-                    404,
-                    "session_not_found",
-                    "Recorded session unavailable.",
-                    false,
-                ));
-            }
-            Err(_) => return Ok(unavailable()),
-        };
-        let catalog_generation: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
-            return Ok(stale(ProjectionFence::CatalogPublication));
-        }
-        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
-        let header = if history {
-            "session_history_projections"
-        } else {
-            "session_slot_projections"
-        };
-        let slots = if history {
-            "session_history_slots"
-        } else {
-            "session_slots"
-        };
-        let projection: Option<(String, u32)> = tx
-            .query_row(
-                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
-                [&key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((stored, version)) = projection else {
-            return Ok(unavailable());
-        };
-        if version != VERSION {
-            return Ok(unavailable());
-        }
-        let working = selected_working(&session);
-        let predicate = if kind == "signals" {
-            "json_extract(metadata,'$.recipe.recipe')='Signal'"
-        } else if working {
-            "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome')='Err') OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
-        } else {
-            "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome') IN ('Err','Pending')) OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
-        };
-        // Error membership includes pending calls only when the same qualified
-        // observation renders them unfinished. Fence paging when that changes,
-        // even if the immutable source/slot generation did not move.
-        let generation = if kind == "errors" {
-            error_generation(&entry_generation(&stored), &session)
-        } else {
-            entry_generation(&stored)
-        };
-        if argument("generation").is_some_and(|expected| expected != generation) {
-            return Ok(stale(if kind == "errors" {
-                ProjectionFence::ErrorsGeneration
-            } else {
-                ProjectionFence::ProjectionGeneration
-            }));
-        }
-        let total: i64 = tx.query_row(
-            &format!("SELECT count(*) FROM {slots} WHERE session_key=?1 AND {predicate}"),
-            [&key],
-            |row| row.get(0),
-        )?;
-        let total = usize::try_from(total)?;
-        if after > total {
-            return Ok(invalid_arguments());
-        }
-        let mut statement = tx.prepare(&format!("SELECT slot FROM {slots} WHERE session_key=?1 AND {predicate} ORDER BY slot LIMIT ?2 OFFSET ?3"))?;
-        let entries: Vec<Value> = statement
-            .query_map(
-                rusqlite::params![key, i64::try_from(limit)?, i64::try_from(after)?],
-                |row| Ok(json!({"slot":row.get::<_,i64>(0)?})),
-            )?
-            .collect::<rusqlite::Result<_>>()?;
-        drop(statement);
-        tx.commit()?;
-        let end = after + entries.len();
-        Ok(reply(
-            200,
-            json!({"api":1,"source_key":source_key,"catalog_key":key,"scope":"retained_history","kind":kind,"generation":generation,"total":total,"first":after,"entries":entries,"next_cursor":if end<total {Some(end)}else{None}}),
-        ))
-    };
-    read().unwrap_or_else(|_| unavailable())
+    crate::catalog::warehouse::http::annotations(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        None,
+        None,
+    )
 }
 
 /// A persisted pending recipe never grants live authority. Both transcript
@@ -970,7 +698,9 @@ pub(crate) fn read(
                 true,
             ));
         }
-        Err(CatalogIdentityError::Unavailable) => return Ok(unavailable()),
+        Err(CatalogIdentityError::Unavailable | CatalogIdentityError::RetainedUnverified) => {
+            return Ok(unavailable());
+        }
     };
     #[cfg(test)]
     if let Some(hook) = AFTER_SELECTION.with(|hook| hook.borrow_mut().take()) {
@@ -2348,9 +2078,16 @@ pub fn session_entry_field_with_mode(
     reader: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
 ) -> ViewerReply {
-    session_entry_field_with_gate(options, source_key, query, reader, mode, || Ok(()))
+    crate::catalog::warehouse::http::transcript_with_mode(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        reader,
+        mode,
+        true,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_entry_field_with_gate(
     options: &Options,
     source_key: &str,

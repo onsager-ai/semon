@@ -5,7 +5,6 @@ pub(super) mod identity;
 #[path = "warehouse_maintenance.rs"]
 mod maintenance;
 
-#[cfg(test)]
 pub(crate) use identity::{
     ObservedMember, ObservedPeer, RetainedIdentity, RetainedIdentityError, RetainedPeerError,
     retained_identity, retained_peer,
@@ -20,7 +19,6 @@ thread_local! {
     pub(crate) static SCALE_TIMING: std::cell::Cell<Option<(u128, u128, u64)>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
 pub(crate) const DETAIL: &str = include_str!("warehouse_detail.sql");
 
 pub(super) const SCHEMA: &str = include_str!("warehouse.sql");

@@ -1,4 +1,4 @@
-//! Selected warehouse positions and origin-local byte proofs for comparison tests.
+//! Selected warehouse positions and origin-local byte proofs.
 use super::{
     Availability, CatalogReadScope, Ledger, ReadError, Source, Stat, current_identity, encode,
     index, warehouse,
@@ -26,11 +26,14 @@ pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
-    PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_addressed_window,
-    retained_annotations, retained_latest_page, retained_member_bounds, retained_page,
-    retained_peer_launch_call, retained_peer_launch_in_view, retained_peer_record_at,
-    retained_peer_relay_address, retained_peer_trace_window, retained_peer_window,
-    retained_preview_turns, retained_record_at, retained_relay_in_view, retained_turn,
+    PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_annotations,
+    retained_member_bounds, retained_peer_launch_in_view, retained_peer_trace_window,
+    retained_preview_turns, retained_relay_in_view, retained_turn,
+};
+#[cfg(test)]
+pub(super) use retained::{
+    retained_addressed_window, retained_latest_page, retained_page, retained_peer_launch_call,
+    retained_peer_record_at, retained_peer_relay_address, retained_peer_window, retained_record_at,
 };
 
 const MEMBER_PAGE: i64 = 64;
@@ -173,6 +176,7 @@ impl Cursor {
 
 #[derive(Debug)]
 pub(super) struct Record {
+    pub(super) source: i64,
     pub(super) prompt_anchor: Option<String>,
     pub(super) entry_anchor: Option<String>,
     pub(super) operation: Option<causal::Operation>,
@@ -339,6 +343,7 @@ struct Member {
     current: Ledger,
     reference: SessionSourceRef,
     remote: bool,
+    changed_local: Option<Stat>,
 }
 
 fn decode(ledger: &str) -> Result<Ledger, ReadError> {
@@ -567,6 +572,7 @@ pub(super) fn prompt_title(
             offset,
         },
         &mut bytes_left,
+        &Mutex::new(PAGE_BYTES),
     )?;
     Ok(crate::model::prompt_text(&native)
         .filter(|text| !text.trim().is_empty())
@@ -586,6 +592,7 @@ fn qualified_record(
     source: &Source<'_>,
     proof: RecordProof<'_>,
     bytes_left: &mut usize,
+    proof_budget: &Mutex<usize>,
 ) -> Result<serde_json::Value, ReadError> {
     let RecordProof {
         harness,
@@ -604,7 +611,11 @@ fn qualified_record(
         prefix_sha256: current.prefix,
         tail_sha256: current.tail,
     };
-    let budget = Mutex::new(PAGE_BYTES);
+    if !matches!(source.availability(harness, &carrier)?,
+        Availability::Expected(Some(stat)) if stable_or_grown(&current.stat, &stat))
+    {
+        return Err(ReadError::Restart);
+    }
     let mut reader = PrefixReader::open(
         db,
         source.path,
@@ -613,8 +624,9 @@ fn qualified_record(
             current,
             reference,
             remote: false,
+            changed_local: None,
         }),
-        &budget,
+        proof_budget,
     )?;
     let native = crate::source_reader::read_record_bounded(
         &reader,
@@ -629,15 +641,18 @@ fn qualified_record(
 }
 
 pub(super) fn launch_call(
+    view: &ReadView<'_>,
     source: &Source<'_>,
     child: &str,
 ) -> Result<Option<crate::ToolCall>, ReadError> {
-    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    db.execute_batch("BEGIN DEFERRED").map_err(index)?;
-    let snapshot = super::Snapshot::read(&db, source)?;
-    let Some((owner, harness, native_id)) =
-        current_identity(&db, source, child, Some(&snapshot.paths))?
-    else {
+    let db = view.lock()?;
+    let snapshot = source
+        .focused
+        .is_none()
+        .then(|| super::Snapshot::read(&db, source))
+        .transpose()?;
+    let paths = snapshot.as_ref().map(|snapshot| snapshot.paths.as_str());
+    let Some((owner, harness, native_id)) = current_identity(&db, source, child, paths)? else {
         return Ok(None);
     };
     if harness != "codex" {
@@ -683,17 +698,18 @@ pub(super) fn launch_call(
                 "SELECT s.carrier,s.ledger,d.native_id,c.pos,c.block,c.call_id,c.tool
              FROM lineage_member root CROSS JOIN lineage_member m ON m.component=root.component
              CROSS JOIN warehouse_source s ON s.source=m.source
-             CROSS JOIN json_each(?2) authorized ON authorized.value=s.carrier
+             CROSS JOIN warehouse_current w ON w.source=s.source AND w.path=s.carrier
              CROSS JOIN dim_session d ON d.source=m.source
              CROSS JOIN fact_claude_call c ON c.source=m.source AND c.tool IN ('Bash','Skill')
              WHERE root.source=?1 AND c.pos<json_extract(s.ledger,'$.offset')
+               AND (?2 IS NULL OR s.carrier IN (SELECT value FROM json_each(?2)))
              ORDER BY d.first_ts,d.continued DESC,d.native_id,c.pos,c.block
              LIMIT ?3",
             )
             .map_err(index)?;
         statement
             .query_map(
-                params![parent, snapshot.paths, crate::handoff::MAX_CALLS as i64 + 1],
+                params![parent, paths, crate::handoff::MAX_CALLS as i64 + 1],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -713,54 +729,64 @@ pub(super) fn launch_call(
     if calls.len() > crate::handoff::MAX_CALLS {
         return Err(index("Selected launch candidate budget exhausted"));
     }
-    let db = chunk_proofs::Snapshot::new(db);
-    let mut bytes_left = crate::handoff::MAX_INPUT_BYTES;
-    let native = qualified_record(
-        db.clone(),
-        source,
-        RecordProof {
-            harness: "codex",
-            carrier,
-            ledger: &ledger,
-            native_id,
-            offset,
-        },
-        &mut bytes_left,
-    )?;
-    let Some(prompt) = crate::user_text(&native)
-        .and_then(crate::parse_marker)
-        .and_then(|marker| marker.handoff)
-    else {
-        return Ok(None);
-    };
-    let mut matcher = crate::handoff::Matcher::new(&prompt, cwd.as_deref(), start);
-    for (carrier, ledger, native_id, offset, block, id, name) in calls {
+    drop(db);
+    let mut shared = view.body_bytes.lock().map_err(index)?;
+    let allowed = crate::handoff::MAX_INPUT_BYTES.min(*shared);
+    let mut bytes_left = allowed;
+    let result = (|| {
         let native = qualified_record(
-            db.clone(),
+            view.db.clone(),
             source,
             RecordProof {
-                harness: "claude",
+                harness: "codex",
                 carrier,
                 ledger: &ledger,
                 native_id,
                 offset,
             },
             &mut bytes_left,
+            &view.proof_bytes,
         )?;
-        let Some(input) = crate::model::tool_input(&native, block as usize) else {
-            continue;
+        let Some(prompt) = crate::user_text(&native)
+            .and_then(crate::parse_marker)
+            .and_then(|marker| marker.handoff)
+        else {
+            return Ok(None);
         };
-        if let Some(tool) = matcher.consider(&crate::handoff::Call {
-            tool: crate::ToolCall { id, name },
-            time: crate::events::record_time(&native),
-            input: input.to_string(),
-        }) {
-            return Ok(Some(tool));
+        let mut matcher = crate::handoff::Matcher::new(&prompt, cwd.as_deref(), start);
+        for (carrier, ledger, native_id, offset, block, id, name) in calls {
+            let native = qualified_record(
+                view.db.clone(),
+                source,
+                RecordProof {
+                    harness: "claude",
+                    carrier,
+                    ledger: &ledger,
+                    native_id,
+                    offset,
+                },
+                &mut bytes_left,
+                &view.proof_bytes,
+            )?;
+            let Some(input) = crate::model::tool_input(&native, block as usize) else {
+                continue;
+            };
+            if let Some(tool) = matcher.consider(&crate::handoff::Call {
+                tool: crate::ToolCall { id, name },
+                time: crate::events::record_time(&native),
+                input: input.to_string(),
+            }) {
+                return Ok(Some(tool));
+            }
         }
-    }
-    Ok(matcher.finish())
+        Ok(matcher.finish())
+    })();
+    *shared -= allowed - bytes_left;
+    source.validate_authority()?;
+    result
 }
 
+#[cfg(test)]
 pub(super) fn page(
     options: &Options,
     source: &Source<'_>,
@@ -811,6 +837,7 @@ pub(super) fn transcript_window(
     }
 }
 
+#[cfg(test)]
 pub(super) fn latest_page(
     options: &Options,
     source: &Source<'_>,
@@ -828,6 +855,7 @@ pub(super) fn latest_page(
     )
 }
 
+#[cfg(test)]
 pub(super) fn record_at(
     options: &Options,
     source: &Source<'_>,
@@ -1227,6 +1255,7 @@ fn turn_candidates(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn tool_results(
     options: &Options,
     source: &Source<'_>,
@@ -1252,6 +1281,7 @@ pub(super) enum Evidence<'a> {
     Call(&'a str),
 }
 
+#[cfg(test)]
 pub(super) fn evidence_at(
     options: &Options,
     source: &Source<'_>,
@@ -1606,18 +1636,28 @@ fn read_current(
                 let committed = committed_prefix(&mut prefix, id, view)?;
                 let sidecar: i64 = row.get(7).map_err(index)?;
                 let path = relative(options, &harness, &carrier).ok_or(ReadError::Restart)?;
-                let remote = match source.availability(&harness, &carrier)? {
+                let (mut remote, changed_local) = match source.availability(&harness, &carrier)? {
                     Availability::Expected(Some(observed))
                         if stable_or_grown(&current.stat, &observed)
                             && raw_stat(Path::new(&carrier))
                                 .is_ok_and(|actual| stable_or_grown(&observed, &actual)) =>
                     {
-                        false
+                        (false, None)
                     }
                     Availability::Expected(None)
-                        if provider.is_some() && local_missing(&carrier) =>
+                        if provider.is_some()
+                            && (source.provider_only() || local_missing(&carrier)) =>
                     {
-                        true
+                        (true, None)
+                    }
+                    Availability::Expected(Some(observed))
+                        if matches!(
+                            source.mode,
+                            crate::SessionSourceReadMode::LocalOrPinnedProvider
+                        ) && raw_stat(Path::new(&carrier))
+                            .is_ok_and(|actual| actual == observed) =>
+                    {
+                        (false, Some(observed))
                     }
                     _ => return Err(ReadError::Restart),
                 };
@@ -1637,6 +1677,7 @@ fn read_current(
                     sidecar,
                     &member_id,
                     remote,
+                    changed_local,
                 ))?);
                 let mut witness_prefix = Prefix {
                     source: id,
@@ -1662,11 +1703,20 @@ fn read_current(
                     cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))
                 {
                     witness_prefix.provider.clone_from(&prior.provider);
-                    if prior != &witness_prefix || remote != prior.provider.is_some() {
+                    if prior != &witness_prefix
+                        || (changed_local.is_none() && remote != prior.provider.is_some())
+                    {
                         return Err(ReadError::Restart);
                     }
                     if let Some(pin) = &prior.provider {
-                        prior_provider.push((id, carrier.clone(), reference.clone(), pin));
+                        remote = true;
+                        prior_provider.push((
+                            id,
+                            carrier.clone(),
+                            changed_local,
+                            reference.clone(),
+                            pin,
+                        ));
                     }
                     confirmed += 1;
                 }
@@ -1681,6 +1731,7 @@ fn read_current(
                     current,
                     reference,
                     remote,
+                    changed_local,
                 });
                 let mut keep = |(position, kind)| {
                     candidates.insert(position, (kind, member.clone(), witness_prefix.clone()));
@@ -1868,12 +1919,12 @@ fn read_current(
         return Err(ReadError::Restart);
     }
     let mut provider_pins = BTreeMap::new();
-    for (id, carrier, reference, expected) in prior_provider {
+    for (id, carrier, changed_local, reference, expected) in prior_provider {
         let observed = pin_provider(provider.as_ref().ok_or(ReadError::Restart)?, &reference)?;
         if expected != &observed {
             return Err(ReadError::Restart);
         }
-        provider_pins.insert(id, (carrier, observed));
+        provider_pins.insert(id, (carrier, changed_local, observed));
     }
     if matches!(target, Target::ToolResults(_)) && candidates.len() == capacity {
         return Err(index("Selected tool result budget exhausted"));
@@ -1965,30 +2016,51 @@ fn read_current(
     let mut readers = BTreeMap::new();
     let mut bytes_left = read_view.body_bytes.lock().map_err(index)?;
     let mut read_body = |id, member: &Arc<Member>, offset| {
-        let (reader, pin): (&dyn SessionSourceReader, Option<ProviderPin>) = if member.remote {
-            let provider = provider.as_ref().ok_or(ReadError::Restart)?;
-            let (_, pin) = match provider_pins.entry(id) {
-                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => entry.insert((
-                    member.carrier.clone(),
-                    pin_provider(provider, &member.reference)?,
-                )),
-            };
-            (provider, Some(pin.clone()))
-        } else {
-            let reader = match readers.entry(id) {
-                std::collections::btree_map::Entry::Occupied(reader) => reader.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(PrefixReader::open(
-                        read_view.db.clone(),
-                        source.path,
-                        member.clone(),
-                        &read_view.proof_bytes,
-                    )?)
+        if !member.remote
+            && !provider_pins.contains_key(&id)
+            && let std::collections::btree_map::Entry::Vacant(entry) = readers.entry(id)
+        {
+            let local = PrefixReader::open(
+                read_view.db.clone(),
+                source.path,
+                member.clone(),
+                &read_view.proof_bytes,
+            )
+            .and_then(|mut reader| {
+                if member.changed_local.is_some() {
+                    reader
+                        .read_range(&member.reference, None, offset, 1)
+                        .map_err(body_error)?;
+                    reader.finish().map_err(body_error)?;
                 }
+                Ok(reader)
+            });
+            match local {
+                Ok(reader) => {
+                    entry.insert(reader);
+                }
+                Err(ReadError::Restart)
+                    if provider.is_some()
+                        && member.changed_local.is_some()
+                        && raw_stat(Path::new(&member.carrier)).ok() == member.changed_local => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let (reader, pin): (&dyn SessionSourceReader, Option<ProviderPin>) =
+            if let Some(reader) = readers.get(&id) {
+                (reader, None)
+            } else {
+                let provider = provider.as_ref().ok_or(ReadError::Restart)?;
+                let (_, _, pin) = match provider_pins.entry(id) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => entry.insert((
+                        member.carrier.clone(),
+                        member.changed_local,
+                        pin_provider(provider, &member.reference)?,
+                    )),
+                };
+                (provider, Some(pin.clone()))
             };
-            (reader, None)
-        };
         let native = crate::source_reader::read_record_bounded(
             reader,
             &member.reference,
@@ -2161,6 +2233,7 @@ fn read_current(
             }
         }
         records.push(Record {
+            source: position.source,
             prompt_anchor: anchors.remove(&position),
             entry_anchor,
             operation,
@@ -2178,6 +2251,7 @@ fn read_current(
             native,
         });
     }
+    #[cfg(test)]
     AFTER_BODY.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {
             hook();
@@ -2186,9 +2260,13 @@ fn read_current(
     for reader in readers.values_mut() {
         reader.finish().map_err(body_error)?;
     }
-    if provider_pins
-        .values()
-        .any(|(carrier, _)| !local_missing(carrier))
+    if !source.provider_only()
+        && provider_pins
+            .values()
+            .any(|(carrier, observed, _)| match observed {
+                Some(observed) => raw_stat(Path::new(carrier)).ok().as_ref() != Some(observed),
+                None => !local_missing(carrier),
+            })
     {
         return Err(ReadError::Restart);
     }
@@ -2297,8 +2375,10 @@ fn body_error(error: io::Error) -> ReadError {
     }
 }
 
+#[cfg(test)]
 type TestHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
 
+#[cfg(test)]
 thread_local! {
     pub(super) static AFTER_BODY: TestHook = std::cell::RefCell::new(None);
 }
@@ -2328,7 +2408,10 @@ impl<'a> PrefixReader<'a> {
             .map_err(|_| ReadError::Restart)?;
         let observed = Stat::from_metadata(&file.metadata().map_err(|_| ReadError::Restart)?)
             .map_err(|_| ReadError::Restart)?;
-        if !stable_or_grown(&member.current.stat, &observed) {
+        if member.changed_local.map_or_else(
+            || !stable_or_grown(&member.current.stat, &observed),
+            |expected| expected != observed || observed.size < member.current.offset,
+        ) {
             return Err(ReadError::Restart);
         }
         let proof = chunk_proofs::Focused::with_db(db, cache, &member.carrier, &member.current)

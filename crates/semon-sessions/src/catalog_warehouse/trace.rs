@@ -335,7 +335,6 @@ pub(super) fn recorded_end(
     // A Codex terminal fact names the same native turn as a reducer-qualified
     // start. Stop at the next human turn so a later task cannot close this one.
     if component.harness != "codex"
-        || component.member_count != 1
         || root.causal.turn.as_ref().is_none_or(|turn| turn.handoff)
         || root.prompt_anchor.is_none()
     {
@@ -347,27 +346,12 @@ pub(super) fn recorded_end(
         i64::try_from(root.address.offset).map_err(super::index)?,
         i64::try_from(root.reference.offset).map_err(super::index)?,
     );
-    let source_id = if component.identity.read_scope == CatalogReadScope::RetainedHistory {
-        let identity = crate::events::store::warehouse::retained_identity(
-            &tx,
-            &source.namespace,
-            &component.identity.catalog_key,
-        )
-        .map_err(super::retained_error)?;
-        identity.owner
-    } else {
-        let Some((owner, _, _)) =
-            super::current_identity(&tx, source, &component.identity.catalog_key, None)?
-        else {
-            return Ok((unavailable(), false));
-        };
-        owner
-    };
+    let source_id = root.source;
     let next: Option<i64> = tx.query_row(
         "SELECT min(pos) FROM fact_prompt WHERE source=?1 AND pos>?2 AND pos<?3 AND kind IN ('user','ask')",
         params![source_id, start, limit], |row| row.get(0),
     ).map_err(super::index)?;
-    let last = next.is_none();
+    let last = next.is_none() && component.member_count == 1;
     let owned_turn = tx
         .query_row(
             "WITH boundary AS (
@@ -882,12 +866,12 @@ fn refused_relay_id(address: &selected::Address, block: u32) -> String {
 fn current_launch_evidence(
     view: &selected::ReadView<'_>,
     source: &Source<'_>,
-    child: &str,
+    child_key: &str,
     parent: &str,
 ) -> Result<Value, ReadError> {
     let locate = || -> Result<Option<(selected::Address, u32)>, ReadError> {
         let tx = view.lock()?;
-        let Some((child, _, _)) = super::current_identity(&tx, source, child, None)? else {
+        let Some((child, _, _)) = super::current_identity(&tx, source, child_key, None)? else {
             return Ok(None);
         };
         let Some((parent, harness, _)) = super::current_identity(&tx, source, parent, None)? else {
@@ -897,15 +881,24 @@ fn current_launch_evidence(
         let Some(edge) = graph.parent(child)? else {
             return Ok(None);
         };
-        let Some(call) = edge
-            .call
-            .filter(|_| matches!(edge.method.as_str(), "native" | "marker"))
-        else {
-            return Ok(None);
-        };
-        if graph.owner(edge.source)? != Some(parent) {
+        if !matches!(edge.method.as_str(), "native" | "marker")
+            || graph.owner(edge.source)? != Some(parent)
+        {
             return Ok(None);
         }
+        let marker = edge.method == "marker";
+        let call = edge.call;
+        drop(graph);
+        drop(tx);
+        let call = match call {
+            Some(call) => call,
+            None if marker => match selected::launch_call(view, source, child_key)? {
+                Some(call) => call.id,
+                None => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+        let tx = view.lock()?;
         let mut query = tx.prepare_cached(
             "SELECT s.carrier,c.pos,r.occurrence,c.block
              FROM lineage_member root CROSS JOIN lineage_member m USING(component)
@@ -940,8 +933,10 @@ fn current_launch_evidence(
             .then_some((address, block)))
     };
     let unavailable = || json!({"catalog_key":parent,"reason":"No exact launch call could be proven in the selected prefixes."});
-    let Some((address, block)) = locate()? else {
-        return Ok(unavailable());
+    let (address, block) = match locate() {
+        Ok(Some(located)) => located,
+        Ok(None) | Err(ReadError::Restart) => return Ok(unavailable()),
+        Err(error) => return Err(error),
     };
     let window = match selected::trace_record(view, source, parent, &address) {
         Ok(Some(window)) => window,

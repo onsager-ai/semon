@@ -2,15 +2,15 @@
 //! readers follow one requested turn, never a workspace model or native body.
 use crate::{
     Options,
-    events::EventCache,
     model::{Handoff, Session, Turn},
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
+use {crate::events::EventCache, rusqlite::OpenFlags, serde::Serialize};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_trace_headers(session_key TEXT PRIMARY KEY, generation TEXT NOT NULL, source_generation TEXT NOT NULL, metadata TEXT NOT NULL) STRICT;
@@ -666,6 +666,7 @@ pub(crate) fn range_context(
     )
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 struct TraceParticipantCost {
     usd: Option<f64>,
@@ -673,6 +674,7 @@ struct TraceParticipantCost {
 }
 
 /// Qualified whole-session observation, never a receiving-turn interval.
+#[cfg(test)]
 #[derive(Serialize)]
 struct TraceParticipantExtent {
     scope: &'static str,
@@ -681,6 +683,7 @@ struct TraceParticipantExtent {
     recorded_activity: TraceParticipantActivity,
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum TraceParticipantActivity {
@@ -691,6 +694,7 @@ enum TraceParticipantActivity {
     Unavailable,
 }
 
+#[cfg(test)]
 fn trace_participant_activity(header: &Value) -> TraceParticipantActivity {
     let Some(busy) = header.get("busy").filter(|value| {
         value.as_array().is_some_and(|values| values.len() <= 256)
@@ -714,11 +718,13 @@ fn trace_participant_activity(header: &Value) -> TraceParticipantActivity {
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct TraceMissing {
     absent_receiving_join: bool,
     other: bool,
 }
+#[cfg(test)]
 impl TraceMissing {
     fn receiving_join(&mut self, matches: usize) {
         if matches == 0 {
@@ -736,6 +742,7 @@ impl TraceMissing {
 }
 
 /// Allowlisted Catalog facts never become a joined Session or causal activity.
+#[cfg(test)]
 #[derive(Serialize)]
 struct TraceParticipantSummary {
     name: String,
@@ -747,6 +754,7 @@ struct TraceParticipantSummary {
     observed_extent: TraceParticipantExtent,
 }
 
+#[cfg(test)]
 fn trace_participant_summary(
     row: &crate::model::summary::CatalogRow,
     status: Value,
@@ -775,9 +783,15 @@ fn trace_participant_summary(
 /// At most 100 connected turns and 1,000 edges. Frontiers support explicit
 /// further exploration; absent or ambiguous recorded joins remain absent.
 pub fn session_causal_trace(options: &Options, source_key: &str, query: &str) -> ViewerReply {
-    session_causal_trace_with_gate(options, source_key, query, || Ok(()))
+    crate::catalog::warehouse::http::trace(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        None,
+        None,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_causal_trace_with_gate(
     options: &Options,
     source_key: &str,
@@ -1117,6 +1131,7 @@ pub(crate) fn session_causal_trace_with_gate(
     }
 }
 
+#[cfg(test)]
 fn parse_session_causal_trace_query(query: &str) -> Result<(String, String), ()> {
     let mut args = BTreeMap::new();
     for pair in query.split('&') {

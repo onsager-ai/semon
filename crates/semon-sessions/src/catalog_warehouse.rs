@@ -1,4 +1,4 @@
-//! Fixture adapter for the committed warehouse. The host supplies authorized
+//! Viewer reads over the committed warehouse. The host supplies authorized
 //! inventory and repository observations. Each source is read independently.
 use super::{CatalogReadScope, Request};
 use crate::{
@@ -151,6 +151,7 @@ pub(super) struct Source<'a> {
     pub(super) options: &'a crate::Options,
     pub(super) inventory: BTreeMap<String, Availability>,
     pub(super) repos: BTreeMap<String, String>,
+    pub(super) mode: crate::SessionSourceReadMode,
     pub(super) current_provider: Option<&'a dyn crate::SessionSourceReader>,
     focused: Option<FocusedAuthority>,
 }
@@ -178,9 +179,20 @@ impl<'a> Source<'a> {
             options,
             inventory: BTreeMap::new(),
             repos: BTreeMap::new(),
+            mode: crate::SessionSourceReadMode::LocalThenProvider,
             current_provider,
             focused: Some(FocusedAuthority { recorded }),
         })
+    }
+
+    fn with_mode(mut self, mode: crate::SessionSourceReadMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    fn provider_only(&self) -> bool {
+        self.current_provider.is_some()
+            && matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
     }
 
     fn discover(
@@ -247,17 +259,11 @@ impl<'a> Source<'a> {
                 .copied()
                 .unwrap_or(Availability::Unavailable));
         };
-        let Some(path) = selected::relative(self.options, harness, carrier) else {
+        if !self.path_authorized(authority, harness, carrier)? {
             return Ok(Availability::Unavailable);
-        };
-        if harness == "codex"
-            && let Some(recorded) = &authority.recorded
-            && recorded
-                .codex_current(path)
-                .map_err(|_| ReadError::Restart)?
-                == Some(false)
-        {
-            return Ok(Availability::Unavailable);
+        }
+        if self.provider_only() {
+            return Ok(Availability::Expected(None));
         }
         match crate::open_input(std::path::Path::new(carrier))
             .and_then(|file| Stat::from_metadata(&file.metadata()?))
@@ -277,6 +283,26 @@ impl<'a> Source<'a> {
             }
             Err(error) => Err(index(error)),
         }
+    }
+
+    fn path_authorized(
+        &self,
+        authority: &FocusedAuthority,
+        harness: &str,
+        carrier: &str,
+    ) -> Result<bool, ReadError> {
+        let Some(path) = selected::relative(self.options, harness, carrier) else {
+            return Ok(false);
+        };
+        if harness == "codex"
+            && let Some(recorded) = &authority.recorded
+        {
+            return Ok(recorded
+                .codex_current(path)
+                .map_err(|_| ReadError::Restart)?
+                != Some(false));
+        }
+        Ok(true)
     }
 
     fn validate_authority(&self) -> Result<(), ReadError> {
@@ -1461,6 +1487,7 @@ pub(super) fn read_list(
     workspace: &str,
     request: &Request,
     cursor: Option<&Continuation>,
+    workspace_read: bool,
 ) -> Result<Page, ReadError> {
     debug_assert_eq!(request.scope, CatalogReadScope::Current);
     read_pages(
@@ -1468,6 +1495,7 @@ pub(super) fn read_list(
         workspace,
         request,
         cursor,
+        workspace_read,
         |row| &row.position,
         |tx, source, boundary| {
             let snapshot = Snapshot::read(tx, source)?;
@@ -1499,6 +1527,7 @@ fn read_retained_list(
     workspace: &str,
     request: &Request,
     cursor: Option<&Continuation>,
+    workspace_read: bool,
 ) -> Result<Page<RetainedRow>, ReadError> {
     debug_assert_eq!(request.scope, CatalogReadScope::RetainedHistory);
     read_pages(
@@ -1506,6 +1535,7 @@ fn read_retained_list(
         workspace,
         request,
         cursor,
+        workspace_read,
         |row| &row.position,
         |tx, source, boundary| retained_rows(tx, source, request, boundary),
     )
@@ -1619,6 +1649,7 @@ fn read_pages<T>(
     workspace: &str,
     request: &Request,
     cursor: Option<&Continuation>,
+    workspace_read: bool,
     position: fn(&T) -> &Position,
     read: impl Fn(&Connection, &Source<'_>, Option<&Boundary>) -> Result<SourcePage<T>, ReadError>,
 ) -> Result<Page<T>, ReadError> {
@@ -1655,11 +1686,32 @@ fn read_pages<T>(
     let (mut rows, mut total, mut examined, mut coverage, mut frontier) =
         (Vec::new(), 0, 0, Coverage::default(), None::<Boundary>);
     for source in ordered {
-        let mut db =
-            Connection::open_with_flags(source.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(index)?;
+        let mut db = match Connection::open_with_flags(
+            source.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(db) => db,
+            Err(error) => {
+                if workspace_read
+                    && std::fs::metadata(source.path)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    digest.update(encode(&(source.namespace.binding(), "pending"))?);
+                    coverage.pending += source.inventory.len().max(1);
+                    source.validate_authority()?;
+                    continue;
+                }
+                return Err(index(error));
+            }
+        };
         list_functions(&db).map_err(index)?;
         let tx = db.transaction().map_err(index)?;
+        if workspace_read && !crate::events::store::current_or_fresh(&tx).map_err(index)? {
+            digest.update(encode(&(source.namespace.binding(), "pending"))?);
+            coverage.pending += source.inventory.len().max(1);
+            source.validate_authority()?;
+            continue;
+        }
         let ((local, count, scanned, local_next), source_coverage, revision) =
             read(&tx, source, cursor.map(|cursor| &cursor.boundary))?;
         digest.update(revision);
@@ -1721,6 +1773,7 @@ fn read_pages<T>(
     })
 }
 
+#[cfg(test)]
 pub(super) fn identity(
     source: &Source<'_>,
     scope: CatalogReadScope,
@@ -1816,6 +1869,120 @@ fn focused_members(
     }
     source.validate_authority()?;
     Ok((!references.is_empty()).then_some(references))
+}
+
+pub(crate) fn host_source(options: &crate::Options, key: &str) -> crate::OverviewSource {
+    crate::OverviewSource {
+        key: key.into(),
+        label: key.into(),
+        options: options.clone(),
+        up: true,
+    }
+}
+
+pub(super) fn host_source_proof(
+    options: &crate::Options,
+    source_key: &str,
+    harness: &str,
+    relative: &str,
+) -> Result<Option<crate::SessionSourceProof>, crate::CatalogIdentityError> {
+    use crate::CatalogIdentityError as Error;
+    let namespace = Namespace::new(source_key).map_err(|_| Error::InvalidArguments)?;
+    let root = crate::InputRoot::parse(harness).ok_or(Error::InvalidArguments)?;
+    if relative.len() > 4096 || !crate::is_input_path(harness, relative) {
+        return Err(Error::InvalidArguments);
+    }
+    let carrier = root.home(options).join(relative);
+    let carrier = carrier.to_str().ok_or(Error::InvalidArguments)?;
+    if crate::index_rebuild::status(&options.cache).is_some() {
+        return Err(Error::Unavailable);
+    }
+    let path = crate::events::EventCache::path(&options.cache);
+    let source =
+        Source::focused(namespace, &path, options, None).map_err(|_| Error::Unavailable)?;
+    let recorded = source
+        .focused
+        .as_ref()
+        .and_then(|authority| authority.recorded.as_ref());
+    if recorded.is_some_and(|facts| {
+        !facts.facts_known() || (harness == "codex" && !facts.selection_known())
+    }) {
+        return Err(Error::Unavailable);
+    }
+    let read = || -> Result<_, ReadError> {
+        let view = selected::ReadView::open(&source)?;
+        let tx = view.lock()?;
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT s.ledger,d.native_id FROM warehouse_current c
+             CROSS JOIN warehouse_source s ON s.source=c.source
+             CROSS JOIN dim_session d ON d.source=s.source AND d.harness=s.harness
+             CROSS JOIN lineage_member m ON m.source=s.source
+             WHERE c.path=?1 AND s.origin=?2 AND s.harness=?3 AND s.carrier=c.path",
+                params![carrier, source.namespace.binding(), harness],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(index)?;
+        let Some((encoded, native_id)) = row else {
+            return Ok(None);
+        };
+        let ledger: Ledger = serde_json::from_str(&encoded).map_err(index)?;
+        if crate::events::store::committed_ledger(&tx, carrier)
+            .map_err(index)?
+            .is_none_or(|(committed, _)| committed != ledger)
+        {
+            return Err(ReadError::Restart);
+        }
+        let Availability::Expected(Some(stat)) = source.availability(harness, carrier)? else {
+            return Err(ReadError::Restart);
+        };
+        if !selected::stable_or_grown(&ledger.stat, &stat) {
+            return Err(ReadError::Restart);
+        }
+        source.validate_authority()?;
+        let state = if ledger.stat.size == ledger.offset && stat == ledger.stat {
+            "cached"
+        } else {
+            "incomplete"
+        };
+        Ok(Some(crate::SessionSourceProof {
+            dev: ledger.stat.dev,
+            ino: ledger.stat.ino,
+            size: ledger.stat.size,
+            modified_ns: ledger.stat.modified_ns,
+            changed_ns: ledger.stat.changed_ns,
+            freshness: crate::CatalogFreshness {
+                state: state.into(),
+            },
+            source: observation(harness, relative, native_id, ledger, state).source,
+        }))
+    };
+    read().map_err(|_| Error::Unavailable)
+}
+
+pub(super) fn host_identity(
+    options: &crate::Options,
+    source_key: &str,
+    scope: CatalogReadScope,
+    key: &str,
+) -> Result<Option<crate::CatalogSessionIdentity>, crate::CatalogIdentityError> {
+    use crate::CatalogIdentityError as Error;
+    if !crate::session_route::identifier(key) {
+        return Err(Error::InvalidArguments);
+    }
+    let namespace = Namespace::new(source_key).map_err(|_| Error::InvalidArguments)?;
+    if crate::index_rebuild::status(&options.cache).is_some() {
+        return Err(Error::Unavailable);
+    }
+    let path = crate::events::EventCache::path(&options.cache);
+    let source =
+        Source::focused(namespace, &path, options, None).map_err(|_| Error::Unavailable)?;
+    focused_identity(&source, scope, key).map_err(|error| match error {
+        ReadError::Restart => Error::ScopeChanged,
+        ReadError::RetainedUnverified => Error::RetainedUnverified,
+        _ => Error::Unavailable,
+    })
 }
 
 pub(super) fn focused_identity(
@@ -2017,9 +2184,62 @@ fn current_identity_witness(
         key,
         identity,
         incarnation,
-        references,
+        references
+            .iter()
+            .map(|reference| &reference.source)
+            .collect::<Vec<_>>(),
     ))?);
     Ok(format!("{digest:x}"))
+}
+
+pub(crate) fn host_resolve_native(
+    options: &crate::Options,
+    source_key: &str,
+    harness: &str,
+    native_id: &str,
+    scope: CatalogReadScope,
+) -> Result<crate::CatalogNativeResolution, crate::CatalogIdentityError> {
+    use crate::{CatalogIdentityError as Error, CatalogNativeResolutionState as State};
+    if !crate::native_resolution::valid_resolution_arguments(source_key, harness, native_id) {
+        return Err(Error::InvalidArguments);
+    }
+    if crate::index_rebuild::status(&options.cache).is_some() {
+        return Err(Error::Unavailable);
+    }
+    let path = crate::events::EventCache::path(&options.cache);
+    let namespace = Namespace::new(source_key).map_err(|_| Error::InvalidArguments)?;
+    let source =
+        Source::focused(namespace, &path, options, None).map_err(|_| Error::Unavailable)?;
+    let matches =
+        resolve_native(&source, scope, harness, native_id).map_err(|error| match error {
+            ReadError::Restart => Error::ScopeChanged,
+            ReadError::RetainedUnverified => Error::RetainedUnverified,
+            _ => Error::Unavailable,
+        })?;
+    let (state, catalog_key, generation) = match matches.as_slice() {
+        [] => (State::Pending, None, None),
+        [identity] => {
+            let state = match identity.owner_qualification {
+                crate::catalog::CatalogOwnerQualification::Qualified => State::Resolved,
+                crate::catalog::CatalogOwnerQualification::Provisional => State::Provisional,
+            };
+            (
+                state,
+                Some(identity.catalog_key.clone()),
+                Some(identity.generation.clone()),
+            )
+        }
+        _ => (State::Ambiguous, None, None),
+    };
+    Ok(crate::CatalogNativeResolution {
+        state,
+        source_key: source_key.into(),
+        harness: harness.into(),
+        native_id: native_id.into(),
+        read_scope: scope,
+        catalog_key,
+        generation,
+    })
 }
 
 pub(super) fn resolve_native(
@@ -2105,6 +2325,7 @@ pub(super) struct FamilyPrice {
 
 /// Read inclusive and shared pricing for a selected current family. Keep
 /// this on the selected adapter so listing a page does not walk every subtree.
+#[cfg(test)]
 pub(super) fn family_price(
     source: &Source<'_>,
     key: &str,
@@ -2252,10 +2473,9 @@ fn selected_family_price(
 }
 
 fn retained_error(error: warehouse::RetainedIdentityError) -> ReadError {
-    if error.code() == "retained_identity_unverified" {
-        ReadError::RetainedUnverified
-    } else {
-        index(error)
+    match error {
+        warehouse::RetainedIdentityError::Unverified => ReadError::RetainedUnverified,
+        warehouse::RetainedIdentityError::Index(error) => index(error),
     }
 }
 
@@ -2281,6 +2501,7 @@ fn current_identity(
     Ok(found)
 }
 
+#[cfg(test)]
 #[path = "catalog_warehouse/tests.rs"]
 mod tests;
 
@@ -2288,7 +2509,7 @@ mod tests;
 mod selected;
 
 #[path = "catalog_warehouse/http.rs"]
-mod http;
+pub(crate) mod http;
 
 #[path = "catalog_warehouse/trace.rs"]
 mod trace;

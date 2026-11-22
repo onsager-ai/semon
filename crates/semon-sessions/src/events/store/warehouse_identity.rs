@@ -298,7 +298,6 @@ pub(super) fn retire(tx: &Transaction<'_>, source: i64) -> rusqlite::Result<()> 
     })
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RetainedIdentity {
     pub(crate) binding: i64,
@@ -310,14 +309,12 @@ pub(crate) struct RetainedIdentity {
     trace_peers: String,
 }
 
-#[cfg(test)]
 impl RetainedIdentity {
     pub(crate) fn observed_peers(&self) -> rusqlite::Result<BTreeMap<String, ObservedPeer>> {
         serde_json::from_str(&self.trace_peers).map_err(data)
     }
 }
 
-#[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum RetainedIdentityError {
     Unverified,
@@ -334,7 +331,6 @@ impl RetainedIdentityError {
     }
 }
 
-#[cfg(test)]
 impl std::fmt::Display for RetainedIdentityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -346,7 +342,6 @@ impl std::fmt::Display for RetainedIdentityError {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn retained_identity(
     tx: &rusqlite::Connection,
     namespace: &crate::storage::Namespace,
@@ -360,7 +355,6 @@ pub(crate) fn retained_identity(
         .ok_or(Unverified)
 }
 
-#[cfg(test)]
 fn read_retained(
     tx: &rusqlite::Connection,
     source_key: &str,
@@ -427,7 +421,6 @@ fn read_retained(
         .then_some(identity))
 }
 
-#[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum RetainedPeerError {
     Trace(RetainedIdentityError),
@@ -437,7 +430,6 @@ pub(crate) enum RetainedPeerError {
     Index(rusqlite::Error),
 }
 
-#[cfg(test)]
 impl std::fmt::Display for RetainedPeerError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -454,7 +446,6 @@ impl std::fmt::Display for RetainedPeerError {
     }
 }
 
-#[cfg(test)]
 pub(crate) fn retained_peer(
     tx: &rusqlite::Connection,
     namespace: &crate::storage::Namespace,
@@ -478,7 +469,6 @@ pub(crate) fn retained_peer(
     Err(CustodyChanged)
 }
 
-#[cfg(test)]
 fn current_peer_covers(
     tx: &rusqlite::Connection,
     source_key: &str,
@@ -523,7 +513,6 @@ fn current_peer_covers(
     Ok(true)
 }
 
-#[cfg(test)]
 fn retained_peer_covers(
     tx: &rusqlite::Connection,
     source_key: &str,
@@ -567,7 +556,6 @@ fn retained_peer_covers(
     Ok(true)
 }
 
-#[cfg(test)]
 fn prefix_covers(observed: &CatalogSource, offset: u64, prefix: [u8; 32], tail: [u8; 32]) -> bool {
     // A source ID cannot survive truncation or replacement. For a later head,
     // this check only establishes custody. The body reader still verifies the

@@ -74,6 +74,7 @@ fn parse_list(query: &str, union: bool) -> Result<(Request, Option<Continuation>
     }
     let mut clean = Vec::new();
     let mut cursor = None;
+    let mut machine = false;
     for part in query.split('&').filter(|part| !part.is_empty()) {
         let (name, value) = part.split_once('=').unwrap_or((part, ""));
         match name {
@@ -96,7 +97,14 @@ fn parse_list(query: &str, union: bool) -> Result<(Request, Option<Continuation>
             "scope" | "limit" | "harness" | "repo" | "no_repo" | "model" | "q" | "sid" => {
                 clean.push(part)
             }
-            "machine" if !union => (),
+            "machine" if !union && !machine => {
+                if !crate::viewer::decoded(value)
+                    .is_some_and(|key| crate::session_route::identifier(&key))
+                {
+                    return Err(invalid());
+                }
+                machine = true;
+            }
             _ => return Err(invalid()),
         }
     }
@@ -109,6 +117,19 @@ fn parse_list(query: &str, union: bool) -> Result<(Request, Option<Continuation>
         return Err(invalid());
     }
     Ok((request, cursor))
+}
+
+pub(crate) fn validate_list(query: &str) -> Result<(), ViewerReply> {
+    parse_list(query, false).map(|_| ())
+}
+
+pub(crate) fn note_list_search(query: &str, evidence: &crate::native_evidence::NativeEvidence) {
+    if let Ok((request, _)) = parse_list(query, false)
+        && request.scope == CatalogReadScope::Current
+        && let Some(interest) = request.search_interest()
+    {
+        evidence.note_warehouse_search(interest);
+    }
 }
 
 fn list_item(
@@ -175,7 +196,7 @@ fn retained_item(
 
 /// The caller obtains these sources from the host's authorized inventory.
 /// A focused request uses one source. Workspace reads merge committed source pages.
-pub(super) fn list(
+pub(crate) fn list(
     configured: &[OverviewSource],
     workspace: &str,
     query: &str,
@@ -193,6 +214,13 @@ fn read(
     union: bool,
 ) -> Result<ViewerReply, ViewerReply> {
     let (request, cursor) = parse_list(query, union)?;
+    if !union
+        && crate::viewer::query_value(query, "machine")
+            .and_then(crate::viewer::decoded)
+            .is_some_and(|key| configured.first().is_none_or(|source| source.key != key))
+    {
+        return Err(invalid());
+    }
     if configured.len() > 64 {
         return Err(error(
             503,
@@ -275,14 +303,16 @@ fn read(
         .collect::<std::io::Result<std::collections::BTreeMap<_, _>>>()
         .map_err(|err| read_error(index(err)))?;
     let page = match request.scope {
-        CatalogReadScope::Current => read_list(&sources, workspace, &request, cursor.as_ref())
-            .map_err(read_error)?
-            .map(|row| {
-                let (label, annotations) = &annotations[row.position.source.as_str()];
-                list_item(row, union.then_some(*label), annotations)
-            }),
+        CatalogReadScope::Current => {
+            read_list(&sources, workspace, &request, cursor.as_ref(), union)
+                .map_err(read_error)?
+                .map(|row| {
+                    let (label, annotations) = &annotations[row.position.source.as_str()];
+                    list_item(row, union.then_some(*label), annotations)
+                })
+        }
         CatalogReadScope::RetainedHistory => {
-            super::read_retained_list(&sources, workspace, &request, cursor.as_ref())
+            super::read_retained_list(&sources, workspace, &request, cursor.as_ref(), union)
                 .map_err(read_error)?
                 .map(|row| {
                     let (label, annotations) = &annotations[row.position.source.as_str()];
@@ -367,7 +397,7 @@ fn selected_identity(
         .map_err(read_error)
 }
 
-pub(super) fn identity(configured: &OverviewSource, query: &str) -> ViewerReply {
+pub(crate) fn identity(configured: &OverviewSource, query: &str) -> ViewerReply {
     match selected_identity(configured, query) {
         Ok(Some(identity)) => crate::catalog::reply(200, json!({"api":1,"identity":identity})),
         Ok(None) => not_found(),
@@ -375,7 +405,7 @@ pub(super) fn identity(configured: &OverviewSource, query: &str) -> ViewerReply 
     }
 }
 
-pub(super) fn locate(configured: &OverviewSource, query: &str) -> ViewerReply {
+pub(crate) fn locate(configured: &OverviewSource, query: &str) -> ViewerReply {
     match selected_identity(configured, query) {
         Ok(identity) => {
             let matches = identity
@@ -392,11 +422,25 @@ pub(super) fn locate(configured: &OverviewSource, query: &str) -> ViewerReply {
     }
 }
 
-pub(super) fn resolve_native(configured: &OverviewSource, query: &str) -> ViewerReply {
-    use crate::{
-        CatalogIdentityError, CatalogNativeResolution, CatalogNativeResolutionState as State,
-    };
+pub(crate) fn observe(configured: &OverviewSource, query: &str) -> ViewerReply {
+    match selected_request(configured, query) {
+        Ok(request) if request.scope == CatalogReadScope::RetainedHistory => (),
+        Ok(_) => return invalid(),
+        Err(reply) => return reply,
+    }
+    match selected_identity(configured, query) {
+        Ok(Some(identity)) => crate::catalog::reply(
+            200,
+            json!({
+                "api": 1, "source_key": configured.key, "catalog_key": identity.catalog_key, "state": "ready"
+            }),
+        ),
+        Ok(None) => not_found(),
+        Err(reply) => reply,
+    }
+}
 
+pub(crate) fn resolve_native(configured: &OverviewSource, query: &str) -> ViewerReply {
     if query.len() > 64 * 1024 {
         return invalid();
     }
@@ -420,46 +464,18 @@ pub(super) fn resolve_native(configured: &OverviewSource, query: &str) -> Viewer
         query,
         || crate::index_rebuild::history_reply(&configured.options).map_or(Ok(()), Err),
         |harness, native_id, scope| {
-            let unavailable = |_| CatalogIdentityError::Unavailable;
-            let path = crate::events::EventCache::path(&configured.options.cache);
-            let namespace = crate::storage::Namespace::new(&configured.key)
-                .map_err(index)
-                .map_err(unavailable)?;
-            let source = Source::focused(namespace, &path, &configured.options, None)
-                .map_err(unavailable)?;
-            let matches =
-                super::resolve_native(&source, scope, harness, native_id).map_err(unavailable)?;
-            let (state, catalog_key, generation) = match matches.as_slice() {
-                [] => (State::Pending, None, None),
-                [identity] => {
-                    let state = match identity.owner_qualification {
-                        crate::catalog::CatalogOwnerQualification::Qualified => State::Resolved,
-                        crate::catalog::CatalogOwnerQualification::Provisional => {
-                            State::Provisional
-                        }
-                    };
-                    (
-                        state,
-                        Some(identity.catalog_key.clone()),
-                        Some(identity.generation.clone()),
-                    )
-                }
-                _ => (State::Ambiguous, None, None),
-            };
-            Ok(CatalogNativeResolution {
-                state,
-                source_key: configured.key.clone(),
-                harness: harness.into(),
-                native_id: native_id.into(),
-                read_scope: scope,
-                catalog_key,
-                generation,
-            })
+            super::host_resolve_native(
+                &configured.options,
+                &configured.key,
+                harness,
+                native_id,
+                scope,
+            )
         },
     )
 }
 
-pub(super) fn annotations(
+pub(crate) fn annotations(
     configured: &OverviewSource,
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
@@ -591,11 +607,27 @@ fn addressed_query(query: &str) -> Result<AddressedQuery, ViewerReply> {
     Ok((fields.join("&"), address, peer))
 }
 
-pub(super) fn home(
+pub(crate) fn home(
     configured: &OverviewSource,
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
     retained_provider: Option<&dyn crate::SessionSourceReader>,
+) -> ViewerReply {
+    home_with_mode(
+        configured,
+        query,
+        current_provider,
+        retained_provider,
+        crate::SessionSourceReadMode::LocalThenProvider,
+    )
+}
+
+pub(crate) fn home_with_mode(
+    configured: &OverviewSource,
+    query: &str,
+    current_provider: Option<&dyn crate::SessionSourceReader>,
+    retained_provider: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
 ) -> ViewerReply {
     let read = || -> Result<ViewerReply, ViewerReply> {
         let (fields, address, peer) = addressed_query(query)?;
@@ -618,7 +650,8 @@ pub(super) fn home(
             .map_err(index)
             .map_err(read_error)?;
         let source = Source::focused(namespace, &path, &configured.options, current_provider)
-            .map_err(read_error)?;
+            .map_err(read_error)?
+            .with_mode(mode);
         let requested = selection
             .turns
             .iter()
@@ -781,7 +814,7 @@ fn turn_request(
     Ok((request, turn))
 }
 
-pub(super) fn anchor(
+pub(crate) fn anchor(
     configured: &OverviewSource,
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
@@ -829,7 +862,7 @@ pub(super) fn anchor(
     }
 }
 
-pub(super) fn trace(
+pub(crate) fn trace(
     configured: &OverviewSource,
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
@@ -879,7 +912,7 @@ pub(super) fn trace(
     }
 }
 
-pub(super) fn activity_anchor(
+pub(crate) fn activity_anchor(
     configured: &OverviewSource,
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
@@ -984,7 +1017,7 @@ pub(super) fn activity_anchor(
     }
 }
 
-pub(super) fn transcript(
+pub(crate) fn transcript(
     configured: &OverviewSource,
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
@@ -995,19 +1028,39 @@ pub(super) fn transcript(
         query,
         current_provider,
         retained_provider,
+        crate::SessionSourceReadMode::LocalThenProvider,
         false,
     ) {
         Ok(reply) | Err(reply) => reply,
     }
 }
 
-pub(super) fn entry(
+pub(crate) fn entry(
     configured: &OverviewSource,
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
     retained_provider: Option<&dyn crate::SessionSourceReader>,
 ) -> ViewerReply {
-    match read_transcript(configured, query, current_provider, retained_provider, true) {
+    match read_transcript(
+        configured,
+        query,
+        current_provider,
+        retained_provider,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        true,
+    ) {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
+
+pub(crate) fn transcript_with_mode(
+    configured: &OverviewSource,
+    query: &str,
+    provider: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+    expanded: bool,
+) -> ViewerReply {
+    match read_transcript(configured, query, provider, provider, mode, expanded) {
         Ok(reply) | Err(reply) => reply,
     }
 }
@@ -1017,6 +1070,7 @@ fn read_transcript(
     query: &str,
     current_provider: Option<&dyn crate::SessionSourceReader>,
     retained_provider: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
     expanded: bool,
 ) -> Result<ViewerReply, ViewerReply> {
     if query.len() > 128 * 1024 {
@@ -1110,7 +1164,8 @@ fn read_transcript(
     let namespace = crate::storage::Namespace::new(&configured.key)
         .map_err(|error| read_error(index(error)))?;
     let source = Source::focused(namespace, &path, &configured.options, current_provider)
-        .map_err(read_error)?;
+        .map_err(read_error)?
+        .with_mode(mode);
     let view = selected::ReadView::open(&source).map_err(read_error)?;
     let component = selected::transcript_window(
         &view,

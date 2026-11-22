@@ -379,7 +379,13 @@ pub fn session_home_details_with_mode(
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
 ) -> ViewerReply {
-    session_home_details_inner(options, source_key, query, provider, mode, true)
+    crate::catalog::warehouse::http::home_with_mode(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        provider,
+        provider,
+        mode,
+    )
 }
 
 pub(crate) fn session_home_details_with_gate(

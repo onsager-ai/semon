@@ -112,6 +112,7 @@ struct FrozenMember {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(in super::super) fn retained_peer_window(
     source: &Source<'_>,
     key: &str,
@@ -195,6 +196,7 @@ fn retained_trace_send_window(
 
 /// Retained members and their prefix witnesses come from the certified binding.
 /// The provider separately authorizes each native source reference on demand.
+#[cfg(test)]
 pub(in super::super) fn retained_page(
     source: &Source<'_>,
     key: &str,
@@ -211,6 +213,7 @@ pub(in super::super) fn retained_page(
     )
 }
 
+#[cfg(test)]
 pub(in super::super) fn retained_latest_page(
     source: &Source<'_>,
     key: &str,
@@ -227,6 +230,7 @@ pub(in super::super) fn retained_latest_page(
     )
 }
 
+#[cfg(test)]
 pub(in super::super) fn retained_addressed_window(
     source: &Source<'_>,
     key: &str,
@@ -569,7 +573,7 @@ pub(super) fn read_frozen(
                 prefix_sha256: receipt.prefix_sha256,
                 tail_sha256: receipt.tail_sha256,
             });
-            let state = if live {
+            let state = if live && !source.provider_only() {
                 let current = decode(&ledger)?;
                 if matches!(source.availability(&harness, carrier)?,
                     Availability::Expected(Some(stat)) if stable_or_grown(&current.stat, &stat))
@@ -867,6 +871,7 @@ pub(super) fn read_frozen(
             .entry(position.source)
             .or_insert((prefix, reference.clone()));
         records.push(Record {
+            source: position.source,
             prompt_anchor,
             entry_anchor: None,
             operation,
@@ -992,6 +997,7 @@ impl SessionSourceReader for FrozenPeerReader<'_> {
 
 /// The host provides an independently authorized archive reader. The warehouse
 /// binding supplies the original source reference and exact record position.
+#[cfg(test)]
 pub(in super::super) fn retained_record_at(
     options: &Options,
     source: &Source<'_>,
@@ -1014,24 +1020,25 @@ pub(in super::super) fn retained_record_at(
     }
     let full_path = home.join(&address.path);
     let at = i64::try_from(address.offset).map_err(index)?;
-    let Some((receipt, kind)) = tx.query_row(
-        "SELECT m.receipt,r.kind FROM warehouse_identity_member m
+    let Some((id, receipt, kind)) = tx.query_row(
+        "SELECT m.source,m.receipt,r.kind FROM warehouse_identity_member m
          CROSS JOIN fact_record r ON r.source=m.source AND r.pos=?3 AND r.block=?4 AND r.occurrence=?5
          WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
           AND r.pos>=0 AND r.pos<json_extract(m.receipt,'$.offset') AND NOT r.gap",
         params![identity.binding, full_path.to_str(), at, address.block, address.occurrence],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
     ).optional().map_err(index)? else {
         return Ok(None);
     };
     let receipt: crate::model::summary::CatalogSource =
         serde_json::from_str(&receipt).map_err(index)?;
     let reference = certified_reference(identity.harness, receipt, address);
-    let record = read_certified_record(reference, address, kind, provider)?;
+    let record = read_certified_record(id, reference, address, kind, provider)?;
     source.validate_authority()?;
     Ok(record)
 }
 
+#[cfg(test)]
 pub(in super::super) fn retained_peer_record_at(
     source: &Source<'_>,
     trace: &str,
@@ -1051,6 +1058,7 @@ pub(in super::super) fn retained_peer_record_at(
     )
 }
 
+#[cfg(test)]
 pub(in super::super) fn retained_peer_relay_address(
     source: &Source<'_>,
     trace: &str,
@@ -1254,6 +1262,7 @@ pub(in super::super) fn retained_relay_in_view(
 
 /// Locate a native launch call only when the child's verified marker names
 /// the certified parent and uniquely identifies a call in its frozen prefix.
+#[cfg(test)]
 pub(in super::super) fn retained_peer_launch_call(
     source: &Source<'_>,
     trace: &str,
@@ -1622,6 +1631,7 @@ fn read_retained_peer_in_view(
         let native = read(&reference, address.offset)?;
         peer_reader.finish().map_err(peer_body_error)?;
         Ok(Some(Record {
+            source: id,
             prompt_anchor: None,
             entry_anchor: None,
             operation: None,
@@ -1661,6 +1671,7 @@ fn frozen_reference(
     }
 }
 
+#[cfg(test)]
 fn certified_reference(
     harness: String,
     receipt: crate::model::summary::CatalogSource,
@@ -1676,7 +1687,9 @@ fn certified_reference(
     }
 }
 
+#[cfg(test)]
 fn read_certified_record(
+    source: i64,
     reference: SessionSourceRef,
     address: &Address,
     kind: Option<String>,
@@ -1696,6 +1709,7 @@ fn read_certified_record(
         retained_body_error(error, false)
     })?;
     Ok(Some(Record {
+        source,
         prompt_anchor: None,
         entry_anchor: None,
         operation: None,
