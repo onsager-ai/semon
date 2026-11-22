@@ -86,6 +86,7 @@ impl SessionRoute {
                 "harness" => matches!(value.as_str(), "" | "codex" | "claude" | "copilot"),
                 "repo" | "model" | "q" => value.len() <= 4096,
                 "no_repo" | "all_machines" => value == "1",
+                "scope" => matches!(value.as_str(), "current" | "retained_history"),
                 "after" | "field_chunk" => {
                     !value.is_empty()
                         && value.bytes().all(|b| b.is_ascii_digit())

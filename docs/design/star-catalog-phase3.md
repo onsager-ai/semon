@@ -65,6 +65,11 @@ well as selecting metadata from committed facts.
   binding intact and lists show the current owner. Exact History reads return
   `retained_identity_unverified` when the binding is missing or its witness
   fails qualification. Phase 3 does not read `session_history_*`.
+- Owner decision 2026-11-22: list clicks and plain session links without an
+  explicit scope open the current owner. History and archive links carry
+  `scope=retained_history` through Back and evidence navigation. A plain link
+  opens the replacement if its Catalog key is reused. Explicit History reads
+  keep the `retained_identity_unverified` refusal for unqualified bindings.
 - Qualification starts with the new schema. The host rebuild replays authorized
   originals without importing old Index rows or a custody manifest. Pre-cutover
   retained keys without a verified warehouse binding get the same explicit

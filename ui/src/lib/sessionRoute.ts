@@ -1,9 +1,12 @@
+export type CatalogReadScope = 'current' | 'retained_history';
+
 /** Public addresses bind source and Catalog key. Harness/native IDs are provenance. */
 export interface SessionRoute {
   source: string;
   key: string;
   turn: string | null;
   controls: URLSearchParams;
+  readScope: CatalogReadScope;
 }
 export interface SessionCandidate {
   source_key: string;
@@ -70,7 +73,7 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
                 ? !!value && new TextEncoder().encode(value).length <= 4096
                 : name === 'part'
                   ? ['output', 'script', 'attachment'].includes(value)
-                  : false;
+                  : name === 'scope' && (value === 'current' || value === 'retained_history');
     if (!valid || controls.has(name)) return fail();
     controls.set(name, value);
   }
@@ -86,7 +89,8 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
   )
     return fail();
   controls.sort();
-  return { source, key, turn, controls };
+  const readScope = controls.get('scope') === 'retained_history' ? 'retained_history' : 'current';
+  return { source, key, turn, controls, readScope };
 }
 export function canonicalSessionRoute(route: SessionRoute, source: string, key: string) {
   const query = [...route.controls]

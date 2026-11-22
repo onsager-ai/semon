@@ -1,5 +1,33 @@
 [
   {
+    "name": "retained trace preserves explicit scope",
+    "path": "/session/alpha/same/trace/turn",
+    "query": "scope=retained_history&all_machines=1",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      }
+    ],
+    "canonical": "/session/alpha/same/trace/turn?all_machines=1&scope=retained_history"
+  },
+  {
+    "name": "unknown read scope",
+    "path": "/session/alpha/same",
+    "query": "scope=unknown",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
+    "name": "duplicate read scope",
+    "path": "/session/alpha/same",
+    "query": "scope=retained_history&scope=current",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
     "name": "source alpha",
     "path": "/session/alpha/same",
     "query": "",

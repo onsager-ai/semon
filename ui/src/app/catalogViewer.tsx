@@ -5,6 +5,7 @@ import {
   sessionHashTurn,
   type SessionRoute,
 } from '../lib/sessionRoute';
+import type { CatalogReadScope } from '../domain/catalog';
 import { compareCatalogKeys } from '../lib/catalogIdentity';
 import { readShellPreference, writeShellPreference } from '../lib/navigation';
 import {
@@ -102,6 +103,7 @@ import { clock } from '../domain/format';
 import { parseCatalogSources, type CatalogSourceItem } from '../state/catalog-sources';
 import { renderCatalogSources } from '../lib/catalogSources';
 interface SelectedView {
+  readScope: CatalogReadScope;
   sourceKey: string;
   key: string;
   root: HTMLElement;
@@ -277,7 +279,7 @@ export function createCatalogViewer(
       query: string;
       listScroll: number;
       listFocus: string;
-      selectedKey: string | null;
+      selected: Pick<SelectedView, 'key' | 'readScope'> | null;
     }
   >();
   let sourcesOpen = false,
@@ -725,9 +727,10 @@ export function createCatalogViewer(
       value.set('all_machines', '1');
     return value;
   };
-  const sessionControls = () => {
+  const sessionControls = (readScope: CatalogReadScope) => {
     const p = browsingParams();
     p.delete('machine');
+    if (readScope === 'retained_history') p.set('scope', readScope);
     return p;
   };
   const sessionAnchor = () => {
@@ -805,9 +808,9 @@ export function createCatalogViewer(
     },
     clearFilters: clearListFilters,
   });
-  const params = () => {
+  const params = (readScope: CatalogReadScope = 'current') => {
     const value = currentParams();
-    value.set('scope', 'retained_history');
+    value.set('scope', readScope);
     return value;
   };
   const overview = createOverviewPages({
@@ -1053,10 +1056,14 @@ export function createCatalogViewer(
     const results = reachableResultIds(accepted.root, accepted.starts);
     overview.markResults(accepted.source, results);
     accepted.readResults = new Set(results);
+    const route = navigation.route;
     renderCausalTrace(root, accepted, Date.now(), causalExpanded, {
       session(key, turn) {
         const url =
-          sessionPath(accepted.source, key) + (turn ? '#' + encodeURIComponent(turn) : '');
+          sessionPath(accepted.source, key) +
+          '?' +
+          sessionControls(route.readScope) +
+          (turn ? '#' + encodeURIComponent(turn) : '');
         history.pushState(null, '', url);
         fromLocation();
       },
@@ -1072,7 +1079,7 @@ export function createCatalogViewer(
     causalLoading = true;
     if (!causal) root.setAttribute('aria-busy', 'true');
     try {
-      const p = params();
+      const p = params(route.readScope);
       p.set('sid', route.sid);
       p.set('turn', route.turn);
       const next = parseCausalTrace(
@@ -1081,10 +1088,10 @@ export function createCatalogViewer(
         route.sid,
         route.turn,
       );
-      const metadataParams = params();
+      const metadataParams = params(route.readScope);
       metadataParams.set('sid', route.sid);
       const metadata = parseCatalogPage(await api('/api/sessions?' + metadataParams));
-      if (metadata.machine !== source || metadata.read_scope !== 'retained_history')
+      if (metadata.machine !== source || metadata.read_scope !== route.readScope)
         throw Error('Causal metadata selection changed');
       next.metadata = metadata.items.find((item) => item.key === route.sid);
       if (
@@ -1179,7 +1186,7 @@ export function createCatalogViewer(
               continue;
             }
             try {
-              const query = params();
+              const query = params(route.readScope);
               query.set('sid', job.sid);
               query.set('generation', generation);
               query.set('events', JSON.stringify(job.events));
@@ -1305,9 +1312,9 @@ export function createCatalogViewer(
       }
     }
   }
-  function goCausal(key: string, turn: string) {
+  function goCausal(key: string, turn: string, readScope: CatalogReadScope) {
     leaveScreen();
-    navigation.route = { v: 'trace', sid: key, turn };
+    navigation.route = { v: 'trace', sid: key, turn, readScope };
     shell.closeDrawer(true);
     render(
       <p class="catalog-note" role="status">
@@ -1450,7 +1457,7 @@ export function createCatalogViewer(
               },
               {
                 ancestor(key) {
-                  void goSession(key);
+                  void goSession(key, undefined, true, undefined, active?.readScope);
                 },
                 crumb() {
                   goList();
@@ -1523,8 +1530,9 @@ export function createCatalogViewer(
         }
         traceTitle = true;
         machineTitle = false;
-        const key = navigation.route.v === 'trace' ? navigation.route.sid : '',
-          turn = navigation.route.v === 'trace' ? navigation.route.turn : undefined,
+        const trace = navigation.route.v === 'trace' ? navigation.route : undefined;
+        const key = trace?.sid ?? '',
+          turn = trace?.turn,
           session = causal?.sessions[key];
         render(
           <div class="l1">
@@ -1533,7 +1541,7 @@ export function createCatalogViewer(
               class="crumb"
               aria-label={'Back to ' + (session?.name ?? 'session')}
               onClick={() => {
-                void goSession(key, undefined, true, turn);
+                void goSession(key, undefined, true, turn, trace?.readScope);
               }}
             >
               {session?.name ?? 'Session'}
@@ -1624,7 +1632,13 @@ export function createCatalogViewer(
                 icon: I.chev,
                 back: () => {
                   if (navigation.route.v === 'trace')
-                    void goSession(navigation.route.sid, undefined, true, navigation.route.turn);
+                    void goSession(
+                      navigation.route.sid,
+                      undefined,
+                      true,
+                      navigation.route.turn,
+                      navigation.route.readScope,
+                    );
                 },
               }
             : { label: 'Open menu', icon: I.menu },
@@ -1727,7 +1741,7 @@ export function createCatalogViewer(
     const epoch = (view.annotationsEpoch ?? 0) + 1;
     view.annotationsEpoch = epoch;
     view.annotationsLoading = true;
-    const query = params();
+    const query = params(view.readScope);
     query.set('sid', view.key);
     query.set('kind', mode);
     query.set('after', String(first));
@@ -1946,7 +1960,7 @@ export function createCatalogViewer(
       wide: () => wide,
       session(key) {
         navigateFromPanel(panel, () => {
-          void goSession(key);
+          void goSession(key, undefined, true, undefined, view?.readScope);
         });
       },
       action(key) {
@@ -1971,9 +1985,9 @@ export function createCatalogViewer(
             history.pushState(
               null,
               '',
-              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(),
+              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope),
             );
-            goCausal(view.key, turn);
+            goCausal(view.key, turn, view.readScope);
           });
         }
       },
@@ -2075,7 +2089,7 @@ export function createCatalogViewer(
     panel.show();
     if (script) {
       const generation = view.store.selectedPage()!.projection.generation,
-        p = params();
+        p = params(view.readScope);
       p.set('sid', view.key);
       p.set('after', String(item.slot));
       p.set('limit', '1');
@@ -2120,7 +2134,7 @@ export function createCatalogViewer(
       draw();
     } else if (entry.cut) {
       const generation = view.store.selectedPage()!.projection.generation,
-        p = params();
+        p = params(view.readScope);
       p.set('sid', view.key);
       p.set('after', String(item.slot));
       p.set('limit', '1');
@@ -2419,7 +2433,7 @@ export function createCatalogViewer(
       if (
         (query && capabilities.metadata_search && next.search === null) ||
         next.machine !== capabilities.source_key ||
-        next.read_scope !== 'retained_history' ||
+        next.read_scope !== 'current' ||
         (append && page?.generation !== next.generation)
       )
         throw new Error('History changed; refresh this list before loading another page.');
@@ -2573,7 +2587,13 @@ export function createCatalogViewer(
           )
             throw new Error('Parsed archive session identity is unavailable');
           candidateUpdating = false;
-          await goSession(result.catalog_key!, metadata.items[0]);
+          await goSession(
+            result.catalog_key!,
+            metadata.items[0],
+            true,
+            undefined,
+            'retained_history',
+          );
           return;
         }
         candidateNote =
@@ -2740,12 +2760,13 @@ export function createCatalogViewer(
         {
           committed() {},
           trace(turn) {
-            const url = tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls();
+            const url =
+              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope);
             history.pushState(null, '', url);
-            goCausal(view.key, turn);
+            goCausal(view.key, turn, view.readScope);
           },
           session(key) {
-            void goSession(key);
+            void goSession(key, undefined, true, undefined, view?.readScope);
           },
           machine() {},
           sender() {},
@@ -2919,7 +2940,7 @@ export function createCatalogViewer(
           view.store.context(),
           (item) =>
             (item.entry.img ?? []).map((image, index) => {
-              const p = params();
+              const p = params(view.readScope);
               p.set('sid', view.key);
               p.set('after', String(item.slot));
               p.set('limit', '1');
@@ -2976,12 +2997,13 @@ export function createCatalogViewer(
       {
         committed() {},
         trace(turn) {
-          const url = tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls();
+          const url =
+            tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope);
           history.pushState(null, '', url);
-          goCausal(view.key, turn);
+          goCausal(view.key, turn, view.readScope);
         },
         session(key, turn) {
-          void goSession(key, undefined, true, turn);
+          void goSession(key, undefined, true, turn, view.readScope);
         },
         machine() {},
         sender() {},
@@ -3153,7 +3175,7 @@ export function createCatalogViewer(
     }
     if (progress.next === null) return;
     const chunk = progress.next,
-      p = params(),
+      p = params(view.readScope),
       pending = progress;
     p.set('sid', view.key);
     p.set('after', String(entry.slot));
@@ -3205,11 +3227,11 @@ export function createCatalogViewer(
     const candidate = new CatalogTranscriptStore();
     candidate.select(
       { source_key: capabilities.source_key, catalog_key: view.key },
-      'retained_history',
+      view.readScope,
     );
     const read = async (after: number | null, limit: number) => {
       const ticket = candidate.request(after, limit),
-        p = params();
+        p = params(view.readScope);
       p.set('sid', view.key);
       p.set('limit', String(limit));
       if (after !== null) p.set('after', String(after));
@@ -3279,7 +3301,7 @@ export function createCatalogViewer(
     scope.clearTimeout(view.retry);
     const store = view.store,
       request = store.request(after, after === null ? 60 : 100),
-      p = params();
+      p = params(view.readScope);
     p.set('sid', view.key);
     p.set('limit', String(request.limit));
     if (after !== null) p.set('after', String(after));
@@ -3359,7 +3381,7 @@ export function createCatalogViewer(
   async function observeSelected(view: SelectedView) {
     if (disposed || active !== view || view.loading || view.observing) return;
     const source = view.sourceKey,
-      p = params();
+      p = params(view.readScope);
     p.set('sid', view.key);
     p.set('limit', '1');
     view.observing = true;
@@ -3461,7 +3483,7 @@ export function createCatalogViewer(
             try {
               const params = new URLSearchParams({
                 machine: view.sourceKey,
-                scope: 'retained_history',
+                scope: view.readScope,
                 sid: job.sid,
                 generation: context.previews[job.sid],
                 events: JSON.stringify(job.ids),
@@ -3537,7 +3559,8 @@ export function createCatalogViewer(
       view.sourceKey !== capabilities.source_key ||
       view.identityLoading ||
       !view.ticket ||
-      !capabilities.selected_identity
+      !capabilities.selected_identity ||
+      view.readScope === 'retained_history'
     )
       return;
     const ticket = view.ticket,
@@ -3590,18 +3613,26 @@ export function createCatalogViewer(
         scope.timeout(() => void loadIdentity(view), 1000);
     }
   }
-  async function goSession(key: string, meta?: CatalogSession, push = true, anchor?: string) {
+  async function goSession(
+    key: string,
+    meta?: CatalogSession,
+    push = true,
+    anchor?: string,
+    readScope: CatalogReadScope = 'current',
+  ) {
     if (disposed || !capabilities.source_key) return;
     const navigationFocus = document.activeElement;
     cancelCandidate();
     preserveScroll();
     if (!active && !sourcesOpen) listFocus = key;
     sourcesOpen = false;
-    let view = selected.get(cacheKey(key));
+    const selectedKey = JSON.stringify([capabilities.source_key, readScope, key]);
+    let view = selected.get(selectedKey);
     if (!view) {
       const store = new CatalogTranscriptStore();
-      store.select({ source_key: capabilities.source_key, catalog_key: key }, 'retained_history');
+      store.select({ source_key: capabilities.source_key, catalog_key: key }, readScope);
       view = {
+        readScope,
         sourceKey: capabilities.source_key,
         key,
         root: document.createElement('div'),
@@ -3626,10 +3657,10 @@ export function createCatalogViewer(
       if (meta) view.recovery.observeProgress(catalogRecoveryProgress(meta));
       view.root.className = 'catalog-session';
       readerResize.observe(view.root);
-      selected.set(cacheKey(key), view);
+      selected.set(selectedKey, view);
     }
-    selected.delete(cacheKey(key));
-    selected.set(cacheKey(key), view);
+    selected.delete(selectedKey);
+    selected.set(selectedKey, view);
     while (selected.size > 5) {
       const oldest = selected.entries().next().value!;
       selected.delete(oldest[0]);
@@ -3674,6 +3705,7 @@ export function createCatalogViewer(
       v: 'session',
       id: key,
       turn,
+      readScope,
     };
     releaseScreen(root);
     render(null, root);
@@ -3686,7 +3718,7 @@ export function createCatalogViewer(
         '',
         sessionPath(view.sourceKey, key) +
           '?' +
-          sessionControls() +
+          sessionControls(view.readScope) +
           (anchor ? '#' + encodeURIComponent(anchor) : ''),
       );
     chrome();
@@ -3715,7 +3747,7 @@ export function createCatalogViewer(
     }
     if (turn) {
       const sourceKey = view.sourceKey;
-      const p = params();
+      const p = params(view.readScope);
       p.set('sid', key);
       p.set('turn', turn);
       const currentAnchor = () =>
@@ -3759,9 +3791,9 @@ export function createCatalogViewer(
             retained = attempt === 0 && sameProjection,
             anchored = retained ? previousStore : new CatalogTranscriptStore();
           if (!retained)
-            anchored.select({ source_key: sourceKey, catalog_key: key }, 'retained_history');
+            anchored.select({ source_key: sourceKey, catalog_key: key }, view.readScope);
           const request = anchored.request(Number(anchor.slot), 100, text(anchor.generation)),
-            query = params();
+            query = params(view.readScope);
           query.set('sid', key);
           query.set('after', String(anchor.slot));
           query.set('limit', String(request.limit));
@@ -3788,7 +3820,7 @@ export function createCatalogViewer(
                   if (first >= Number(anchor.slot) && first + limit <= Number(anchor.slot) + 100)
                     continue;
                   const retainedRequest = anchored.request(first, limit),
-                    retainedQuery = params();
+                    retainedQuery = params(view.readScope);
                   retainedQuery.set('sid', key);
                   retainedQuery.set('after', String(first));
                   retainedQuery.set('limit', String(retainedRequest.limit));
@@ -3863,7 +3895,7 @@ export function createCatalogViewer(
           const history = error instanceof ApiError ? error.history : undefined;
           if (typeof history === 'object') {
             scope.timeout(() => {
-              if (currentAnchor()) void goSession(key, undefined, false, turn);
+              if (currentAnchor()) void goSession(key, undefined, false, turn, view.readScope);
             }, history.retryMs);
           }
         }
@@ -3899,15 +3931,15 @@ export function createCatalogViewer(
       epoch !== sourcesEpoch ||
       sourceKey !== capabilities.source_key ||
       value.machine !== sourceKey ||
-      value.read_scope !== 'retained_history'
+      value.read_scope !== 'current'
     )
       return;
     const observed = new Map(value.items.map((item) => [item.key, item]));
     const names = new Map(value.items.map((item) => [item.key, item.name]));
     const view = active;
-    let activeMetadata = view ? observed.get(view.key) : undefined;
+    let activeMetadata = view?.readScope === 'current' ? observed.get(view.key) : undefined;
     if (view && !activeMetadata) {
-      const selectedParams = params();
+      const selectedParams = params(view.readScope);
       selectedParams.set('sid', view.key);
       const selectedMeta = parseCatalogPage(await api('/api/sessions?' + selectedParams));
       if (
@@ -3915,12 +3947,12 @@ export function createCatalogViewer(
         epoch !== sourcesEpoch ||
         sourceKey !== capabilities.source_key ||
         selectedMeta.machine !== sourceKey ||
-        selectedMeta.read_scope !== 'retained_history'
+        selectedMeta.read_scope !== view.readScope
       )
         return;
       const match = selectedMeta.items.find((item) => item.key === view.key);
       if (match) {
-        names.set(match.key, match.name);
+        if (view.readScope === 'current') names.set(match.key, match.name);
         activeMetadata = match;
       }
     }
@@ -3932,7 +3964,7 @@ export function createCatalogViewer(
       ...new Set([
         ...items.map((item) => item.key),
         ...[...selected.values()]
-          .filter((view) => view.sourceKey === sourceKey)
+          .filter((view) => view.sourceKey === sourceKey && view.readScope === 'current')
           .map((view) => view.key),
       ]),
     ].filter((key) => !names.has(key));
@@ -3946,7 +3978,7 @@ export function createCatalogViewer(
         epoch !== sourcesEpoch ||
         sourceKey !== capabilities.source_key ||
         metadata.machine !== sourceKey ||
-        metadata.read_scope !== 'retained_history'
+        metadata.read_scope !== 'current'
       )
         return;
       const item = metadata.items.find((item) => item.key === key);
@@ -3971,6 +4003,7 @@ export function createCatalogViewer(
       const name = names.get(cached.key);
       if (
         cached.sourceKey === sourceKey &&
+        cached.readScope === 'current' &&
         cached.meta &&
         name !== undefined &&
         cached.meta.name !== name
@@ -4131,7 +4164,7 @@ export function createCatalogViewer(
       query,
       listScroll,
       listFocus,
-      selectedKey: active?.key ?? null,
+      selected: active ? { key: active.key, readScope: active.readScope } : null,
     });
     while (sourceViews.size > 5) sourceViews.delete(sourceViews.keys().next().value!);
   }
@@ -4205,10 +4238,19 @@ export function createCatalogViewer(
         if (!sourcesOpen && !updating) void loadList(false);
         return;
       }
-      if (retained?.selectedKey) await goSession(retained.selectedKey, undefined, false);
+      if (retained?.selected)
+        await goSession(
+          retained.selected.key,
+          undefined,
+          false,
+          undefined,
+          retained.selected.readScope,
+        );
       else goList(false, keepOverview);
-      const destination = retained?.selectedKey
-        ? sessionPath(key, retained.selectedKey) + '?' + sessionControls()
+      const destination = retained?.selected
+        ? sessionPath(key, retained.selected.key) +
+          '?' +
+          sessionControls(retained.selected.readScope)
         : '/sessions?' + browsingParams();
       history.pushState(navigation.route, '', destination);
       chrome();
@@ -4353,9 +4395,9 @@ export function createCatalogViewer(
     }
     if (!sourcesOpen && viewerHost?.catalogSources && !sourceItems.length) void loadSources(false);
     if (sessionRoute?.turn) {
-      goCausal(sessionRoute.key, sessionRoute.turn);
+      goCausal(sessionRoute.key, sessionRoute.turn, sessionRoute.readScope);
     } else if (sessionRoute) {
-      void goSession(sessionRoute.key, undefined, false);
+      void goSession(sessionRoute.key, undefined, false, undefined, sessionRoute.readScope);
     } else if (machineBookmark) {
       leaveScreen();
       navigation.route = { v: 'machine', id: capabilities.source_key };
@@ -4383,6 +4425,8 @@ export function createCatalogViewer(
           history.state?.id === ('id' in navigation.route ? navigation.route.id : undefined) &&
           history.state?.turn ===
             ('turn' in navigation.route ? navigation.route.turn : undefined) &&
+          history.state?.readScope ===
+            ('readScope' in navigation.route ? navigation.route.readScope : undefined) &&
           (!active ||
             (location.pathname.startsWith('/session/')
               ? parseSessionRoute(location.pathname, location.search).source
