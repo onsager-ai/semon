@@ -40,6 +40,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{sealed::hex, source_chunks::PrefixState};
 
+#[cfg(test)]
+pub(crate) mod seekable;
+
 /// The archive's directory name, under a receiver's machine directory and
 /// under the Semon state directory.
 pub const DIR: &str = "archive";
@@ -264,6 +267,10 @@ impl NativeRead {
             Err(error) => return Err(error),
             Ok(_) => return Err(invalid("native source reappeared during archive read")),
         }
+        self.verify_chain()
+    }
+
+    pub(crate) fn verify_chain(&self) -> io::Result<()> {
         if crate::events::Stat::of(&self.chain)? != self.witness {
             return Err(invalid("archive chain changed during read"));
         }
@@ -675,15 +682,7 @@ impl Archive {
         if !self.trusted(&dir, chain) {
             return Err(invalid("an unverified native custody chain"));
         }
-        let temporary = self.dir.join(format!("{}.read.tmp", random_id()?));
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&temporary)?;
+        let (file, temporary) = self.private_read_file()?;
         let mut read = NativeRead {
             file,
             guard: Some(guard),
@@ -706,6 +705,19 @@ impl Archive {
         read.file.seek(SeekFrom::Start(0))?;
         read.verify()?;
         Ok(read)
+    }
+
+    fn private_read_file(&self) -> io::Result<(fs::File, PathBuf)> {
+        let temporary = self.dir.join(format!("{}.read.tmp", random_id()?));
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&temporary)?;
+        Ok((file, temporary))
     }
 
     /// Keep retention excluded through verification, parsing and index commit.
@@ -851,6 +863,10 @@ impl Archive {
                 })
                 .cloned()
                 .collect();
+            #[cfg(test)]
+            for chain in &expired {
+                seekable::remove(&self.dir, chain)?;
+            }
             // Withdraw the manifest first; interruption can leave unreferenced
             // bytes behind but cannot leave a manifest naming deleted bytes.
             manifest
@@ -1147,32 +1163,46 @@ impl Archive {
         }
         let path = self.dir.join(LOCK);
         let file = crate::read_path::open_state(&path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let operation = if exclusive {
-                libc::LOCK_EX
-            } else {
-                libc::LOCK_SH
-            };
-            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        let guard = Guard(file);
-        #[cfg(test)]
-        INHERITED_LOCKS.with(|capture| {
-            if let Some(files) = capture.borrow_mut().as_mut() {
-                files.push(guard.0.try_clone().unwrap());
-            }
-        });
-        let held = crate::events::Stat::from_metadata(&guard.0.metadata()?)?;
-        let named = crate::events::Stat::from_metadata(&crate::open_input(&path)?.metadata()?)?;
-        if (held.dev, held.ino) != (named.dev, named.ino) {
-            return Err(invalid("archive lock identity changed"));
-        }
-        Ok(guard)
+        lock_file(&path, file, exclusive, false)
     }
+
+    #[cfg(test)]
+    fn existing_read_lock(&self, nonblocking: bool) -> io::Result<Guard> {
+        let path = self.dir.join(LOCK);
+        let file = crate::open_input(&path)?;
+        lock_file(&path, file, false, nonblocking)
+    }
+}
+
+fn lock_file(path: &Path, file: fs::File, exclusive: bool, nonblocking: bool) -> io::Result<Guard> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        let operation = operation | if nonblocking { libc::LOCK_NB } else { 0 };
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (exclusive, nonblocking);
+    let guard = Guard(file);
+    #[cfg(test)]
+    INHERITED_LOCKS.with(|capture| {
+        if let Some(files) = capture.borrow_mut().as_mut() {
+            files.push(guard.0.try_clone().unwrap());
+        }
+    });
+    let held = crate::events::Stat::from_metadata(&guard.0.metadata()?)?;
+    let named = crate::events::Stat::from_metadata(&crate::open_input(path)?.metadata()?)?;
+    if (held.dev, held.ino) != (named.dev, named.ino) {
+        return Err(invalid("archive lock identity changed"));
+    }
+    Ok(guard)
 }
 
 fn archive_now() -> u64 {
