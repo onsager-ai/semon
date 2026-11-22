@@ -1479,7 +1479,9 @@ impl ViewerCore {
         match resolution {
             Resolution::Valid(index) => {
                 let candidate = &candidates[index];
-                if let Some(turn) = &route.turn {
+                if let Some(turn) = &route.turn
+                    && !route.controls.contains_key("generation")
+                {
                     let Some(source_index) = inventory.index(&candidate.source_key) else {
                         return text(404, "Not found");
                     };

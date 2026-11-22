@@ -286,6 +286,11 @@ custody change or membership change, including one caused by a late parent
 link, requires an explicit restart. Cursor state is bounded by the sources a
 page touches. The server holds no cursor state between requests.
 
+As a consequence of the pre-release policy, new detail links use native
+addresses. A saved numeric position tied to a semantic projection generation
+opens the session and reports that the saved position is unavailable. The
+Viewer never guesses which entry to highlight from the old coordinate.
+
 ### Prefix receipts in the selected-read fixture adapter
 
 The Index writes one `warehouse_prefix` receipt when an admitted source

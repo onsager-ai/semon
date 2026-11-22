@@ -3619,6 +3619,7 @@ export function createCatalogViewer(
     push = true,
     anchor?: string,
     readScope: CatalogReadScope = 'current',
+    savedPositionUnavailable = false,
   ) {
     if (disposed || !capabilities.source_key) return;
     const navigationFocus = document.activeElement;
@@ -3672,7 +3673,12 @@ export function createCatalogViewer(
     }
     sessionPanel?.destroy();
     active = view;
-    const turn = anchor ?? (push ? undefined : sessionAnchor());
+    const turn = savedPositionUnavailable
+      ? undefined
+      : (anchor ?? (push ? undefined : sessionAnchor()));
+    view.anchorNote = savedPositionUnavailable
+      ? 'This saved transcript position is unavailable.'
+      : undefined;
     if (turn) {
       // An anchored reader must not inherit or start the delayed tail pin. The
       // first render happens before its generation-bound range is available.
@@ -3740,7 +3746,6 @@ export function createCatalogViewer(
       }
     };
     focusHeading();
-    view.anchorNote = undefined;
     if (turn && view.store.selectedPage()) {
       if (window.matchMedia('(max-width: 760px)').matches) window.scrollTo(0, view.scroll);
       else document.querySelector<HTMLElement>('#main')!.scrollTop = view.scroll;
@@ -4394,10 +4399,18 @@ export function createCatalogViewer(
       updating = false;
     }
     if (!sourcesOpen && viewerHost?.catalogSources && !sourceItems.length) void loadSources(false);
-    if (sessionRoute?.turn) {
+    const savedPositionUnavailable = sessionRoute?.controls.has('generation') === true;
+    if (sessionRoute?.turn && !savedPositionUnavailable) {
       goCausal(sessionRoute.key, sessionRoute.turn, sessionRoute.readScope);
     } else if (sessionRoute) {
-      void goSession(sessionRoute.key, undefined, false, undefined, sessionRoute.readScope);
+      void goSession(
+        sessionRoute.key,
+        undefined,
+        false,
+        undefined,
+        sessionRoute.readScope,
+        savedPositionUnavailable,
+      );
     } else if (machineBookmark) {
       leaveScreen();
       navigation.route = { v: 'machine', id: capabilities.source_key };
