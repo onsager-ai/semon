@@ -5848,8 +5848,10 @@ pub(crate) fn catalog_names_json(db: &Connection) -> rusqlite::Result<Option<Str
         .optional()
 }
 
-pub(crate) fn publish_catalog_names(options: &crate::Options, source: &str) -> io::Result<()> {
-    let namespace = crate::storage::Namespace::new(source).map_err(io::Error::other)?;
+pub(crate) fn publish_catalog_names(
+    options: &crate::Options,
+    namespace: &crate::storage::Namespace,
+) -> io::Result<()> {
     let _facts_fence = options
         .facts
         .as_ref()
@@ -5877,7 +5879,7 @@ pub(crate) fn publish_catalog_names(options: &crate::Options, source: &str) -> i
     let encoded = serde_json::to_string(&names).map_err(io::Error::other)?;
     let path = super::EventCache::path(&options.cache);
     let db = focused_connection(&path)?;
-    crate::storage::sqlite::qualify(&db, &namespace).map_err(io::Error::other)?;
+    crate::storage::sqlite::qualify(&db, namespace).map_err(io::Error::other)?;
     let previous = catalog_names_json(&db).map_err(io::Error::other)?;
     if previous.as_ref() == Some(&encoded) || (previous.is_none() && names.is_empty()) {
         return Ok(());
@@ -5887,7 +5889,7 @@ pub(crate) fn publish_catalog_names(options: &crate::Options, source: &str) -> i
     let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     require_current(&tx)?;
-    crate::storage::sqlite::qualify(&tx, &namespace).map_err(io::Error::other)?;
+    crate::storage::sqlite::qualify(&tx, namespace).map_err(io::Error::other)?;
     tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES, encoded])
         .map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
