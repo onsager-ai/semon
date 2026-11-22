@@ -1,6 +1,8 @@
 //! Viewer transport over source-qualified warehouse reads.
 use super::selected::render::{Expansion, Part};
-use super::{CatalogReadScope, Continuation, ReadError, Request, Row, Source, index, read_list};
+use super::{
+    CatalogReadScope, Continuation, ReadError, Request, Row, Source, index, read_list, selected,
+};
 use crate::{OverviewSource, session_route::NativeEntryAddress, viewer::ViewerReply};
 use serde_json::{Value, json};
 
@@ -896,7 +898,6 @@ fn read_transcript(
     retained_provider: Option<&dyn crate::SessionSourceReader>,
     expanded: bool,
 ) -> Result<ViewerReply, ViewerReply> {
-    use super::selected;
     if query.len() > 128 * 1024 {
         return Err(invalid());
     }
