@@ -2197,7 +2197,7 @@ mod tests {
                  JOIN warehouse_prefix p ON p.source=c.source
                  WHERE c.path=?1 AND p.superseded=0",
                 [carrier.to_str().unwrap()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, u64::try_from(row.get::<_, i64>(1)?).unwrap())),
             )
             .optional()
             .unwrap()
@@ -7186,24 +7186,27 @@ mod tests {
                     let mut seen = [None; 2];
                     let mut reads = 0;
                     while writing.load(Ordering::SeqCst) || reads < 10 {
-                        let catalog = core.respond("GET", "/api/sessions", "limit=4", None);
-                        assert_eq!(
-                            catalog.status,
-                            200,
-                            "{}",
-                            String::from_utf8_lossy(&catalog.body)
-                        );
-                        let catalog = body_of(&catalog);
-                        assert_eq!(catalog["total"], 2);
-                        let rows = catalog["items"].as_array().unwrap();
-                        assert_eq!(rows.len(), 2);
                         for (at, (source, sid)) in
                             [("a", "lane-a"), ("b", "lane-b")].into_iter().enumerate()
                         {
-                            assert!(
-                                rows.iter()
-                                    .any(|row| row["key"] == sid && row["machine"]["key"] == source)
+                            let catalog = core.respond(
+                                "GET",
+                                "/api/sessions",
+                                &format!("machine={source}&limit=4"),
+                                None,
                             );
+                            assert_eq!(
+                                catalog.status,
+                                200,
+                                "{}",
+                                String::from_utf8_lossy(&catalog.body)
+                            );
+                            let catalog = body_of(&catalog);
+                            assert_eq!(catalog["total"], 1);
+                            let rows = catalog["items"].as_array().unwrap();
+                            assert_eq!(rows.len(), 1);
+                            assert_eq!(rows[0]["key"], sid);
+                            assert_eq!(rows[0]["machine"]["key"], source);
                             let page = core.respond(
                                 "GET",
                                 "/api/session-transcript",
