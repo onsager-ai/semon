@@ -124,6 +124,7 @@ pub(super) enum ReadError {
     Scope,
     Restart,
     RetainedUnverified,
+    PeerUnavailable(String),
 }
 
 impl std::fmt::Display for ReadError {
@@ -132,6 +133,7 @@ impl std::fmt::Display for ReadError {
             Self::Index(error) => f.write_str(error),
             Self::Scope => f.write_str("Discard the cursor when changing workspace, source or filters."),
             Self::Restart => f.write_str("The committed session view changed. Restart at the first page."),
+            Self::PeerUnavailable(reason) => f.write_str(reason),
             Self::RetainedUnverified => f.write_str("retained_identity_unverified: no verified original warehouse identity is available for this key."),
         }
     }

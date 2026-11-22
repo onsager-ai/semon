@@ -237,8 +237,62 @@ pub(in super::super) fn retained_record_at(
     };
     let receipt: crate::model::summary::CatalogSource =
         serde_json::from_str(&receipt).map_err(index)?;
+    read_certified_record(identity.harness, receipt, address, kind, provider)
+}
+
+pub(in super::super) fn retained_peer_record_at(
+    source: &Source<'_>,
+    trace: &str,
+    witness: &str,
+    peer: &str,
+    address: &Address,
+    provider: &dyn SessionSourceReader,
+) -> Result<Option<Record>, ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    let observed = warehouse::retained_peer(&tx, &source.namespace, trace, witness, peer)
+        .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
+    let Some(member) = observed.members.into_iter().find(|member| {
+        member
+            .receipt
+            .path
+            .to_str()
+            .and_then(|path| relative(source.options, &observed.harness, path))
+            == Some(address.path.as_str())
+    }) else {
+        return Ok(None);
+    };
+    if address.offset >= member.receipt.offset {
+        return Ok(None);
+    }
+    let at = i64::try_from(address.offset).map_err(index)?;
+    let kind = tx.query_row(
+        "SELECT kind FROM fact_record WHERE source=?1 AND pos=?2 AND block=?3 AND occurrence=?4 AND NOT gap",
+        params![member.source, at, address.block, address.occurrence],
+        |row| row.get::<_, Option<String>>(0),
+    ).optional().map_err(index)?;
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    read_certified_record(observed.harness, member.receipt, address, kind, provider).map_err(
+        |error| match error {
+            ReadError::Restart => ReadError::PeerUnavailable(
+                "The source provider could not verify the observed peer prefix.".into(),
+            ),
+            error => error,
+        },
+    )
+}
+
+fn read_certified_record(
+    harness: String,
+    receipt: crate::model::summary::CatalogSource,
+    address: &Address,
+    kind: Option<String>,
+    provider: &dyn SessionSourceReader,
+) -> Result<Option<Record>, ReadError> {
     let reference = SessionSourceRef {
-        root: identity.harness,
+        root: harness,
         path: address.path.clone(),
         native_id: receipt.native_id,
         offset: receipt.offset,

@@ -1757,6 +1757,161 @@ fn warehouse_current_provider_pins_the_selected_original_across_pages() {
 }
 
 #[test]
+fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
+    use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
+    use std::{
+        io,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct PeerProvider {
+        bytes: Vec<u8>,
+        calls: AtomicUsize,
+    }
+    impl SessionSourceReader for PeerProvider {
+        fn read_range(
+            &self,
+            source: &SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> io::Result<SessionSourceRange> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if source.root != "claude"
+                || source.path != "projects/proj/peer.jsonl"
+                || source.native_id != "peer"
+                || source.offset != self.bytes.len() as u64
+                || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.bytes))
+                || expected.is_some_and(|generation| generation != "fixture-peer")
+            {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let start = usize::try_from(offset).map_err(io::Error::other)?;
+            let end = (start + max).min(self.bytes.len());
+            Ok(SessionSourceRange {
+                generation: "fixture-peer".into(),
+                length: source.offset,
+                offset,
+                bytes: self.bytes[start..end].into(),
+                cached: false,
+            })
+        }
+    }
+
+    let mut fixture = Fixture::new("retained-trace-peer");
+    let root = fixture.claude("root", "Original trace");
+    let peer = fixture.claude("peer", "Original peer");
+    append_native(
+        &root,
+        json!({"type":"assistant","uuid":"call","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"send","name":"SendMessage","input":{"to":"peer","message":"hello"}}
+        ]}}),
+    );
+    append_native(
+        &root,
+        json!({"type":"user","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:02Z","toolUseResult":{"success":true,"msg_id":"delivery"},
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]}}),
+    );
+    append_native(
+        &peer,
+        json!({"type":"user","sessionId":"peer","timestamp":"2026-09-24T00:00:03Z",
+        "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/111.sock","name":"root",
+            "fromMode":"prompting","msg_id":"delivery","body":"hello","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+        "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\" from-name=\"root\">hello</cross-session-message>"}}),
+    );
+    let publish = |fixture: &mut Fixture| {
+        crate::model::observe_catalog(
+            &fixture.options,
+            &mut fixture.cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+    };
+    publish(&mut fixture);
+    let provider = PeerProvider {
+        bytes: fs::read(&peer).unwrap(),
+        calls: AtomicUsize::new(0),
+    };
+    let address = selected::Address {
+        path: "projects/proj/peer.jsonl".into(),
+        offset: 0,
+        block: 0,
+        occurrence: 0,
+    };
+    fixture.claude("root", "Replacement trace");
+    let db = Connection::open(&fixture.db).unwrap();
+    let root_identity = warehouse::retained_identity(&db, &fixture.namespace, "root").unwrap();
+    let source = fixture.source(&[&root, &peer]);
+    assert!(matches!(
+        selected::retained_record_at(&fixture.options, &source, "peer", &address, &provider),
+        Err(ReadError::RetainedUnverified)
+    ));
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    let open = |fixture: &Fixture, witness: &str, key: &str| {
+        selected::retained_peer_record_at(
+            &fixture.source(&[&root, &peer]),
+            "root",
+            witness,
+            key,
+            &address,
+            &provider,
+        )
+    };
+    assert!(matches!(
+        open(&fixture, "replacement", "peer"),
+        Err(ReadError::PeerUnavailable(_))
+    ));
+    assert!(matches!(
+        open(&fixture, &root_identity.witness, "other"),
+        Err(ReadError::PeerUnavailable(_))
+    ));
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        open(&fixture, &root_identity.witness, "peer")
+            .unwrap()
+            .unwrap()
+            .text()
+            .as_deref(),
+        Some("Original peer")
+    );
+
+    append_native(&peer, prompt("peer", 4, "After the trace"));
+    publish(&mut fixture);
+    assert_eq!(
+        open(&fixture, &root_identity.witness, "peer")
+            .unwrap()
+            .unwrap()
+            .text()
+            .as_deref(),
+        Some("Original peer")
+    );
+    fixture.claude("peer", "Replacement peer");
+    assert_eq!(
+        open(&fixture, &root_identity.witness, "peer")
+            .unwrap()
+            .unwrap()
+            .text()
+            .as_deref(),
+        Some("Original peer")
+    );
+
+    db.execute(
+        "UPDATE warehouse_identity SET witness='' WHERE catalog_key='peer' AND retained=1",
+        [],
+    )
+    .unwrap();
+    let calls = provider.calls.load(Ordering::Relaxed);
+    assert!(
+        matches!(open(&fixture, &root_identity.witness, "peer"), Err(ReadError::PeerUnavailable(reason)) if reason.contains("custody"))
+    );
+    assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
+}
+
+#[test]
 fn warehouse_retained_address_reads_only_the_certified_original_from_provider() {
     use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
     use std::io;

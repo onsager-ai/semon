@@ -22,7 +22,7 @@ mod causal;
 mod parent_relay;
 #[path = "retained.rs"]
 mod retained;
-pub(super) use retained::{retained_page, retained_record_at};
+pub(super) use retained::{retained_page, retained_peer_record_at, retained_record_at};
 
 const MEMBER_PAGE: i64 = 64;
 const PAGE_BYTES: usize = 8 * 1024 * 1024;

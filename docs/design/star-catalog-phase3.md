@@ -70,6 +70,13 @@ well as selecting metadata from committed facts.
   `scope=retained_history` through Back and evidence navigation. A plain link
   opens the replacement if its Catalog key is reused. Explicit History reads
   keep the `retained_identity_unverified` refusal for unqualified bindings.
+- Owner decision 2026-11-22: a retained trace certifies the peer component,
+  source incarnations, and committed member prefixes it observed. A History
+  evidence link names that trace binding and peer. It opens those exact
+  prefixes under qualifying current or frozen custody. If the observation or
+  custody no longer qualifies, show why the peer is unavailable. A peer link
+  never falls through to a replacement owner, and an ordinary unbound History
+  request still returns `retained_identity_unverified`.
 - Qualification starts with the new schema. The host rebuild replays authorized
   originals without importing old Index rows or a custody manifest. Pre-cutover
   retained keys without a verified warehouse binding get the same explicit

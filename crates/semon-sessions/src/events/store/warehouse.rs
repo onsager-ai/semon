@@ -6,7 +6,7 @@ pub(super) mod identity;
 mod maintenance;
 
 #[cfg(test)]
-pub(crate) use identity::{RetainedIdentityError, retained_identity};
+pub(crate) use identity::{RetainedIdentityError, retained_identity, retained_peer};
 
 use std::sync::OnceLock;
 
