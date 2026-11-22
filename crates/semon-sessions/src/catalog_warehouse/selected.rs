@@ -26,9 +26,9 @@ pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
-    PeerBinding, retained_addressed_window, retained_annotations, retained_latest_page,
-    retained_page, retained_peer_record_at, retained_peer_relay_address, retained_peer_window,
-    retained_record_at, retained_turn,
+    PeerBinding, retained_activity_anchor, retained_addressed_window, retained_annotations,
+    retained_latest_page, retained_page, retained_peer_record_at, retained_peer_relay_address,
+    retained_peer_window, retained_record_at, retained_turn,
 };
 
 const MEMBER_PAGE: i64 = 64;
@@ -997,21 +997,18 @@ pub(super) fn evidence_at(
 }
 
 pub(super) fn activity_anchor(
-    options: &Options,
     source: &Source<'_>,
     key: &str,
     anchor: &crate::transcript_range::StepAnchor,
-    cursor: Option<&Cursor>,
-) -> Result<Option<Record>, ReadError> {
+) -> Result<Option<Component>, ReadError> {
     read(
-        options,
+        source.options,
         source,
         CatalogReadScope::Current,
         key,
         Target::Activity(anchor),
-        cursor,
+        None,
     )
-    .map(|component| component.and_then(|component| component.records.into_iter().next()))
 }
 
 struct ActivityEvidence {
@@ -1019,6 +1016,43 @@ struct ActivityEvidence {
     events: String,
     usage: Option<crate::events::session_activity::SourcePosition>,
     call: Option<crate::events::session_activity::SourcePosition>,
+}
+
+impl ActivityEvidence {
+    fn matches_member(&mut self, mut selected: crate::model::summary::CatalogSource) -> bool {
+        let Some(saved) = self.sources.remove(&selected.path) else {
+            return false;
+        };
+        selected.native_role.clone_from(&saved.native_role);
+        selected == saved
+    }
+
+    fn candidate(
+        &self,
+        query: &mut rusqlite::Statement<'_>,
+        id: i64,
+        end: u64,
+        carrier: &str,
+        predecessors: &str,
+    ) -> Result<Option<(Position, Option<String>)>, ReadError> {
+        let offset = |position: Option<&crate::events::session_activity::SourcePosition>| {
+            position
+                .filter(|position| position.source == carrier)
+                .map(|position| i64::try_from(position.offset).map_err(index))
+                .transpose()
+        };
+        query
+            .query_row(
+                named_params! {
+                    ":source": id, ":end": i64::try_from(end).map_err(index)?,
+                    ":events": self.events, ":usage": offset(self.usage.as_ref())?,
+                    ":call": offset(self.call.as_ref())?, ":predecessors": predecessors,
+                },
+                |row| position(row, id),
+            )
+            .optional()
+            .map_err(index)
+    }
 }
 
 fn activity_evidence(
@@ -1327,15 +1361,11 @@ fn read(
                     }
                     confirmed += 1;
                 }
-                if let Some(activity) = activity.as_mut() {
-                    let mut selected = committed.source(Path::new(&carrier), &reference.native_id);
-                    let Some(saved) = activity.sources.remove(Path::new(&carrier)) else {
-                        return Ok(None);
-                    };
-                    selected.native_role.clone_from(&saved.native_role);
-                    if selected != saved {
-                        return Ok(None);
-                    }
+                if activity.as_mut().is_some_and(|activity| {
+                    !activity
+                        .matches_member(committed.source(Path::new(&carrier), &reference.native_id))
+                }) {
+                    return Ok(None);
                 }
                 let member = Arc::new(Member {
                     carrier,
@@ -1425,18 +1455,13 @@ fn read(
                             component,
                             view,
                         )?;
-                        let offset =
-                            |position: Option<&crate::events::session_activity::SourcePosition>| {
-                                position
-                                    .filter(|position| position.source == member.carrier)
-                                    .map(|position| i64::try_from(position.offset).map_err(index))
-                                    .transpose()
-                            };
-                        if let Some(found) = activity_query.query_row(named_params! {
-                            ":source": id, ":end": i64::try_from(committed.offset).map_err(index)?,
-                            ":events": activity.events, ":usage": offset(activity.usage.as_ref())?,
-                            ":call": offset(activity.call.as_ref())?, ":predecessors": predecessors,
-                        }, |row| position(row, id)).optional().map_err(index)? {
+                        if let Some(found) = activity.candidate(
+                            &mut activity_query,
+                            id,
+                            committed.offset,
+                            &member.carrier,
+                            &predecessors,
+                        )? {
                             keep(found);
                         }
                         continue;

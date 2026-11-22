@@ -1481,9 +1481,10 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         id: ActivityStepId::Claude("activity-message".into()),
     };
     let source = fixture.source(&[&claude, &codex]);
-    let found = selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+    let component = selected::activity_anchor(&source, "native", &anchor)
         .unwrap()
         .unwrap();
+    let found = &component.records[0];
     assert_eq!(found.text().as_deref(), Some("Review complete"));
     let oracle = |key| {
         let reply = crate::session_transcript_range_with_mode(
@@ -1506,14 +1507,14 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
     assert_eq!(found.entry_anchor.as_deref(), entry["entry_id"].as_str());
     anchor.ordinal = 1;
     assert!(
-        selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+        selected::activity_anchor(&source, "native", &anchor)
             .unwrap()
             .is_none()
     );
     anchor.ordinal = 0;
     anchor.generation.push_str("-stale");
     assert!(
-        selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+        selected::activity_anchor(&source, "native", &anchor)
             .unwrap()
             .is_none()
     );
@@ -1547,6 +1548,29 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         assert_eq!(reply.status, 200, "{value}");
         value
     };
+    let page = body(http::transcript(&configured, "sid=native", None, None));
+    let usage_entry = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "Review complete")
+        .unwrap();
+    let activity = |generation: &str| {
+        let step = json!(anchor.id).to_string();
+        let query = crate::native_html::query(&[
+            ("sid", "native"),
+            ("generation", generation),
+            ("ordinal", "0"),
+            ("step", &step),
+        ]);
+        body(http::activity_anchor(&configured, &query, None, None))
+    };
+    assert_eq!(activity(&anchor.generation)["available"], false);
+    let generation = anchor.generation.strip_suffix("-stale").unwrap();
+    let evidence = activity(generation);
+    assert_eq!(evidence["available"], true);
+    assert_eq!(evidence["address"], usage_entry["address"]);
+
     let page = body(http::transcript(
         &configured,
         "sid=codex-native",
@@ -3124,7 +3148,7 @@ fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
 }
 
 #[test]
-fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
+fn warehouse_selected_runtime_uses_qualified_parent_and_child_run_evidence() {
     let mut fixture = Fixture::new("child-runtime");
     let root = fixture.claude("root", "Delegate work");
     append_native(
@@ -3162,7 +3186,7 @@ fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
     )
     .unwrap();
 
-    let read = |fixture: &mut Fixture, expected: &str| {
+    let read = |fixture: &mut Fixture, list: &str, detail: &str| {
         crate::model::observe_catalog(
             &fixture.options,
             &mut fixture.cache,
@@ -3184,23 +3208,26 @@ fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
             .find(|row| row.position.key == "worker")
             .unwrap();
         assert_eq!(row.parent.as_deref(), Some("root"));
-        assert_eq!(row.status, Some(expected));
+        assert_eq!(row.status, Some(list));
+        let source = fixture.source(&[&root, &child]);
+        let (row, _) = focused_metadata(&source, "worker").unwrap().unwrap();
+        assert_eq!(row.status, Some(detail));
         let oracle: String = Connection::open(&fixture.db).unwrap().query_row(
             "SELECT json_extract(metadata,'$.state') FROM session_trace_headers WHERE session_key='worker'",
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(row.status, Some(oracle.as_str()));
     };
-    read(&mut fixture, "work");
+    read(&mut fixture, "work", "work");
     append_native(
         &root,
         json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
         "origin":{"kind":"task-notification"},"message":{"role":"user","content":
         "<task-notification><task-id>worker</task-id><tool-use-id>agent-call</tool-use-id><status>failed</status><result>failed</result></task-notification>"}}),
     );
-    read(&mut fixture, "err");
+    read(&mut fixture, "work", "err");
     append_native(&child, prompt("root", 4, "Try again"));
-    read(&mut fixture, "work");
+    read(&mut fixture, "work", "work");
     let mut missing_parent = fixture.source(&[&root, &child]);
     missing_parent
         .inventory
@@ -3215,7 +3242,7 @@ fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
         None
     );
     write_start(778);
-    read(&mut fixture, "done");
+    read(&mut fixture, "done", "done");
 }
 
 #[test]

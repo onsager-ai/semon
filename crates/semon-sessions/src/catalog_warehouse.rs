@@ -401,6 +401,7 @@ pub(super) enum ReadError {
     RetainedUnavailable,
     RetainedPreparing,
     PeerUnavailable(String),
+    ActivityUnavailable,
 }
 
 impl std::fmt::Display for ReadError {
@@ -410,6 +411,7 @@ impl std::fmt::Display for ReadError {
             Self::Scope => f.write_str("Discard the cursor when changing workspace, source or filters."),
             Self::Restart => f.write_str("The committed session view changed. Restart at the first page."),
             Self::PeerUnavailable(reason) => f.write_str(reason),
+            Self::ActivityUnavailable => f.write_str("The activity evidence is outside the selected prefixes."),
             Self::RetainedPreparing => f.write_str("Preparing recorded history."),
             Self::RetainedUnavailable => f.write_str("The frozen session prefix is unavailable from its authorized source reader."),
             Self::RetainedUnverified => f.write_str("retained_identity_unverified: no verified original warehouse identity is available for this key."),
@@ -664,7 +666,11 @@ impl<'a> Snapshot<'a> {
         Ok((selected, total, examined, next))
     }
 
-    fn runtime_status(&self, owners: &[i64]) -> Result<BTreeMap<i64, &'static str>, ReadError> {
+    fn runtime_status(
+        &self,
+        owners: &[i64],
+        selected: bool,
+    ) -> Result<BTreeMap<i64, &'static str>, ReadError> {
         use crate::facts::source_authority::CurrentSources;
         let options = self.source.options;
         let observed = crate::native_evidence::RuntimeObservations::new(options);
@@ -803,8 +809,14 @@ impl<'a> Snapshot<'a> {
                 && !unqualified.contains(&child.root)
                 && !unqualified.contains(&child.child)
             {
-                let state =
-                    child_runtime_state(&mut evidence, &child, alive.contains(&child.root))?;
+                let root_alive = alive.contains(&child.root);
+                let state = if selected {
+                    child_runtime_state(&mut evidence, &child, root_alive)?
+                } else if root_alive {
+                    "work"
+                } else {
+                    "done"
+                };
                 status.insert(child.child, state);
             }
         }
@@ -837,12 +849,12 @@ impl<'a> Snapshot<'a> {
         Ok(priced)
     }
 
-    fn enrich(&self, rows: &mut [Row]) -> Result<(), ReadError> {
+    fn enrich(&self, rows: &mut [Row], selected: bool) -> Result<(), ReadError> {
         if rows.is_empty() {
             return Ok(());
         }
         let owners: Vec<_> = rows.iter().map(|row| row.owner).collect();
-        let status = self.runtime_status(&owners)?;
+        let status = self.runtime_status(&owners, selected)?;
         let owners = encode(&owners)?;
         let table = crate::pricing::snapshot();
         let mut priced = Self::priced_usage(self.transaction, &self.paths, &owners, &table)?;
@@ -1068,7 +1080,7 @@ fn selected_metadata(
         coverage: Coverage::default(),
         revision: String::new(),
     };
-    snapshot.enrich(&mut rows)?;
+    snapshot.enrich(&mut rows, true)?;
     let mut relatives = rows
         .into_iter()
         .map(|row| (row.owner, row))
@@ -1360,7 +1372,7 @@ pub(super) fn read_list(
                 }
             });
             let (mut local, count, scanned, next) = snapshot.rows(request, boundary)?;
-            snapshot.enrich(&mut local)?;
+            snapshot.enrich(&mut local, false)?;
             Ok((
                 (local, count, scanned, next),
                 snapshot.coverage,

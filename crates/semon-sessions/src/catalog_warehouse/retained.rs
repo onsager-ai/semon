@@ -133,6 +133,19 @@ pub(in super::super) fn retained_turn(
     read_retained_page(source, key, Target::Turn(turn), None, provider)
 }
 
+pub(in super::super) fn retained_activity_anchor(
+    source: &Source<'_>,
+    key: &str,
+    anchor: &crate::transcript_range::StepAnchor,
+    provider: &dyn SessionSourceReader,
+) -> Result<Option<Component>, ReadError> {
+    match read_retained_page(source, key, Target::Activity(anchor), None, provider) {
+        Ok(component) => Ok(Some(component)),
+        Err(ReadError::ActivityUnavailable) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn read_retained_page(
     source: &Source<'_>,
     key: &str,
@@ -153,7 +166,9 @@ fn read_frozen_page(
 ) -> Result<Component, ReadError> {
     let (direction, address) = match target {
         Target::Page(_, direction) => (direction, None),
-        Target::Turn(_) | Target::Annotations(_) => (Direction::Forward, None),
+        Target::Turn(_) | Target::Annotations(_) | Target::Activity(_) => {
+            (Direction::Forward, None)
+        }
         Target::Address(address, Some(binding)) => (Direction::Reverse, Some((address, binding))),
         _ => unreachable!("retained transcript target"),
     };
@@ -243,6 +258,11 @@ fn read_frozen_page(
     {
         return Err(ReadError::Restart);
     }
+    let mut activity = if let Target::Activity(anchor) = target {
+        Some(activity_evidence(&tx, key, anchor)?.ok_or(ReadError::ActivityUnavailable)?)
+    } else {
+        None
+    };
     let member_count = members.len();
     let prefixes = encode(
         &members
@@ -259,6 +279,9 @@ fn read_frozen_page(
     {
         let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
         let mut positions = tx.prepare_cached(direction.statement()).map_err(index)?;
+        let mut activity_query = tx
+            .prepare_cached(include_str!("activity_evidence.sql"))
+            .map_err(index)?;
         let mut ledgers = tx
             .prepare_cached("SELECT incarnation,ledger FROM warehouse_source WHERE source=?1")
             .map_err(index)?;
@@ -271,6 +294,12 @@ fn read_frozen_page(
             let carrier = receipt.path.to_str().ok_or(ReadError::RetainedUnverified)?;
             let path =
                 relative(source.options, &harness, carrier).ok_or(ReadError::RetainedUnverified)?;
+            if activity
+                .as_mut()
+                .is_some_and(|activity| !activity.matches_member(receipt.clone()))
+            {
+                return Err(ReadError::ActivityUnavailable);
+            }
             let (incarnation, ledger): (i64, String) = ledgers
                 .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(index)?;
@@ -282,12 +311,22 @@ fn read_frozen_page(
                 prefix_sha256: receipt.prefix_sha256,
                 tail_sha256: receipt.tail_sha256,
             });
-            if live {
-                carriers.insert(path.to_owned(), (carrier.to_owned(), ledger));
-            }
+            let state = if live {
+                let current = decode(&ledger)?;
+                if matches!(source.availability(&harness, carrier)?,
+                    Availability::Expected(Some(stat)) if stable_or_grown(&current.stat, &stat))
+                {
+                    carriers.insert(path.to_owned(), (carrier.to_owned(), current));
+                    "cached"
+                } else {
+                    "unavailable"
+                }
+            } else {
+                "unavailable"
+            };
             references.push(crate::CatalogSourceObservation {
                 source: (*reference).clone(),
-                state: "unavailable".into(),
+                state: state.into(),
             });
             let prefix = Prefix {
                 source: id,
@@ -305,6 +344,21 @@ fn read_frozen_page(
             let predecessors =
                 predecessor_bounds(&mut copies, &harness, &prefixes, &reference.native_id, id)?;
             turn_members.push((id, reference.clone(), predecessors.clone()));
+            if let Some(activity) = &activity {
+                if let Some((position, kind)) = activity.candidate(
+                    &mut activity_query,
+                    id,
+                    receipt.offset,
+                    carrier,
+                    &predecessors,
+                )? {
+                    candidates.insert(position, (kind, reference.clone(), prefix, revision));
+                    if candidates.len() > limit {
+                        direction.discard_extra(&mut candidates);
+                    }
+                }
+                continue;
+            }
             if let Target::Annotations(_) = target {
                 annotation_members.insert(id, ((*reference).clone(), revision, predecessors));
                 continue;
@@ -383,6 +437,9 @@ fn read_frozen_page(
             )?;
         }
     }
+    if activity.is_some_and(|activity| !activity.sources.is_empty()) {
+        return Err(ReadError::ActivityUnavailable);
+    }
     let annotations = if let Target::Annotations(request) = target {
         Some(annotation_page(
             &tx,
@@ -425,7 +482,7 @@ fn read_frozen_page(
     drop(tx);
     let local_budget = Mutex::new(PAGE_BYTES);
     let peer_reader = FrozenPeerReader {
-        source,
+        index_path: source.path,
         db: db.clone(),
         carriers,
         provider,
@@ -579,9 +636,9 @@ fn read_frozen_page(
     })
 }
 struct FrozenPeerReader<'a> {
-    source: &'a Source<'a>,
+    index_path: &'a Path,
     db: Arc<chunk_proofs::Snapshot>,
-    carriers: BTreeMap<String, (String, String)>,
+    carriers: BTreeMap<String, (String, Ledger)>,
     provider: &'a dyn SessionSourceReader,
     budget: &'a Mutex<usize>,
     readers: Mutex<BTreeMap<String, PrefixReader<'a>>>,
@@ -604,33 +661,28 @@ impl SessionSourceReader for FrozenPeerReader<'_> {
         offset: u64,
         max: usize,
     ) -> io::Result<SessionSourceRange> {
-        if let Some((carrier, ledger)) = self.carriers.get(&reference.path) {
-            let mut readers = self.readers.lock().map_err(|_| changed())?;
-            if let Some(reader) = readers.get(&reference.path) {
-                return reader.read_range(reference, generation, offset, max);
-            }
-            let current = decode(ledger).map_err(|_| changed())?;
-            if matches!(self.source.availability(&reference.root, carrier).map_err(|_| changed())?,
-                Availability::Expected(Some(stat)) if stable_or_grown(&current.stat, &stat))
-            {
-                let reader = PrefixReader::open(
+        let Some((carrier, current)) = self.carriers.get(&reference.path) else {
+            return self.provider.read_range(reference, generation, offset, max);
+        };
+        let mut readers = self.readers.lock().map_err(|_| changed())?;
+        let reader = match readers.entry(reference.path.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+                PrefixReader::open(
                     self.db.clone(),
-                    self.source.path,
+                    self.index_path,
                     Arc::new(Member {
                         carrier: carrier.clone(),
-                        current,
+                        current: current.clone(),
                         reference: reference.clone(),
                         remote: false,
                     }),
                     self.budget,
                 )
-                .map_err(|_| changed())?;
-                let result = reader.read_range(reference, generation, offset, max);
-                readers.insert(reference.path.clone(), reader);
-                return result;
-            }
-        }
-        self.provider.read_range(reference, generation, offset, max)
+                .map_err(|_| changed())?,
+            ),
+        };
+        reader.read_range(reference, generation, offset, max)
     }
 }
 

@@ -51,6 +51,12 @@ fn read_error(error_value: ReadError) -> ViewerReply {
         ReadError::PeerUnavailable(reason) => {
             error(409, "retained_peer_unavailable", &reason, false)
         }
+        ReadError::ActivityUnavailable => error(
+            409,
+            "activity_unavailable",
+            "The activity evidence is outside the selected prefixes.",
+            false,
+        ),
         ReadError::Index(_) => error(
             503,
             "catalog_unavailable",
@@ -623,6 +629,111 @@ pub(super) fn anchor(
             json!({
                 "api":1,"projection":7,"source_key":configured.key,"catalog_key":key,
                 "read_scope":request.scope,"turn":turn,"address":address,
+            }),
+        ))
+    };
+    match read() {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
+
+pub(super) fn activity_anchor(
+    configured: &OverviewSource,
+    query: &str,
+    current_provider: Option<&dyn crate::SessionSourceReader>,
+    retained_provider: Option<&dyn crate::SessionSourceReader>,
+) -> ViewerReply {
+    let read = || -> Result<ViewerReply, ViewerReply> {
+        if query.len() > 64 * 1024 {
+            return Err(invalid());
+        }
+        let mut selected = Vec::new();
+        let mut evidence = std::collections::BTreeMap::new();
+        for field in query.split('&') {
+            let (name, value) = field.split_once('=').ok_or_else(invalid)?;
+            if matches!(name, "generation" | "ordinal" | "step") {
+                let value = crate::viewer::decoded(value).ok_or_else(invalid)?;
+                if evidence.insert(name, value).is_some() {
+                    return Err(invalid());
+                }
+            } else {
+                selected.push(field);
+            }
+        }
+        let request = selected_request(configured, &selected.join("&"))?;
+        let key = request.sid.as_deref().ok_or_else(invalid)?;
+        let field = |name| evidence.get(name).map(String::as_str).ok_or_else(invalid);
+        let requested = crate::transcript_range::StepAnchor {
+            generation: field("generation")?.to_owned(),
+            ordinal: field("ordinal")?.parse().map_err(|_| invalid())?,
+            id: serde_json::from_str(field("step")?).map_err(|_| invalid())?,
+        };
+        if requested.generation.is_empty()
+            || requested.generation.len() > 4096
+            || i64::try_from(requested.ordinal).is_err()
+        {
+            return Err(invalid());
+        }
+        let missing =
+            |reason| crate::catalog::reply(200, json!({"available":false,"reason":reason}));
+        if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
+            return Err(reply);
+        }
+        let path = crate::events::EventCache::path(&configured.options.cache);
+        let namespace = crate::storage::Namespace::new(&configured.key)
+            .map_err(index)
+            .map_err(read_error)?;
+        let source = Source::focused(namespace, &path, &configured.options, current_provider)
+            .map_err(read_error)?;
+        let component = match request.scope {
+            CatalogReadScope::Current => super::selected::activity_anchor(&source, key, &requested),
+            CatalogReadScope::RetainedHistory => {
+                let archive = super::ArchiveReader::new(&configured.options);
+                super::selected::retained_activity_anchor(
+                    &source,
+                    key,
+                    &requested,
+                    retained_provider.unwrap_or(&archive),
+                )
+            }
+        }
+        .map_err(read_error)?;
+        let Some(component) = component else {
+            return Ok(missing("evidence_unavailable"));
+        };
+        let Some(record) = component.records.first() else {
+            return Ok(missing("evidence_unavailable"));
+        };
+        let mut entries = super::selected::render::entries(
+            &component,
+            &configured.key,
+            key,
+            crate::model::now_ms(),
+        )
+        .into_iter()
+        .filter(|entry| match &record.entry_anchor {
+            Some(id) => entry["entry_id"] == id.as_str(),
+            None => match &requested.id {
+                crate::events::session_activity::ActivityStepId::Claude(_) => {
+                    entry["k"] == "a" && entry["address"]["block"] == 0
+                }
+                crate::events::session_activity::ActivityStepId::Codex(_) => entry["k"] == "tool",
+            },
+        });
+        let Some(entry) = entries.next() else {
+            return Ok(missing("entry_unavailable"));
+        };
+        if entries.next().is_some() {
+            return Ok(missing("entry_ambiguous"));
+        }
+        Ok(crate::catalog::reply(
+            200,
+            json!({
+                "available": true, "projection": 7, "source_key": configured.key,
+                "catalog_key": key, "read_scope": request.scope,
+                "activity_generation": requested.generation,
+                "step": {"ordinal":requested.ordinal,"id":requested.id},
+                "address": entry["address"],
             }),
         ))
     };
