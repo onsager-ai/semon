@@ -273,3 +273,98 @@ request or refresh. An incarnation change, replacement, rewrite, truncation,
 custody change or membership change, including one caused by a late parent
 link, requires an explicit restart. Cursor state is bounded by the sources a
 page touches. The server holds no cursor state between requests.
+
+### Prefix receipts in the selected-read fixture adapter
+
+The Index writes one `warehouse_prefix` receipt when an admitted source
+first commits or advances its consumed offset. The receipt records the source
+incarnation ID, committed offset and ledger at that boundary. It contains no
+source text. Receipts commit with the facts and native proof pages. Keep receipts
+from the last 24 hours plus the newest receipt per source incarnation. Normal
+ingest collects expired superseded receipts in bounded batches and records
+the highest removed revision. The reader explicitly restarts a cursor older
+than 24 hours or at or below that revision. Collection can invalidate a
+recent cursor when a long-idle source advances and loses its old receipt.
+
+A first page records the highest receipt revision in its snapshot. A later page
+can use that revision to recover the same bound for a member it has not read
+yet. The cursor also carries a digest of the selected member identities and
+carrier paths and the prefix receipts for the sources read by the previous page.
+The Index incarnation, canonical selection and current source authority qualify
+these values on each request. Covering blocks come from the current proof tree
+in the page's SQLite snapshot. A receipt and current proof may be combined only
+within the same source incarnation. The reader caps returned data at the
+receipt offset. It re-verifies read blocks if the local carrier grows during
+body fetch and rechecks the named file and descriptor before returning the page.
+
+This fixture adapter covers current local record positions, copied-record
+suppression, exact-address text lookup and prefix-bounded tool result reads.
+The retained adapter pages original records through an authorized provider
+using the warehouse binding and revalidates the previous page's source
+references. The current adapter exposes native prompt anchors and exact-ID
+relay receipt addresses for selected tool results. It uses the shared native
+launch matcher on a qualified Codex marker and the parent's committed launch
+candidates. The list compares Codex prompt titles, reads qualified top-level
+process status, and prices winning usage facts and legacy Codex counters.
+Schema 54 preserves the versions of native signals that can change when a
+later record enriches an earlier position. The selected fixture adapter reads
+those signal versions and reply facts within the cursor's committed view. It
+compares native entry IDs against the current reader. Schema 55 indexes
+prompt and gap boundaries. Selected records carry the latest unsuppressed
+prompt across member files and pages, bounded by the original receipts. A gap
+resets that prompt at the preceding native timestamp. The adapter resolves
+unique native event and tool-call IDs to proof-checked records and carries the
+turn start's canonical address across files. Relay and launch turn placement,
+operation anchors and the full activity anchor contract still need parity.
+
+For current reads, a host may supply an authorized provider for a committed
+source whose local carrier is absent and whose path remains in the authorized
+inventory. The provider authorizes the exact selected receipt. The reader pins
+one provider generation and length for the request and reauthorizes previous
+provider sources on continuation. The cursor carries a digest of each pinned
+generation. The adapter restarts if source custody changes, including when a
+local carrier appears during provider reads. Pages that can use the provider
+are limited to 32 positions so previous and new reads share the 64-source
+request budget. A changed or invalid existing local carrier still restarts.
+
+The selected family pricing adapter qualifies every member against the
+current inventory and prices each descendant with the same effective rates as
+the list. Inclusive dollars remain unknown when a member has unknown or shared
+cost. Shared dollars count each connected Claude invocation once, using the
+native billing fact of the winner in the existing family fold order. A fixture
+compares inclusive dollars with the current reader and checks shared winner and
+unknown-price coverage.
+
+Selected Claude subagents inherit qualified graph-root process liveness and
+use native hand-backs, task notifications, resumptions and synchronous launch
+results to resolve child state. The fixture compares child state with the
+current reader and covers missing parent custody and PID reuse. Owner decision
+2026-11-22: legacy completion parity is selected-detail only. Ordinary Catalog
+lists use metadata for status and can show a child as working while selected
+detail has proof that it completed.
+
+Schema 56 indexes the native parser's exact Codex operation-to-call position.
+The selected adapter uses that relationship for canonical operation entry IDs
+and to resolve activity evidence. Activity anchors validate the requested
+step generation, ordinal and native identity against the activity projection.
+Its source witness must match the selected warehouse members and prefixes
+before body reads. The fixture compares rendered Claude activity and Codex
+operation addresses with the current reader.
+
+Schema 57 indexes incoming Claude relay positions. The selected fixture
+adapter carries relay boundaries across pages and places qualified native
+launches at the child's first prompt, or at the first native record when its
+selected prefix has no prompt. Marker launch evidence must be inside the
+selected prefix. For a Claude subagent sending to its parent, the selected
+result reader uses the shared native body-first and bounded-time matcher. Both
+endpoints use the same request's local proof reader or independently authorized
+provider. The selected request pins provider generations and shares its byte
+and source budgets across relay evidence and selected records. Explicit progress
+receipts start an incoming turn in the parent. For untyped legacy receipts,
+selected detail uses matched receipts as incoming relay turns and the latest
+unmatched receipt as completion evidence when explicit terminal evidence is
+absent. Pairing is request-local and uses the selected committed prefixes.
+
+PR 3 owns the atomic Viewer route cutover, end-to-end scale verification,
+concurrent HTTP reads during ingestion, and the Viewer/browser gates. The
+fixture adapters remain separate from the production routes until cutover.

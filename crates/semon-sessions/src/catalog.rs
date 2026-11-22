@@ -915,6 +915,26 @@ fn recorded_status(
     Ok(json!({"state":null,"observation":"unavailable"}))
 }
 
+fn relative_source_custody(
+    options: &Options,
+    harness: &str,
+    source: &CatalogSource,
+    recorded: Option<&crate::facts::source_authority::CurrentSources>,
+) -> Result<Option<bool>, ()> {
+    let relative = source_relative(options, harness, source).ok_or(())?;
+    if source_state(source) != "cached" {
+        return Err(());
+    }
+    if harness == "codex" {
+        return recorded
+            .map(|snapshot| snapshot.codex_current(&relative))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|_| ());
+    }
+    Ok(None)
+}
+
 /// Bounded related rows reuse the Catalog owner's runtime and custody checks.
 /// Callers share one capture and apply the owner's final response fences.
 /// Only the row's published sources are checked; no bodies load.
@@ -941,20 +961,9 @@ pub(crate) fn relative_status(
     }
     let mut retired_native = false;
     for source in &row.sources {
-        let Some(relative) = source_relative(options, &row.harness, source) else {
-            return unavailable();
-        };
-        if row.harness == "codex" {
-            match recorded
-                .map(|snapshot| snapshot.codex_current(&relative))
-                .transpose()
-            {
-                Ok(selected) => retired_native |= selected.flatten() == Some(false),
-                Err(_) => return unavailable(),
-            }
-        }
-        if source_state(source) != "cached" {
-            return unavailable();
+        match relative_source_custody(options, &row.harness, source, recorded) {
+            Ok(selected) => retired_native |= selected == Some(false),
+            Err(()) => return unavailable(),
         }
     }
     recorded_status(

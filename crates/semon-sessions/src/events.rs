@@ -826,7 +826,11 @@ pub(crate) struct Ledger {
 }
 
 impl Ledger {
-    fn source(&self, path: &Path, native_id: &str) -> crate::model::summary::CatalogSource {
+    pub(crate) fn source(
+        &self,
+        path: &Path,
+        native_id: &str,
+    ) -> crate::model::summary::CatalogSource {
         crate::model::summary::CatalogSource {
             path: path.to_owned(),
             native_id: native_id.to_owned(),
@@ -6991,6 +6995,12 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                 );
             }
             if let Some(parent) = parent {
+                let call = &summary.events[parent];
+                let position = warehouse::Position {
+                    offset: call.o,
+                    block: call.b,
+                };
+                summary.warehouse_fact(offset, 0, || Fact::Operation { parent: position });
                 extra(
                     summary,
                     Event {

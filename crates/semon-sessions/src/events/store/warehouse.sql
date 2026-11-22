@@ -9,6 +9,31 @@ CREATE TABLE warehouse_source (
   UNIQUE(origin,harness,logical_source,incarnation)
 ) STRICT;
 CREATE INDEX warehouse_source_logical ON warehouse_source(logical_source,harness,incarnation);
+-- A monotonic commit watermark lets continuations recover the prefix of an
+-- as-yet untouched member without embedding all member ledgers in the cursor.
+-- Receipts contain proof metadata only and are immutable within an incarnation.
+CREATE TABLE warehouse_prefix (
+  revision INTEGER PRIMARY KEY,
+  source INTEGER NOT NULL REFERENCES warehouse_source(source),
+  pos INTEGER NOT NULL,
+  ledger TEXT NOT NULL,
+  committed_at INTEGER NOT NULL,
+  superseded INTEGER NOT NULL CHECK(superseded IN (0,1)),
+  UNIQUE(source,pos)
+) STRICT;
+CREATE INDEX warehouse_prefix_revision ON warehouse_prefix(source,revision);
+CREATE INDEX warehouse_prefix_expiry ON warehouse_prefix(committed_at,revision) WHERE superseded=1;
+CREATE INDEX warehouse_prefix_latest ON warehouse_prefix(source) WHERE superseded=0;
+-- A later record can enrich an earlier signal, for example a compaction
+-- trigger. Preserve the previous interpretation while its cursor can resume.
+CREATE TABLE warehouse_signal (
+  source INTEGER NOT NULL, seq INTEGER NOT NULL, revision INTEGER NOT NULL,
+  retired_revision INTEGER, pos INTEGER NOT NULL, payload TEXT NOT NULL,
+  PRIMARY KEY(source,seq,revision)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX warehouse_signal_position ON warehouse_signal(source,pos,revision);
+CREATE INDEX warehouse_signal_current ON warehouse_signal(source,seq) WHERE retired_revision IS NULL;
+CREATE INDEX warehouse_signal_expiry ON warehouse_signal(retired_revision) WHERE retired_revision IS NOT NULL;
 CREATE TABLE warehouse_current (
   path TEXT PRIMARY KEY, source INTEGER NOT NULL UNIQUE REFERENCES warehouse_source(source)
 ) STRICT, WITHOUT ROWID;
@@ -92,6 +117,11 @@ CREATE TABLE fact_tool_call (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   occurrence INTEGER NOT NULL, ordinal INTEGER, call_id TEXT, tool TEXT,
   task_name TEXT, ts INTEGER, flags INTEGER NOT NULL, target TEXT,
+  PRIMARY KEY(source,pos,block,occurrence)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_operation (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, call_pos INTEGER NOT NULL, call_block INTEGER NOT NULL,
   PRIMARY KEY(source,pos,block,occurrence)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_tool_result (
@@ -203,9 +233,18 @@ CREATE INDEX session_native_key ON dim_session(native_id,harness,source);
 CREATE INDEX session_parent_name ON dim_session(harness,parent_id,nickname);
 CREATE INDEX spawn_call_name ON fact_tool_call(source,tool,task_name);
 CREATE INDEX record_uuid ON fact_record(source,uuid);
+CREATE INDEX record_timed_offset ON fact_record(source,pos) WHERE ts IS NOT NULL AND NOT gap;
+CREATE INDEX record_gap ON fact_record(source,coalesce(ts,-9223372036854775808),pos) WHERE gap;
+CREATE INDEX prompt_position ON fact_prompt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
+CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
+  WHERE pos>=0 AND NOT gap;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
+CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
+CREATE INDEX operation_parent ON fact_operation(source,call_pos,pos);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
+CREATE INDEX relay_receipt_position ON fact_relay_receipt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
+CREATE INDEX relay_receipt_correlation ON fact_relay_receipt(correlation,source,pos,block,occurrence);
 CREATE VIEW dim_lineage AS
 SELECT m.source,g.minimum AS component FROM lineage_member m
 JOIN lineage_group g ON g.id=m.component;

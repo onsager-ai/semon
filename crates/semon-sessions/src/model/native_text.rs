@@ -137,7 +137,7 @@ pub(crate) fn tool_input(record: &Value, block: usize) -> Option<Value> {
     }
 }
 
-pub(super) fn input_string(record: &Value, block: usize, keys: &[&str]) -> Option<String> {
+pub(crate) fn input_string(record: &Value, block: usize, keys: &[&str]) -> Option<String> {
     let input = tool_input(record, block)?;
     keys.iter()
         .find_map(|key| field(&input, key).map(str::to_owned))
@@ -158,7 +158,7 @@ pub(super) fn origin_of(record: &Value) -> Option<&Value> {
 /// The body of a relay or hand-back: `origin.body`, else the tag's text.
 /// With `from`, the `skip`th tag that agent sent (a record can batch
 /// several).
-pub(super) fn received_body(
+pub(crate) fn received_body(
     record: &Value,
     tag: &str,
     from: Option<&str>,

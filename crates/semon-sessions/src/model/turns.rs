@@ -5,6 +5,10 @@
 use super::Kind;
 use super::{BTreeSet, End, Entry, EntryKind, Group, H, Ref, SourceFile, ToolState, Turn, event};
 
+pub(crate) fn native_id(session: &str, file: &str, offset: u64) -> String {
+    format!("{session}:{file}:{offset}")
+}
+
 /// Complete read context for a selected session. No Builder, caches, body reader,
 /// or mutable derivation state is needed. `entries` passed to `split` must already
 /// be merged and placed in native transcript order against these source/edge refs.
@@ -188,7 +192,7 @@ impl TurnContext<'_> {
             turns.push(Turn {
                 id: match turn.start {
                     Some(handoff) => self.handoffs[handoff].out.id.clone(),
-                    None => format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset),
+                    None => native_id(sid, &self.files[turn.file].id, turn.offset),
                 },
                 sid: sid.to_owned(),
                 start: turn

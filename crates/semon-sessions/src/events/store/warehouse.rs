@@ -6,7 +6,7 @@ pub(super) mod identity;
 mod maintenance;
 
 #[cfg(test)]
-pub(crate) use identity::retained_identity;
+pub(crate) use identity::{RetainedIdentityError, retained_identity};
 
 use std::sync::OnceLock;
 
@@ -123,6 +123,106 @@ fn source(
     Ok((source, retired))
 }
 
+pub(crate) const PREFIX_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
+
+fn write_prefix(tx: &Transaction<'_>, source: i64, pos: i64, ledger: &str) -> rusqlite::Result<()> {
+    let now = crate::model::now_ms();
+    put(
+        tx,
+        "UPDATE warehouse_prefix SET superseded=1 WHERE source=?1 AND superseded=0",
+        [source],
+    )?;
+    put(
+        tx,
+        "INSERT INTO warehouse_prefix(source,pos,ledger,committed_at,superseded) VALUES(?1,?2,?3,?4,0)",
+        params![source, pos, ledger, now],
+    )?;
+    let cutoff = now.saturating_sub(PREFIX_WINDOW_MS);
+    let mut expired = tx.prepare_cached(
+        "DELETE FROM warehouse_prefix WHERE revision IN (
+           SELECT revision FROM warehouse_prefix WHERE superseded=1 AND committed_at<?1
+           ORDER BY committed_at,revision LIMIT 128
+         ) RETURNING revision",
+    )?;
+    let mut rows = expired.query([cutoff])?;
+    let mut floor = 0;
+    while let Some(row) = rows.next()? {
+        floor = floor.max(row.get::<_, i64>(0)?);
+    }
+    if floor > 0 {
+        put(
+            tx,
+            "INSERT INTO meta(key,value) VALUES('warehouse_prefix_pruned_through',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value
+             WHERE CAST(meta.value AS INTEGER)<CAST(excluded.value AS INTEGER)",
+            [floor],
+        )?;
+    }
+    put(tx,
+        "DELETE FROM warehouse_signal WHERE (source,seq,revision) IN (
+           SELECT source,seq,revision FROM warehouse_signal
+           WHERE retired_revision<=CAST((SELECT value FROM meta WHERE key='warehouse_prefix_pruned_through') AS INTEGER)
+           ORDER BY retired_revision LIMIT 128
+         )",
+        [],
+    )?;
+    Ok(())
+}
+
+pub(super) fn write_signals(
+    tx: &Transaction<'_>,
+    path: &str,
+    index: &FileIndex,
+    changes: &super::super::DirtyRows,
+) -> rusqlite::Result<()> {
+    if changes.signals.is_empty() && changes.before_signals == index.signals.len() {
+        return Ok(());
+    }
+    let bound: Option<(i64, i64)> = tx
+        .prepare_cached(
+            "SELECT c.source,p.revision FROM warehouse_current c
+         CROSS JOIN warehouse_prefix p ON p.source=c.source AND p.superseded=0 WHERE c.path=?1",
+        )?
+        .query_row([path], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((source, revision)) = bound else {
+        return Ok(());
+    };
+    let mut close = tx.prepare_cached(
+        "UPDATE warehouse_signal SET retired_revision=?3
+         WHERE source=?1 AND seq=?2 AND retired_revision IS NULL AND revision<?3",
+    )?;
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO warehouse_signal(source,seq,revision,pos,payload) VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(source,seq,revision) DO UPDATE SET pos=excluded.pos,payload=excluded.payload",
+    )?;
+    super::changed(
+        changes.before_signals,
+        &changes.signals,
+        &index.signals,
+        |seq, signal| {
+            close.execute(params![source, seq as i64, revision])?;
+            insert.execute(params![
+                source,
+                seq as i64,
+                revision,
+                int(signal.o),
+                json(signal)?
+            ])?;
+            Ok(())
+        },
+        |from| {
+            put(
+                tx,
+                "UPDATE warehouse_signal SET retired_revision=?3
+          WHERE source=?1 AND seq>=?2 AND retired_revision IS NULL",
+                params![source, from as i64, revision],
+            )
+        },
+    )?;
+    Ok(())
+}
+
 pub(super) fn write(
     tx: &Transaction<'_>,
     path: &str,
@@ -147,12 +247,16 @@ pub(super) fn write(
     let started = measurements.start();
     #[cfg(test)]
     let fact_started = SCALE_TIMING.with(|timing| timing.get().map(|_| std::time::Instant::now()));
-    let (source, retired) = source(tx, path, batch.harness, &json(ledger)?, append)?;
-    let (old_offset, sidecar_revision): (i64, i64) = tx
+    let encoded_ledger = json(ledger)?;
+    let (source, retired) = source(tx, path, batch.harness, &encoded_ledger, append)?;
+    let cursor: Option<(i64, i64)> = tx
         .prepare_cached("SELECT pos,sidecar_revision FROM maintenance_cursor WHERE source=?1")?
         .query_row([source], |row| Ok((row.get(0)?, row.get(1)?)))
-        .optional()?
-        .unwrap_or((0, 0));
+        .optional()?;
+    let (old_offset, sidecar_revision) = cursor.unwrap_or_default();
+    if cursor.is_none() || old_offset != int(ledger.offset) {
+        write_prefix(tx, source, int(ledger.offset), &encoded_ledger)?;
+    }
     let path = Path::new(path);
     let mut header_kind = None;
     if batch.harness == "claude" {
@@ -358,8 +462,16 @@ fn write_fact(
             time,
         } => at!(fact_record, kind=>kind,
             uuid=>uuid,message_id=>message_id,parent_id=>parent_id,ts=>time,gap=>false),
-        Fact::Gap => at!(fact_record, kind=>Option::<&str>::None, uuid=>Option::<&str>::None,
-            message_id=>Option::<&str>::None,parent_id=>Option::<&str>::None,ts=>Option::<i64>::None,gap=>true),
+        Fact::Gap => {
+            // A gap resets the turn at the preceding native time. Assign it
+            // at ingest so an append cannot move an earlier gap in a cursor.
+            let time: Option<i64> = tx.prepare_cached(
+                "SELECT ts FROM fact_record WHERE source=?1 AND pos<?2 AND ts IS NOT NULL AND NOT gap
+                 ORDER BY pos DESC LIMIT 1",
+            )?.query_row(params![source, pos], |row| row.get(0)).optional()?;
+            at!(fact_record, kind=>Option::<&str>::None, uuid=>Option::<&str>::None,
+                message_id=>Option::<&str>::None,parent_id=>Option::<&str>::None,ts=>time,gap=>true)
+        }
         Fact::SessionId(id) => at!(fact_session_observation, kind=>"session-id", native_id=>id,
             parent_id=>Option::<&str>::None,nickname=>Option::<&str>::None,
             agent_path=>Option::<&str>::None,metadata=>Option::<&str>::None),
@@ -475,6 +587,9 @@ fn write_fact(
                 at!(fact_relay_send,call_id=>id,target=>target.as_deref().unwrap_or(""),ts=>time)?;
             }
             Ok(())
+        }
+        Fact::Operation { parent } => {
+            at!(fact_operation,call_pos=>int(parent.offset),call_block=>parent.block)
         }
         Fact::ToolResult {
             id,

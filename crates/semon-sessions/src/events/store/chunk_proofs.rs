@@ -19,7 +19,7 @@ impl Snapshot {
         Arc::new(Self(Mutex::new(db)))
     }
 
-    fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Connection>> {
         self.0.lock()
     }
 }

@@ -150,6 +150,34 @@ impl RuntimeObservations {
             fallback: None,
         }
     }
+    #[cfg(test)]
+    pub(crate) fn warehouse_process(
+        &self,
+        harness: &str,
+        native_id: &str,
+    ) -> Option<(u32, &'static str)> {
+        let facts = self.facts.as_ref().filter(|facts| {
+            facts.version == crate::facts::FACTS_VERSION && facts.offline_since.is_none()
+        })?;
+        match harness {
+            "claude" => self
+                .pids
+                .get(native_id)?
+                .iter()
+                .rev()
+                .find(|pid| pid.alive)
+                .map(|pid| (pid.pid, pid.observed_state())),
+            "codex" => {
+                let pid = *facts.codex_locks.get(native_id)?;
+                facts
+                    .proc_starts
+                    .contains_key(&pid)
+                    .then_some((pid, "work"))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn expected(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
         let saved = row
             .query
