@@ -2147,6 +2147,32 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         [], |row| row.get(0)).unwrap();
     assert_eq!(state, "done");
 
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let launch = crate::model::spawn_turn_id("claude", "worker");
+    let query = crate::native_html::query(&[("sid", "worker"), ("turn", &launch)]);
+    let reply = http::trace(&configured, &query, None, None);
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    assert_eq!(trace["handoffs"][0]["from"], "root");
+    let address = &trace["evidence"][1]["address"];
+    assert_eq!(address["record"]["path"], "projects/proj/root.jsonl");
+    let query = crate::native_html::query(&[("sid", "root"), ("address", &address.to_string())]);
+    let reply = http::transcript(&configured, &query, None, None);
+    let transcript: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{transcript}");
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == *address && entry["name"] == "Agent")
+    );
+
     // Removing the selected proof blocks prevents native result reads, but
     // the list still derives its child status from process and metadata only.
     for path in [&root, &child] {
@@ -2194,7 +2220,6 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
     let identity = warehouse::retained_identity(&db, &fixture.namespace, "worker").unwrap();
     let source = fixture.source(&paths);
-    let launch = crate::model::spawn_turn_id("claude", "worker");
     let retained = selected::retained_turn(&source, "worker", &launch, &provider).unwrap();
     let address: crate::session_route::NativeEntryAddress = serde_json::from_value(
         selected::render::turn_address(&retained, source.namespace.as_str(), "worker", &launch)
@@ -2230,6 +2255,40 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     )
     .unwrap();
     assert_eq!(relay.record.offset, offsets[0]);
+    let query = crate::native_html::query(&[
+        ("sid", "worker"),
+        ("scope", "retained_history"),
+        ("turn", &launch),
+    ]);
+    let reply = http::trace(&configured, &query, None, Some(&provider));
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    let relay_turn = crate::model::legacy_relay_turn_id("progress");
+    assert_eq!(trace["turns"][0]["sent"], json!([relay_turn]));
+    let evidence = trace["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["turn"] == relay_turn)
+        .unwrap();
+    assert_eq!(evidence["address"], json!(relay));
+    assert_eq!(evidence["peer"]["witness"], identity.witness);
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("address", &evidence["address"].to_string()),
+        ("peer", &evidence["peer"].to_string()),
+    ]);
+    let reply = http::transcript(&configured, &query, None, Some(&provider));
+    let transcript: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{transcript}");
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == evidence["address"] && entry["turn"] == relay_turn)
+    );
     let opened = selected::retained_peer_window(
         &source,
         "root",
@@ -3594,6 +3653,44 @@ fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
     assert_eq!(retained, launch);
     assert_eq!(address.path, "projects/proj/parent.jsonl");
     assert_eq!(block, 0);
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let query = crate::native_html::query(&[
+        ("sid", "child"),
+        ("scope", "retained_history"),
+        ("turn", &expected),
+    ]);
+    let response = http::trace(&configured, &query, None, Some(&provider));
+    let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response.status, 200, "{body}");
+    assert_eq!(body["projection"], 7);
+    assert_eq!(body["turns"][0]["id"], expected);
+    assert_eq!(body["handoffs"][0]["from"], "parent");
+    let peer = &body["evidence"][1];
+    assert_eq!(peer["address"]["record"], json!(address));
+    assert_eq!(peer["peer"]["witness"], identity.witness);
+    let address = peer["address"].to_string();
+    let peer = peer["peer"].to_string();
+    let query = crate::native_html::query(&[
+        ("sid", "parent"),
+        ("scope", "retained_history"),
+        ("address", &address),
+        ("peer", &peer),
+    ]);
+    let response = http::transcript(&configured, &query, None, Some(&provider));
+    let reopened: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response.status, 200, "{reopened}");
+    assert!(
+        reopened["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["address"] == body["evidence"][1]["address"] })
+    );
     assert!(matches!(
         selected::retained_peer_launch_call(
             &source,

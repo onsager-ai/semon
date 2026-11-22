@@ -354,6 +354,25 @@ pub(super) struct Row {
 }
 
 impl Row {
+    fn token_millions(&self) -> [f64; 3] {
+        let [
+            input,
+            cached,
+            output,
+            shared_input,
+            shared_cached,
+            shared_output,
+        ] = self.usage;
+        let million = |tokens: i64| (tokens as f64 / 1000.0).round() / 1000.0;
+        let input = input.saturating_add(shared_input);
+        let cached = cached.saturating_add(shared_cached);
+        [
+            million(input.saturating_sub(cached).max(0)),
+            million(cached),
+            million(output.saturating_add(shared_output)),
+        ]
+    }
+
     fn recorded_status(&self) -> serde_json::Value {
         serde_json::json!({
             "state": self.status,
@@ -639,7 +658,7 @@ impl<'a> Snapshot<'a> {
                 });
                 continue;
             }
-            let row = read_row(self.source, record, key)?;
+            let row = read_row(self.source, record, key, true)?;
             let fields = [
                 Some(row.title.as_str()),
                 Some(row.position.key.as_str()),
@@ -1079,6 +1098,18 @@ fn selected_metadata(
     harness: &str,
     references: &[crate::CatalogSourceObservation],
 ) -> Result<Row, ReadError> {
+    selected_metadata_at(transaction, source, key, owner, harness, references, true)
+}
+
+fn selected_metadata_at(
+    transaction: &Connection,
+    source: &Source<'_>,
+    key: &str,
+    owner: i64,
+    harness: &str,
+    references: &[crate::CatalogSourceObservation],
+    native_titles: bool,
+) -> Result<Row, ReadError> {
     list_functions(transaction).map_err(index)?;
     let (ancestors, runs, mut incomplete) = parents::Parents::new(transaction)?.relatives(owner)?;
     let visible = std::iter::once(&owner).chain(&ancestors).chain(&runs);
@@ -1107,7 +1138,12 @@ fn selected_metadata(
         .map_err(index)?;
     let mut rows = Vec::new();
     while let Some(record) = records.next().map_err(index)? {
-        rows.push(read_row(source, record, record.get(0).map_err(index)?)?);
+        rows.push(read_row(
+            source,
+            record,
+            record.get(0).map_err(index)?,
+            native_titles,
+        )?);
     }
     incomplete |= rows.len() != owners.len();
     let snapshot = Snapshot {
@@ -1268,6 +1304,7 @@ fn read_row(
     source: &Source<'_>,
     record: &rusqlite::Row<'_>,
     key: String,
+    native_titles: bool,
 ) -> Result<Row, ReadError> {
     let mut row = Row {
         position: Position {
@@ -1314,7 +1351,7 @@ fn read_row(
     if row.harness == "codex" && record.get::<_, bool>(14).map_err(index)? {
         let task: Option<String> = record.get(13).map_err(index)?;
         let prompt: Option<i64> = record.get(9).map_err(index)?;
-        if let Some(offset) = prompt {
+        if let Some(offset) = prompt.filter(|_| native_titles) {
             let path: String = record.get(10).map_err(index)?;
             let ledger: String = record.get(11).map_err(index)?;
             let native_id: String = record.get(12).map_err(index)?;
@@ -2252,3 +2289,6 @@ mod selected;
 
 #[path = "catalog_warehouse/http.rs"]
 mod http;
+
+#[path = "catalog_warehouse/trace.rs"]
+mod trace;

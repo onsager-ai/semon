@@ -116,22 +116,7 @@ fn list_item(
     label: Option<&str>,
     annotations: &crate::annotations::Annotations,
 ) -> Value {
-    let [
-        input,
-        cached,
-        output,
-        shared_input,
-        shared_cached,
-        shared_output,
-    ] = row.usage;
-    let million = |tokens: i64| (tokens as f64 / 1000.0).round() / 1000.0;
-    let input = input.saturating_add(shared_input);
-    let cached = cached.saturating_add(shared_cached);
-    let tokens = [
-        million(input.saturating_sub(cached).max(0)),
-        million(cached),
-        million(output.saturating_add(shared_output)),
-    ];
+    let tokens = row.token_millions();
     let annotation = row
         .native_ids
         .get(&row.position.key)
@@ -693,6 +678,31 @@ pub(super) fn home(
     }
 }
 
+fn turn_request(
+    configured: &OverviewSource,
+    query: &str,
+) -> Result<(Request, String), ViewerReply> {
+    let mut selected_query = Vec::new();
+    let mut turn = None;
+    for field in query.split('&') {
+        if let Some(value) = field.strip_prefix("turn=") {
+            if turn.is_some() {
+                return Err(invalid());
+            }
+            turn = Some(
+                crate::viewer::decoded(value)
+                    .filter(|value| crate::session_route::identifier(value))
+                    .ok_or_else(invalid)?,
+            );
+        } else {
+            selected_query.push(field);
+        }
+    }
+    let turn = turn.ok_or_else(invalid)?;
+    let request = selected_request(configured, &selected_query.join("&"))?;
+    Ok((request, turn))
+}
+
 pub(super) fn anchor(
     configured: &OverviewSource,
     query: &str,
@@ -700,24 +710,7 @@ pub(super) fn anchor(
     retained_provider: Option<&dyn crate::SessionSourceReader>,
 ) -> ViewerReply {
     let read = || -> Result<ViewerReply, ViewerReply> {
-        let mut selected_query = Vec::new();
-        let mut turn = None;
-        for field in query.split('&') {
-            if let Some(value) = field.strip_prefix("turn=") {
-                if turn.is_some() {
-                    return Err(invalid());
-                }
-                turn = Some(
-                    crate::viewer::decoded(value)
-                        .filter(|value| crate::session_route::identifier(value))
-                        .ok_or_else(invalid)?,
-                );
-            } else {
-                selected_query.push(field);
-            }
-        }
-        let turn = turn.ok_or_else(invalid)?;
-        let request = selected_request(configured, &selected_query.join("&"))?;
+        let (request, turn) = turn_request(configured, query)?;
         let key = request.sid.as_deref().ok_or_else(invalid)?;
         if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
             return Err(reply);
@@ -752,6 +745,39 @@ pub(super) fn anchor(
                 "read_scope":request.scope,"turn":turn,"address":address,
             }),
         ))
+    };
+    match read() {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
+
+pub(super) fn trace(
+    configured: &OverviewSource,
+    query: &str,
+    current_provider: Option<&dyn crate::SessionSourceReader>,
+    retained_provider: Option<&dyn crate::SessionSourceReader>,
+) -> ViewerReply {
+    let read = || -> Result<ViewerReply, ViewerReply> {
+        let (request, turn) = turn_request(configured, query)?;
+        let key = request.sid.as_deref().ok_or_else(invalid)?;
+        if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
+            return Err(reply);
+        }
+        let path = crate::events::EventCache::path(&configured.options.cache);
+        let namespace = crate::storage::Namespace::new(&configured.key)
+            .map_err(index)
+            .map_err(read_error)?;
+        let current =
+            current_provider.map(|reader| crate::source_reader::BudgetedReader::new(reader, 1024));
+        let current = current
+            .as_ref()
+            .map(|reader| reader as &dyn crate::SessionSourceReader);
+        let source =
+            Source::focused(namespace, &path, &configured.options, current).map_err(read_error)?;
+        let value = super::trace::read(&source, request.scope, key, &turn, retained_provider)
+            .map_err(read_error)?
+            .ok_or_else(not_found)?;
+        Ok(crate::catalog::reply(200, value))
     };
     match read() {
         Ok(reply) | Err(reply) => reply,

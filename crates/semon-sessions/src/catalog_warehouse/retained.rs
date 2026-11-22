@@ -136,6 +136,59 @@ pub(in super::super) fn retained_peer_window(
     )
 }
 
+pub(in super::super) fn retained_peer_trace_window(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    key: &str,
+    peer: PeerBinding<'_>,
+    address: &Address,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<Component, ReadError> {
+    let incarnation: String = view
+        .lock()?
+        .query_row(
+            "SELECT value FROM meta WHERE key='incarnation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(index)?;
+    let trace = encode(&(
+        source.namespace.as_str(),
+        CatalogReadScope::RetainedHistory,
+        peer.trace,
+        incarnation,
+    ))?;
+    let binding = component_binding(&encode(&(trace, key))?, peer.witness)?;
+    read_frozen(
+        view,
+        source,
+        key,
+        Target::Address(address, Some(&binding)),
+        None,
+        provider.unwrap_or(&view.archive),
+        Some((peer, provider.is_none())),
+    )
+}
+
+pub(in super::super) fn retained_trace_send_window(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    key: &str,
+    address: &Address,
+    binding: &str,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<Component, ReadError> {
+    read_frozen(
+        view,
+        source,
+        key,
+        Target::Address(address, Some(binding)),
+        None,
+        provider.unwrap_or(&view.archive),
+        None,
+    )
+}
+
 /// Retained members and their prefix witnesses come from the certified binding.
 /// The provider separately authorizes each native source reference on demand.
 pub(in super::super) fn retained_page(
@@ -285,6 +338,19 @@ fn read_frozen_page(
     provider: &dyn SessionSourceReader,
     peer: Option<(PeerBinding<'_>, bool)>,
 ) -> Result<Component, ReadError> {
+    let view = ReadView::open(source)?;
+    read_frozen(&view, source, key, target, cursor, provider, peer)
+}
+
+pub(super) fn read_frozen(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    key: &str,
+    target: Target<'_>,
+    cursor: Option<&Cursor>,
+    provider: &dyn SessionSourceReader,
+    peer: Option<(PeerBinding<'_>, bool)>,
+) -> Result<Component, ReadError> {
     let (direction, address) = match target {
         Target::Page(_, direction) => (direction, None),
         Target::Turns(..) | Target::Annotations(_) | Target::Activity(_) => {
@@ -300,10 +366,7 @@ fn read_frozen_page(
     );
     // Retained requests may touch both the previous page and this one. Stay
     // within the existing 64-source provider budget across the two sets.
-    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    db.execute_batch("BEGIN DEFERRED").map_err(index)?;
-    let db = chunk_proofs::Snapshot::new(db);
-    let tx = db.lock().map_err(index)?;
+    let tx = view.lock()?;
     let incarnation: String = tx
         .query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
             r.get(0)
@@ -624,13 +687,12 @@ fn read_frozen_page(
     }
     let after = direction.continuation(&candidates);
     drop(tx);
-    let local_budget = Mutex::new(PAGE_BYTES);
     let peer_reader = FrozenPeerReader {
         index_path: source.path,
-        db: db.clone(),
+        db: view.db.clone(),
         carriers,
         provider,
-        budget: &local_budget,
+        budget: &view.proof_bytes,
         readers: Mutex::new(BTreeMap::new()),
     };
     let reader = crate::source_reader::BudgetedReader::new(&peer_reader, 1024);
@@ -643,7 +705,7 @@ fn read_frozen_page(
             return Err(ReadError::Restart);
         }
     }
-    let mut bytes_left = PAGE_BYTES;
+    let mut bytes_left = view.body_bytes.lock().map_err(index)?;
     let mut touched = BTreeMap::new();
     let mut reply_records = BTreeMap::new();
     let mut records = Vec::with_capacity(candidates.len());
@@ -679,7 +741,7 @@ fn read_frozen_page(
             .keys()
             .copied()
             .chain(include_home_detail.then_some(Position::END));
-        let tx = db.lock().map_err(index)?;
+        let tx = view.lock()?;
         let mut search = causal::TurnSearch::new(&tx, positions)?;
         for (id, reference, predecessors, carrier) in &turn_members {
             let end = i64::try_from(reference.offset).map_err(index)?;
@@ -739,7 +801,7 @@ fn read_frozen_page(
             occurrence: position.occurrence,
         };
         let (prompt_anchor, inputs) = {
-            let tx = db.lock().map_err(index)?;
+            let tx = view.lock()?;
             let prompt_anchor = if let Some(turn) = turn
                 .as_ref()
                 .filter(|turn| turn.handoff && turn.address == address)
@@ -971,13 +1033,27 @@ pub(in super::super) fn retained_peer_relay_address(
     (send, block): (&Address, u32),
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<crate::session_route::NativeEntryAddress, ReadError> {
+    let view = ReadView::open(source)?;
+    retained_peer_relay_in_view(&view, source, trace, witness, peer, (send, block), provider)
+        .map(|(address, _)| address)
+}
+
+pub(in super::super) fn retained_peer_relay_in_view(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    trace: &str,
+    witness: &str,
+    peer: &str,
+    (send, block): (&Address, u32),
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<(crate::session_route::NativeEntryAddress, String), ReadError> {
     let unavailable = || {
         ReadError::PeerUnavailable(
         "No exact relay delivery and rendered receipt could be proven in the certified prefixes.".into(),
     )
     };
-    let mut binding = String::new();
-    let record = read_retained_peer(source, trace, witness, peer, provider, PAGE_BYTES, |db, (identity, observed), parents, read| {
+    let mut matched = None;
+    let record = read_retained_peer_in_view(view, source, PeerBinding { trace, witness }, peer, provider, PAGE_BYTES, |db, (identity, observed), parents, read| {
         let tx = db.lock().map_err(index)?;
         let incarnation: String = tx
             .query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
@@ -1120,7 +1196,7 @@ pub(in super::super) fn retained_peer_relay_address(
         {
             return Err(unavailable());
         }
-        binding = component_binding(&encode(&(origin, peer))?, witness)?;
+        matched = Some((component_binding(&encode(&(origin, peer))?, witness)?, turn));
         Ok(address)
     })?
     .ok_or_else(unavailable)?;
@@ -1133,17 +1209,33 @@ pub(in super::super) fn retained_peer_relay_address(
         crate::tx::native_event_id(&record.native).as_deref(),
         None,
     );
-    Ok(crate::session_route::NativeEntryAddress {
-        record: record.address,
-        binding,
-        block: 0,
-        entry_id,
-    })
+    let (binding, turn) = matched.ok_or_else(unavailable)?;
+    Ok((
+        crate::session_route::NativeEntryAddress {
+            record: record.address,
+            binding,
+            block: 0,
+            entry_id,
+        },
+        turn,
+    ))
 }
 
 /// Locate a native launch call only when the child's verified marker names
 /// the certified parent and uniquely identifies a call in its frozen prefix.
 pub(in super::super) fn retained_peer_launch_call(
+    source: &Source<'_>,
+    trace: &str,
+    witness: &str,
+    peer: &str,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<(Address, u32, crate::ToolCall), ReadError> {
+    let view = ReadView::open(source)?;
+    retained_peer_launch_in_view(&view, source, trace, witness, peer, provider)
+}
+
+pub(in super::super) fn retained_peer_launch_in_view(
+    view: &ReadView<'_>,
     source: &Source<'_>,
     trace: &str,
     witness: &str,
@@ -1156,10 +1248,10 @@ pub(in super::super) fn retained_peer_launch_call(
         )
     };
     let mut matched_call = None;
-    let record = read_retained_peer(
+    let record = read_retained_peer_in_view(
+        view,
         source,
-        trace,
-        witness,
+        PeerBinding { trace, witness },
         peer,
         provider,
         crate::handoff::MAX_INPUT_BYTES,
@@ -1311,10 +1403,33 @@ fn read_retained_peer(
         &mut CertifiedRecordRead<'_>,
     ) -> Result<Address, ReadError>,
 ) -> Result<Option<Record>, ReadError> {
-    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    db.execute_batch("BEGIN DEFERRED").map_err(index)?;
-    let db = chunk_proofs::Snapshot::new(db);
-    let tx = db.lock().map_err(index)?;
+    let view = ReadView::open(source)?;
+    read_retained_peer_in_view(
+        &view,
+        source,
+        PeerBinding { trace, witness },
+        peer,
+        provider,
+        bytes,
+        select,
+    )
+}
+
+fn read_retained_peer_in_view(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    PeerBinding { trace, witness }: PeerBinding<'_>,
+    peer: &str,
+    provider: Option<&dyn SessionSourceReader>,
+    bytes: usize,
+    select: impl FnOnce(
+        &Arc<chunk_proofs::Snapshot>,
+        (&warehouse::RetainedIdentity, &warehouse::ObservedPeer),
+        &[(i64, SessionSourceRef)],
+        &mut CertifiedRecordRead<'_>,
+    ) -> Result<Address, ReadError>,
+) -> Result<Option<Record>, ReadError> {
+    let tx = view.lock()?;
     let identity = warehouse::retained_identity(&tx, &source.namespace, trace)
         .map_err(|error| ReadError::PeerUnavailable(retained_peer_trace_error(error)))?;
     let (observed, current) =
@@ -1351,34 +1466,48 @@ fn read_retained_peer(
         parents.push((member.source, reference));
     }
     drop(tx);
-    let archive = super::super::ArchiveReader::new(source.options);
-    let local_budget = Mutex::new(PAGE_BYTES);
     let peer_reader = FrozenPeerReader {
         index_path: source.path,
-        db: db.clone(),
+        db: view.db.clone(),
         carriers,
-        provider: provider.unwrap_or(&archive),
-        budget: &local_budget,
+        provider: provider.unwrap_or(&view.archive),
+        budget: &view.proof_bytes,
         readers: Mutex::new(BTreeMap::new()),
     };
     let reader = crate::source_reader::BudgetedReader::new(&peer_reader, 1024);
-    let mut bytes_left = bytes;
+    let mut shared_bytes = view.body_bytes.lock().map_err(index)?;
+    let mut bytes_left = bytes.min(*shared_bytes);
+    let budget_error =
+        || ReadError::PeerUnavailable("The selected peer read budget was exhausted.".into());
+    let peer_body_error = |error: io::Error| {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            budget_error()
+        } else {
+            retained_body_error(error, false)
+        }
+    };
     let mut read = |reference: &SessionSourceRef, offset| {
-        let native = crate::source_reader::read_record_bounded(
+        let allowed = bytes_left;
+        let result = crate::source_reader::read_record_bounded(
             &reader,
             reference,
             offset,
             crate::tx::LINE_MAX as usize,
             &mut bytes_left,
-        )
-        .map_err(|error| retained_body_error(error, false))?;
-        pin_provider_with(&reader, reference, |error| {
-            retained_body_error(error, false)
+        );
+        *shared_bytes -= allowed - bytes_left;
+        let native = result.map_err(|error| {
+            if bytes_left == 0 {
+                budget_error()
+            } else {
+                peer_body_error(error)
+            }
         })?;
+        pin_provider_with(&reader, reference, peer_body_error)?;
         Ok(native)
     };
     let result = (|| {
-        let address = select(&db, (&identity, &observed), &parents, &mut read)?;
+        let address = select(&view.db, (&identity, &observed), &parents, &mut read)?;
         let Some((id, reference)) = parents.into_iter().find(|(_, reference)| reference.path == address.path) else {
             return Ok(None);
         };
@@ -1386,7 +1515,7 @@ fn read_retained_peer(
             return Ok(None);
         }
         let at = i64::try_from(address.offset).map_err(index)?;
-        let kind = db.lock().map_err(index)?.query_row(
+        let kind = view.lock()?.query_row(
             "SELECT kind FROM fact_record WHERE source=?1 AND pos=?2 AND block=?3 AND occurrence=?4 AND NOT gap",
             params![id, at, address.block, address.occurrence],
             |row| row.get::<_, Option<String>>(0),
@@ -1395,7 +1524,7 @@ fn read_retained_peer(
             return Ok(None);
         };
         let native = read(&reference, address.offset)?;
-        peer_reader.finish().map_err(|error| retained_body_error(error, false))?;
+        peer_reader.finish().map_err(peer_body_error)?;
         Ok(Some(Record {
             prompt_anchor: None,
             entry_anchor: None,

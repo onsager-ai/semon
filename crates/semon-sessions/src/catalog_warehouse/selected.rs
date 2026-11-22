@@ -27,13 +27,44 @@ pub(super) mod render;
 mod retained;
 pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_window, retained_annotations,
-    retained_latest_page, retained_page, retained_peer_launch_call, retained_peer_record_at,
-    retained_peer_relay_address, retained_peer_window, retained_preview_turns, retained_record_at,
-    retained_turn,
+    retained_latest_page, retained_page, retained_peer_launch_call, retained_peer_launch_in_view,
+    retained_peer_record_at, retained_peer_relay_address, retained_peer_relay_in_view,
+    retained_peer_trace_window, retained_peer_window, retained_preview_turns, retained_record_at,
+    retained_trace_send_window, retained_turn,
 };
 
 const MEMBER_PAGE: i64 = 64;
 pub(super) const PAGE_BYTES: usize = 8 * 1024 * 1024;
+/// The committed database view and byte allowance shared by selected reads
+/// within one request. Release the SQL guard before any native proof read.
+pub(super) struct ReadView<'a> {
+    db: Arc<chunk_proofs::Snapshot>,
+    pub(super) archive: super::ArchiveReader<'a>,
+    body_bytes: Mutex<usize>,
+    proof_bytes: Mutex<usize>,
+}
+
+impl<'a> ReadView<'a> {
+    pub(super) fn open(source: &Source<'a>) -> Result<Self, ReadError> {
+        let db = crate::events::store::focused_connection(source.path).map_err(index)?;
+        db.execute_batch("BEGIN DEFERRED").map_err(index)?;
+        crate::events::store::require_current(&db).map_err(index)?;
+        crate::storage::sqlite::qualify(&db, &source.namespace).map_err(index)?;
+        Ok(Self {
+            db: chunk_proofs::Snapshot::new(db),
+            archive: super::ArchiveReader::new(source.options),
+            body_bytes: Mutex::new(PAGE_BYTES),
+            proof_bytes: Mutex::new(PAGE_BYTES),
+        })
+    }
+
+    pub(super) fn lock(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, ReadError> {
+        self.db.lock().map_err(index)
+    }
+}
+
 const MEMBERS: &str = "SELECT m.source,s.incarnation,s.carrier,s.ledger,d.native_id,c.path,
     f.resume_at,coalesce(r.sidecar_revision,0),d.lineage
     FROM lineage_member m
@@ -995,6 +1026,60 @@ pub(super) fn turn(
     )
 }
 
+pub(super) fn trace_turn(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    scope: CatalogReadScope,
+    key: &str,
+    turn: &str,
+    retained: &dyn SessionSourceReader,
+) -> Result<Option<Component>, ReadError> {
+    let turns = [turn];
+    let target = Target::Turns(&turns, None);
+    match scope {
+        CatalogReadScope::Current => {
+            read_current(view, source.options, source, scope, key, target, None)
+        }
+        CatalogReadScope::RetainedHistory => {
+            retained::read_frozen(view, source, key, target, None, retained, None).map(Some)
+        }
+    }
+}
+
+pub(super) fn trace_record(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    key: &str,
+    address: &Address,
+) -> Result<Option<Component>, ReadError> {
+    read_current(
+        view,
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Address(address, None),
+        None,
+    )
+}
+
+pub(super) fn trace_results(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    key: &str,
+    call: &Address,
+) -> Result<Option<Component>, ReadError> {
+    read_current(
+        view,
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::ToolResults(call),
+        None,
+    )
+}
+
 pub(super) fn preview_turns(
     source: &Source<'_>,
     key: &str,
@@ -1307,6 +1392,19 @@ fn read(
     target: Target<'_>,
     cursor: Option<&Cursor>,
 ) -> Result<Option<Component>, ReadError> {
+    let view = ReadView::open(source)?;
+    read_current(&view, options, source, scope, key, target, cursor)
+}
+
+fn read_current(
+    read_view: &ReadView<'_>,
+    options: &Options,
+    source: &Source<'_>,
+    scope: CatalogReadScope,
+    key: &str,
+    target: Target<'_>,
+    cursor: Option<&Cursor>,
+) -> Result<Option<Component>, ReadError> {
     let direction = match target {
         Target::Page(_, direction) => {
             if cursor.is_some_and(|cursor| cursor.direction != direction) {
@@ -1335,14 +1433,12 @@ fn read(
     } else {
         capacity
     };
-    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    db.execute_batch("BEGIN DEFERRED").map_err(index)?;
-    crate::events::store::require_current(&db).map_err(index)?;
-    crate::storage::sqlite::qualify(&db, &source.namespace).map_err(index)?;
+    let transaction = read_view.lock()?;
+    let db = &*transaction;
     if scope == CatalogReadScope::RetainedHistory {
         // This slice can qualify retained identity via `identity`, but only
         // opens current member carriers for body I/O.
-        let retained = warehouse::retained_identity(&db, &source.namespace, key)
+        let retained = warehouse::retained_identity(db, &source.namespace, key)
             .map_err(super::retained_error)?;
         return Err(index(format!(
             "Retained component {} body reads are unavailable",
@@ -1375,7 +1471,7 @@ fn read(
             )
         })
         .transpose()?;
-    let Some((owner, harness, native_id)) = current_identity(&db, source, key, paths.as_deref())?
+    let Some((owner, harness, native_id)) = current_identity(db, source, key, paths.as_deref())?
     else {
         return if cursor.is_some() {
             Err(ReadError::Restart)
@@ -1384,7 +1480,7 @@ fn read(
         };
     };
     let mut activity = if let Target::Activity(anchor) = target {
-        let Some(evidence) = activity_evidence(&db, key, anchor)? else {
+        let Some(evidence) = activity_evidence(db, key, anchor)? else {
             return Ok(None);
         };
         Some(evidence)
@@ -1591,7 +1687,7 @@ fn read(
                             view,
                         )?;
                         member_turn_positions(
-                            &db,
+                            db,
                             &mut detail,
                             key,
                             id,
@@ -1669,7 +1765,7 @@ fn read(
                 let start = i64::try_from(start).map_err(index)?;
                 let end = i64::try_from(end).map_err(index)?;
                 let frontier = if let Target::Address(address, _) = target {
-                    let Some(frontier) = address_frontier(&db, direction, id, address)? else {
+                    let Some(frontier) = address_frontier(db, direction, id, address)? else {
                         continue;
                     };
                     frontier
@@ -1704,7 +1800,7 @@ fn read(
     let binding = component_binding(&selection, &members)?;
     let annotations = if let Target::Annotations(request) = target {
         Some(annotation_page(
-            &db,
+            db,
             source,
             key,
             &binding,
@@ -1725,7 +1821,7 @@ fn read(
     }
     let owner_identity = (owner, harness.clone(), native_id);
     let identity_witness =
-        super::current_identity_witness(&db, source, key, &owner_identity, &references)?;
+        super::current_identity_witness(db, source, key, &owner_identity, &references)?;
     if let Target::Turns(_, Some(home)) = target
         && home.expected != identity_witness
     {
@@ -1768,36 +1864,36 @@ fn read(
         for (position, (_, member, _)) in &candidates {
             causal.insert(
                 *position,
-                causal::Inputs::load(&db, &member.reference, *position, view)?,
+                causal::Inputs::load(db, &member.reference, *position, view)?,
             );
         }
     }
     let mut relay_context = BTreeMap::new();
     if matches!(target, Target::ToolResults(_)) {
         for position in candidates.keys() {
-            relay_context.insert(*position, relay_receipts(&db, source, *position, view)?);
+            relay_context.insert(*position, relay_receipts(db, source, *position, view)?);
         }
     }
     let parent_plan = if let Target::ToolResults(call) = target
         && let Some((position, _)) = candidates.first_key_value()
         && relay_context.values().all(Vec::is_empty)
     {
-        parent_relay::Plan::collect(&db, source, position.source, Some(call), view)?
+        parent_relay::Plan::collect(db, source, position.source, Some(call), view)?
             .map(|plan| (plan, position.source))
     } else {
         None
     };
     let home_activity = if include_home_activity
-        && super::selected_runtime_status(&db, source, owner)? == Some("work")
+        && super::selected_runtime_status(db, source, owner)? == Some("work")
     {
-        active_tool_candidate(&db, component, &harness)?
+        active_tool_candidate(db, component, &harness)?
     } else {
         None
     };
     let mut legacy_plans = Vec::new();
     if harness == "claude" && (!causal.is_empty() || include_home_detail || home_activity.is_some())
     {
-        if let Some(plan) = parent_relay::Plan::collect(&db, source, owner, None, view)? {
+        if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view)? {
             legacy_plans.push((owner, plan));
         }
         let mut children = db
@@ -1807,7 +1903,7 @@ fn read(
             .query(params![component, crate::events::AGM_UP, view])
             .map_err(index)?;
         let mut count = 0;
-        let mut graph = super::parents::Parents::new(&db)?;
+        let mut graph = super::parents::Parents::new(db)?;
         while let Some(row) = children.next().map_err(index)? {
             let child = row.get(0).map_err(index)?;
             let Some(edge) = graph.parent(child)?.filter(|edge| edge.method == "native") else {
@@ -1820,15 +1916,14 @@ fn read(
             if count > 128 {
                 return Err(index("Selected legacy relay child budget exhausted"));
             }
-            if let Some(plan) = parent_relay::Plan::collect(&db, source, child, None, view)? {
+            if let Some(plan) = parent_relay::Plan::collect(db, source, child, None, view)? {
                 legacy_plans.push((child, plan));
             }
         }
     }
-    let db = chunk_proofs::Snapshot::new(db);
-    let proof_bytes = Mutex::new(PAGE_BYTES);
+    drop(transaction);
     let mut readers = BTreeMap::new();
-    let mut bytes_left = PAGE_BYTES;
+    let mut bytes_left = read_view.body_bytes.lock().map_err(index)?;
     let mut read_body = |id, member: &Arc<Member>, offset| {
         let (reader, pin): (&dyn SessionSourceReader, Option<ProviderPin>) = if member.remote {
             let provider = provider.as_ref().ok_or(ReadError::Restart)?;
@@ -1843,9 +1938,14 @@ fn read(
         } else {
             let reader = match readers.entry(id) {
                 std::collections::btree_map::Entry::Occupied(reader) => reader.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
-                    PrefixReader::open(db.clone(), source.path, member.clone(), &proof_bytes)?,
-                ),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(PrefixReader::open(
+                        read_view.db.clone(),
+                        source.path,
+                        member.clone(),
+                        &read_view.proof_bytes,
+                    )?)
+                }
             };
             (reader, None)
         };
@@ -1857,7 +1957,7 @@ fn read(
             &mut bytes_left,
         )
         .map_err(|error| {
-            if bytes_left == 0 {
+            if *bytes_left == 0 {
                 index("Selected page source budget exhausted")
             } else {
                 body_error(error)
@@ -1887,7 +1987,7 @@ fn read(
         }
     }
     let mut turns = causal::turns(
-        &*db.lock().map_err(index)?,
+        &*read_view.lock()?,
         source,
         key,
         &harness,
@@ -2056,7 +2156,7 @@ fn read(
     // An earlier page may use historical prefix receipts with current row facts.
     // The browser keeps the metadata from its latest or addressed selection.
     let metadata = {
-        let transaction = db.lock().map_err(index)?;
+        let transaction = read_view.lock()?;
         (cursor.is_none()
             && matches!(
                 target,
