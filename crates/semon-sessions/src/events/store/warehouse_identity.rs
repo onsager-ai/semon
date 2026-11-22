@@ -114,7 +114,7 @@ pub(in crate::events::store) fn certify(
 pub(crate) struct ObservedMember {
     pub(crate) source: i64,
     pub(crate) receipt: CatalogSource,
-    revision: i64,
+    pub(crate) revision: i64,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

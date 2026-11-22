@@ -412,7 +412,7 @@ impl Inputs {
             .optional()
             .map_err(index)?
             .map(|(parent, ok)| {
-                Ok(Operation {
+                Ok::<_, ReadError>(Operation {
                     parent: u64::try_from(parent).map_err(index)?,
                     ok,
                 })

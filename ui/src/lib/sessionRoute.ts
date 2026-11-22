@@ -64,6 +64,24 @@ export function parseNativeEntryAddress(value: unknown): NativeEntryAddress {
     entry_id: address.entry_id,
   };
 }
+export interface RetainedPeerAddress {
+  trace: string;
+  witness: string;
+}
+export function parseRetainedPeerAddress(value: unknown): RetainedPeerAddress {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid retained trace binding');
+  const peer = value as Record<string, unknown>;
+  if (
+    Object.keys(peer).length !== 2 ||
+    typeof peer.trace !== 'string' ||
+    !identifier(peer.trace) ||
+    typeof peer.witness !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(peer.witness)
+  )
+    throw new Error('Invalid retained trace binding');
+  return { trace: peer.trace, witness: peer.witness };
+}
 export const routeSegment = (value: string) =>
   encodeURIComponent(value).replace(
     /[!'()*]/g,
@@ -120,7 +138,9 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
                   ? ['output', 'script', 'attachment'].includes(value)
                   : name === 'address'
                     ? !!parseNativeEntryAddress(JSON.parse(value))
-                    : name === 'scope' && (value === 'current' || value === 'retained_history');
+                    : name === 'peer'
+                      ? !!parseRetainedPeerAddress(JSON.parse(value))
+                      : name === 'scope' && (value === 'current' || value === 'retained_history');
     if (!valid || controls.has(name)) return fail();
     controls.set(name, value);
   }
@@ -139,6 +159,11 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
     return fail();
   controls.sort();
   const readScope = controls.get('scope') === 'retained_history' ? 'retained_history' : 'current';
+  if (
+    controls.has('peer') &&
+    (readScope !== 'retained_history' || turn || controls.has('generation'))
+  )
+    return fail();
   return { source, key, turn, controls, readScope };
 }
 export function canonicalSessionRoute(route: SessionRoute, source: string, key: string) {

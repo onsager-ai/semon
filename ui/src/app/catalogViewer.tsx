@@ -3,6 +3,8 @@ import {
   tracePath,
   parseSessionRoute,
   parseNativeEntryAddress,
+  parseRetainedPeerAddress,
+  type RetainedPeerAddress,
   type NativeEntryAddress,
   sessionHashTurn,
   type SessionRoute,
@@ -116,6 +118,7 @@ interface SelectedView {
   root: HTMLElement;
   store: CatalogTranscriptStore;
   nativeStore?: CatalogNativeTranscriptStore;
+  peer?: RetainedPeerAddress;
   meta: CatalogSession | null;
   observedName?: string;
   sourceLabel?: string | null;
@@ -735,11 +738,16 @@ export function createCatalogViewer(
       value.set('all_machines', '1');
     return value;
   };
-  const sessionControls = (readScope: CatalogReadScope, address?: NativeEntryAddress) => {
+  const sessionControls = (
+    readScope: CatalogReadScope,
+    address?: NativeEntryAddress,
+    peer?: RetainedPeerAddress,
+  ) => {
     const p = browsingParams();
     p.delete('machine');
     if (readScope === 'retained_history') p.set('scope', readScope);
     if (address) p.set('address', JSON.stringify(address));
+    if (peer) p.set('peer', JSON.stringify(peer));
     return p;
   };
   const sessionAnchor = () => {
@@ -3148,6 +3156,7 @@ export function createCatalogViewer(
   function expansionParams(view: SelectedView, entry: CatalogDisplayedEntry, generation: string) {
     const p = params(view.readScope);
     p.set('sid', view.key);
+    if (view.peer) p.set('peer', JSON.stringify(view.peer));
     if (entry.address) p.set('address', JSON.stringify(entry.address));
     else {
       p.set('after', String(entry.slot));
@@ -3346,6 +3355,7 @@ export function createCatalogViewer(
     const request = store.request(window),
       p = params(view.readScope);
     p.set('sid', view.key);
+    if (view.peer) p.set('peer', JSON.stringify(view.peer));
     if (window.position === 'earlier') p.set('cursor', window.cursor);
     if (window.position === 'address') p.set('address', JSON.stringify(window.address));
     if (window.position === 'earlier') view.following = false;
@@ -3772,6 +3782,7 @@ export function createCatalogViewer(
     readScope: CatalogReadScope = 'current',
     savedPositionUnavailable = false,
     address?: NativeEntryAddress,
+    peer?: RetainedPeerAddress,
   ) {
     if (disposed || !capabilities.source_key) return;
     const navigationFocus = document.activeElement;
@@ -3779,7 +3790,7 @@ export function createCatalogViewer(
     preserveScroll();
     if (!active && !sourcesOpen) listFocus = key;
     sourcesOpen = false;
-    const selectedKey = JSON.stringify([capabilities.source_key, readScope, key]);
+    const selectedKey = JSON.stringify([capabilities.source_key, readScope, key, peer]);
     let view = selected.get(selectedKey);
     if (!view) {
       const store = new CatalogTranscriptStore();
@@ -3788,6 +3799,7 @@ export function createCatalogViewer(
         readScope,
         sourceKey: capabilities.source_key,
         key,
+        peer,
         root: document.createElement('div'),
         store,
         nativeStore: capabilities.native_transcript
@@ -3883,7 +3895,7 @@ export function createCatalogViewer(
         '',
         sessionPath(view.sourceKey, key) +
           '?' +
-          sessionControls(view.readScope, address) +
+          sessionControls(view.readScope, address, view.peer) +
           (anchor ? '#' + encodeURIComponent(anchor) : ''),
       );
     chrome();
@@ -4602,6 +4614,7 @@ export function createCatalogViewer(
     if (!sourcesOpen && viewerHost?.catalogSources && !sourceItems.length) void loadSources(false);
     const savedPositionUnavailable = sessionRoute?.controls.has('generation') === true;
     const address = sessionRoute?.controls.get('address');
+    const peer = sessionRoute?.controls.get('peer');
     if (sessionRoute?.turn && !savedPositionUnavailable) {
       goCausal(sessionRoute.key, sessionRoute.turn, sessionRoute.readScope);
     } else if (sessionRoute) {
@@ -4613,6 +4626,7 @@ export function createCatalogViewer(
         sessionRoute.readScope,
         savedPositionUnavailable,
         address ? parseNativeEntryAddress(JSON.parse(address)) : undefined,
+        peer ? parseRetainedPeerAddress(JSON.parse(peer)) : undefined,
       );
     } else if (machineBookmark) {
       leaveScreen();

@@ -139,6 +139,25 @@ impl<'a> Parents<'a> {
         Ok((ancestors, roots))
     }
 
+    pub(super) fn owner_children(&mut self, owner: i64) -> Result<BTreeSet<i64>, ReadError> {
+        let candidates = self
+            .children
+            .query_map([owner], |row| row.get::<_, i64>(0))
+            .map_err(index)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(index)?;
+        let mut children = BTreeSet::new();
+        for candidate in candidates {
+            if let (Some(edge), Some(child)) = (self.parent(candidate)?, self.owner(candidate)?)
+                && child != owner
+                && self.owner(edge.source)? == Some(owner)
+            {
+                children.insert(child);
+            }
+        }
+        Ok(children)
+    }
+
     pub(super) fn relatives(
         &mut self,
         owner: i64,
@@ -167,20 +186,7 @@ impl<'a> Parents<'a> {
         let mut descendants = BTreeSet::new();
         let mut frontier = VecDeque::from([owner]);
         'descendants: while let Some(current) = frontier.pop_front() {
-            let candidates = self
-                .children
-                .query_map([current], |row| row.get::<_, i64>(0))
-                .map_err(index)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(index)?;
-            for candidate in candidates {
-                let (Some(edge), Some(child)) = (self.parent(candidate)?, self.owner(candidate)?)
-                else {
-                    continue;
-                };
-                if child == current || self.owner(edge.source)? != Some(current) {
-                    continue;
-                }
+            for child in self.owner_children(current)? {
                 if seen.contains(&child) {
                     incomplete = true;
                     continue;

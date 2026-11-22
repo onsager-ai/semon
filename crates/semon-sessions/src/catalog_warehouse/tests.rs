@@ -2422,6 +2422,51 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
     assert_eq!(archived.record, observed.record);
     assert_eq!(archived.binding, observed.binding);
     assert_eq!(archived.entry_id, observed.entry_id);
+    let source = fixture.source(&[&root, &peer]);
+    let binding = selected::PeerBinding {
+        trace: "root",
+        witness: &root_identity.witness,
+    };
+    let opened = selected::retained_peer_window(
+        &source,
+        "peer",
+        binding,
+        32,
+        None,
+        Some((&archived.record, &archived.binding)),
+        Some(&provider),
+    )
+    .unwrap();
+    assert_eq!(opened.binding, archived.binding);
+    let entries = selected::render::entries(&opened, source.namespace.as_str(), "peer", 0);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["entry_id"] == archived.entry_id)
+    );
+    let earlier = selected::retained_peer_window(
+        &source,
+        "peer",
+        binding,
+        32,
+        opened.next.as_ref(),
+        None,
+        Some(&provider),
+    )
+    .unwrap();
+    assert!(
+        earlier
+            .records
+            .iter()
+            .any(|record| record.text().as_deref() == Some("Original peer"))
+    );
+    assert!(
+        earlier
+            .records
+            .iter()
+            .all(|record| record.text().as_deref() != Some("Replacement peer"))
+    );
+
     assert_eq!(
         open(&fixture, &root_identity.witness, "peer")
             .unwrap()
@@ -2897,6 +2942,11 @@ fn warehouse_selected_family_prices_descendants_and_deduplicates_shared_steps() 
     assert_eq!(details["family"]["state"], "complete");
     assert_eq!(details["family"]["ancestors"][0]["key"], "root");
     assert_eq!(details["family"]["runs"][0]["key"], "leaf");
+    let child_family = family_price(&fixture.source(&paths), "child")
+        .unwrap()
+        .unwrap();
+    assert_eq!(details["family"]["usd"], json!(child_family.usd));
+    assert_eq!(details["family"]["shared_usd"], json!(child_family.shared));
     assert!(
         details["family"]["runs"][0]["cost"]["usd"]
             .as_f64()

@@ -26,8 +26,9 @@ pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
-    retained_addressed_window, retained_annotations, retained_latest_page, retained_page,
-    retained_peer_record_at, retained_peer_relay_address, retained_record_at, retained_turn,
+    PeerBinding, retained_addressed_window, retained_annotations, retained_latest_page,
+    retained_page, retained_peer_record_at, retained_peer_relay_address, retained_peer_window,
+    retained_record_at, retained_turn,
 };
 
 const MEMBER_PAGE: i64 = 64;

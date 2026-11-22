@@ -1,21 +1,21 @@
 //! Retained record reads through the certified warehouse binding.
 use super::*;
 
-const COPIES: &str =
-    "SELECT e.source,min(e.pos),json_extract(m.receipt,'$.offset') FROM fact_relation_observation e
-     CROSS JOIN warehouse_identity_member m ON m.identity=?1 AND m.source=e.source
+const COPIES: &str = "SELECT e.source,min(e.pos),m.value FROM fact_relation_observation e
+     CROSS JOIN json_each(?1) m ON CAST(m.key AS INTEGER)=e.source
      WHERE e.target=?2 AND e.kind='continued-in' AND e.source<>?3 GROUP BY e.source";
 
 fn predecessor_bounds(
     copies: &mut rusqlite::Statement<'_>,
-    identity: &warehouse::RetainedIdentity,
+    harness: &str,
+    prefixes: &str,
     native_id: &str,
     id: i64,
 ) -> Result<String, ReadError> {
     let mut bounds = BTreeMap::new();
-    if identity.harness == "claude" {
+    if harness == "claude" {
         let mut rows = copies
-            .query(params![identity.binding, native_id, id])
+            .query(params![prefixes, native_id, id])
             .map_err(index)?;
         while let Some(row) = rows.next().map_err(index)? {
             let edge: i64 = row.get(1).map_err(index)?;
@@ -26,6 +26,43 @@ fn predecessor_bounds(
         }
     }
     encode(&bounds)
+}
+
+#[derive(Clone, Copy)]
+pub(in super::super) struct PeerBinding<'a> {
+    pub(in super::super) trace: &'a str,
+    pub(in super::super) witness: &'a str,
+}
+
+struct FrozenMember {
+    id: i64,
+    revision: i64,
+    receipt: crate::model::summary::CatalogSource,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in super::super) fn retained_peer_window(
+    source: &Source<'_>,
+    key: &str,
+    peer: PeerBinding<'_>,
+    limit: usize,
+    cursor: Option<&Cursor>,
+    address: Option<(&Address, &str)>,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<Component, ReadError> {
+    let target = address.map_or(
+        Target::Page(limit, Direction::Reverse),
+        |(address, binding)| Target::Address(address, Some(binding)),
+    );
+    let archive = super::super::ArchiveReader::new(source.options);
+    read_frozen_page(
+        source,
+        key,
+        target,
+        cursor,
+        provider.unwrap_or(&archive),
+        Some((peer, provider.is_none())),
+    )
 }
 
 /// Retained members and their prefix witnesses come from the certified binding.
@@ -103,6 +140,17 @@ fn read_retained_page(
     cursor: Option<&Cursor>,
     provider: &dyn SessionSourceReader,
 ) -> Result<Component, ReadError> {
+    read_frozen_page(source, key, target, cursor, provider, None)
+}
+
+fn read_frozen_page(
+    source: &Source<'_>,
+    key: &str,
+    target: Target<'_>,
+    cursor: Option<&Cursor>,
+    provider: &dyn SessionSourceReader,
+    peer: Option<(PeerBinding<'_>, bool)>,
+) -> Result<Component, ReadError> {
     let (direction, address) = match target {
         Target::Page(_, direction) => (direction, None),
         Target::Turn(_) | Target::Annotations(_) => (Direction::Forward, None),
@@ -112,188 +160,228 @@ fn read_retained_page(
     let limit = target.capacity()?.min(33);
     // Retained requests may touch both the previous page and this one. Stay
     // within the existing 64-source provider budget across the two sets.
-    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    let tx = db.transaction().map_err(index)?;
-    let identity = warehouse::retained_identity(&tx, &source.namespace, key)
-        .map_err(super::super::retained_error)?;
+    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    db.execute_batch("BEGIN DEFERRED").map_err(index)?;
+    let db = chunk_proofs::Snapshot::new(db);
+    let tx = db.lock().map_err(index)?;
     let incarnation: String = tx
         .query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
             r.get(0)
         })
         .map_err(index)?;
-    let selection = encode(&(
-        source.namespace.as_str(),
-        CatalogReadScope::RetainedHistory,
-        key,
-        incarnation,
-    ))?;
-    let binding = component_binding(&selection, &identity.witness)?;
+    let selection_for = |key| {
+        encode(&(
+            source.namespace.as_str(),
+            CatalogReadScope::RetainedHistory,
+            key,
+            &incarnation,
+        ))
+    };
+    let (harness, native_id, witness, selection, metadata, members, live) = if let Some((
+        peer,
+        use_local,
+    )) = peer
+    {
+        let (observed, current) =
+            warehouse::retained_peer(&tx, &source.namespace, peer.trace, peer.witness, key)
+                .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
+        let members = observed
+            .members
+            .into_iter()
+            .map(|m| FrozenMember {
+                id: m.source,
+                revision: m.revision,
+                receipt: m.receipt,
+            })
+            .collect::<Vec<_>>();
+        let selection = encode(&(selection_for(peer.trace)?, key))?;
+        (
+            observed.harness,
+            observed.native_id,
+            peer.witness.to_owned(),
+            selection,
+            None,
+            members,
+            current && use_local,
+        )
+    } else {
+        let identity = warehouse::retained_identity(&tx, &source.namespace, key)
+            .map_err(super::super::retained_error)?;
+        let mut members = tx.prepare_cached(
+            "SELECT source,revision,receipt FROM warehouse_identity_member WHERE identity=?1 ORDER BY ordinal"
+        ).map_err(index)?;
+        let mut rows = members.query([identity.binding]).map_err(index)?;
+        let mut frozen = Vec::new();
+        while let Some(row) = rows.next().map_err(index)? {
+            frozen.push(FrozenMember {
+                id: row.get(0).map_err(index)?,
+                revision: row.get(1).map_err(index)?,
+                receipt: serde_json::from_str(&row.get::<_, String>(2).map_err(index)?)
+                    .map_err(index)?,
+            });
+        }
+        (
+            identity.harness,
+            identity.native_id,
+            identity.witness,
+            selection_for(key)?,
+            Some(identity.metadata),
+            frozen,
+            false,
+        )
+    };
+    let binding = component_binding(&selection, &witness)?;
     if address.is_some_and(|(_, expected)| expected != binding) {
         return Err(ReadError::Restart);
     }
     let now = crate::model::now_ms();
     let opened_at = cursor.map_or(now, |cursor| cursor.opened_at);
     if cursor.is_some_and(|cursor| {
-        cursor.selection != selection
-            || cursor.members != identity.witness
-            || cursor.direction != direction
+        cursor.selection != selection || cursor.members != witness || cursor.direction != direction
     }) || opened_at > now
         || opened_at < now.saturating_sub(warehouse::PREFIX_WINDOW_MS)
     {
         return Err(ReadError::Restart);
     }
-    let reader = crate::source_reader::BudgetedReader::new(provider, 1024);
-    let mut confirmed = 0;
+    let member_count = members.len();
+    let prefixes = encode(
+        &members
+            .iter()
+            .map(|m| (m.id, m.receipt.offset))
+            .collect::<BTreeMap<_, _>>(),
+    )?;
     let mut candidates = BTreeMap::new();
     let mut annotation_members = BTreeMap::new();
-    let mut member_count = 0;
     let mut references = Vec::new();
-    let mut ordinal = -1;
+    let mut prior_references = Vec::new();
+    let mut carriers = BTreeMap::new();
+    let mut turn_members = Vec::new();
     {
-        let mut members = tx
-            .prepare_cached(
-                "SELECT m.ordinal,m.source,s.incarnation,m.receipt,m.revision FROM warehouse_identity_member m
-             CROSS JOIN warehouse_source s ON s.source=m.source
-             WHERE m.identity=?1 AND m.ordinal>?2 ORDER BY m.ordinal LIMIT ?3",
-            )
-            .map_err(index)?;
         let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
         let mut positions = tx.prepare_cached(direction.statement()).map_err(index)?;
-        loop {
-            let mut batch = members
-                .query(params![identity.binding, ordinal, MEMBER_PAGE])
+        let mut ledgers = tx
+            .prepare_cached("SELECT incarnation,ledger FROM warehouse_source WHERE source=?1")
+            .map_err(index)?;
+        for FrozenMember {
+            id,
+            receipt,
+            revision,
+        } in members
+        {
+            let carrier = receipt.path.to_str().ok_or(ReadError::RetainedUnverified)?;
+            let path =
+                relative(source.options, &harness, carrier).ok_or(ReadError::RetainedUnverified)?;
+            let (incarnation, ledger): (i64, String) = ledgers
+                .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(index)?;
-            let mut count = 0;
-            while let Some(row) = batch.next().map_err(index)? {
-                count += 1;
-                member_count += 1;
-                ordinal = row.get(0).map_err(index)?;
-                let id: i64 = row.get(1).map_err(index)?;
-                let receipt: crate::model::summary::CatalogSource =
-                    serde_json::from_str(&row.get::<_, String>(3).map_err(index)?)
-                        .map_err(index)?;
-                let revision: i64 = row.get(4).map_err(index)?;
-                let path = receipt
-                    .path
-                    .to_str()
-                    .and_then(|path| relative(source.options, &identity.harness, path))
-                    .ok_or(ReadError::RetainedUnverified)?;
-                let reference = Arc::new(SessionSourceRef {
-                    root: identity.harness.clone(),
-                    path: path.into(),
-                    native_id: receipt.native_id,
-                    offset: receipt.offset,
-                    prefix_sha256: receipt.prefix_sha256,
-                    tail_sha256: receipt.tail_sha256,
-                });
-                references.push(crate::CatalogSourceObservation {
-                    source: (*reference).clone(),
-                    state: "unavailable".into(),
-                });
-                let prefix = Prefix {
-                    source: id,
-                    incarnation: row.get(2).map_err(index)?,
-                    offset: receipt.offset,
-                    digest: receipt.prefix_sha256,
-                    tail: receipt.tail_sha256,
-                    provider: None,
-                };
-                if let Some(prior) =
-                    cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))
-                {
-                    let mut observed = prefix.clone();
-                    observed.provider = Some(pin_provider(&reader, &reference)?);
-                    if prior != &observed {
-                        return Err(ReadError::Restart);
-                    }
-                    confirmed += 1;
-                }
-                let predecessors =
-                    predecessor_bounds(&mut copies, &identity, &reference.native_id, id)?;
-                if let Target::Annotations(_) = target {
-                    annotation_members.insert(id, ((*reference).clone(), revision, predecessors));
-                    continue;
-                }
-                if let Target::Turn(turn) = target {
-                    turn_candidates(&tx, key, id, receipt.offset, &reference, turn, |address| {
-                        let Some(frontier) = address_frontier(&tx, direction, id, address)? else {
-                            return Ok(());
-                        };
-                        let start = i64::try_from(address.offset).map_err(index)?;
-                        member_positions(
-                            &mut positions,
-                            PositionSearch {
-                                source: id,
-                                start,
-                                end: start + 1,
-                                predecessors: &predecessors,
-                                entry: Some((address.block, address.occurrence)),
-                                frontier,
-                                capacity: 1,
-                            },
-                            |(position, kind)| {
-                                candidates.insert(
-                                    position,
-                                    (kind, reference.clone(), prefix.clone(), revision),
-                                );
-                                if candidates.len() > limit {
-                                    direction.discard_extra(&mut candidates);
-                                }
-                            },
-                        )
-                    })?;
-                    continue;
-                }
-                let (start, end, entry, frontier) = if let Some((address, _)) = address {
-                    if address.path != reference.path || address.offset >= receipt.offset {
-                        continue;
-                    }
+            let reference = Arc::new(SessionSourceRef {
+                root: harness.clone(),
+                path: path.to_owned(),
+                native_id: receipt.native_id,
+                offset: receipt.offset,
+                prefix_sha256: receipt.prefix_sha256,
+                tail_sha256: receipt.tail_sha256,
+            });
+            if live {
+                carriers.insert(path.to_owned(), (carrier.to_owned(), ledger));
+            }
+            references.push(crate::CatalogSourceObservation {
+                source: (*reference).clone(),
+                state: "unavailable".into(),
+            });
+            let prefix = Prefix {
+                source: id,
+                incarnation,
+                offset: receipt.offset,
+                digest: receipt.prefix_sha256,
+                tail: receipt.tail_sha256,
+                provider: None,
+            };
+            if let Some(prior) =
+                cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))
+            {
+                prior_references.push((prior, prefix.clone(), reference.clone()));
+            }
+            let predecessors =
+                predecessor_bounds(&mut copies, &harness, &prefixes, &reference.native_id, id)?;
+            turn_members.push((id, reference.clone(), predecessors.clone()));
+            if let Target::Annotations(_) = target {
+                annotation_members.insert(id, ((*reference).clone(), revision, predecessors));
+                continue;
+            }
+            if let Target::Turn(turn) = target {
+                turn_candidates(&tx, key, id, receipt.offset, &reference, turn, |address| {
                     let Some(frontier) = address_frontier(&tx, direction, id, address)? else {
-                        continue;
+                        return Ok(());
                     };
-                    (
-                        address.offset,
-                        address.offset + 1,
-                        Some((address.block, address.occurrence)),
-                        frontier,
+                    let start = i64::try_from(address.offset).map_err(index)?;
+                    member_positions(
+                        &mut positions,
+                        PositionSearch {
+                            source: id,
+                            start,
+                            end: start + 1,
+                            predecessors: &predecessors,
+                            entry: Some((address.block, address.occurrence)),
+                            frontier,
+                            capacity: 1,
+                        },
+                        |(position, kind)| {
+                            candidates.insert(
+                                position,
+                                (kind, reference.clone(), prefix.clone(), revision),
+                            );
+                            if candidates.len() > limit {
+                                direction.discard_extra(&mut candidates);
+                            }
+                        },
                     )
-                } else {
-                    (
-                        0,
-                        receipt.offset,
-                        None,
-                        direction.frontier(cursor.map(|cursor| cursor.after), id),
-                    )
+                })?;
+                continue;
+            }
+            let (start, end, entry, frontier) = if let Some((address, _)) = address {
+                if address.path != reference.path || address.offset >= receipt.offset {
+                    continue;
+                }
+                let Some(frontier) = address_frontier(&tx, direction, id, address)? else {
+                    continue;
                 };
-                member_positions(
-                    &mut positions,
-                    PositionSearch {
-                        source: id,
-                        start: i64::try_from(start).map_err(index)?,
-                        end: i64::try_from(end).map_err(index)?,
-                        predecessors: &predecessors,
-                        entry,
-                        frontier,
-                        capacity: limit,
-                    },
-                    |(position, kind)| {
-                        candidates.insert(
-                            position,
-                            (kind, reference.clone(), prefix.clone(), revision),
-                        );
-                        if candidates.len() > limit {
-                            direction.discard_extra(&mut candidates);
-                        }
-                    },
-                )?;
-            }
-            if count < MEMBER_PAGE {
-                break;
-            }
+                (
+                    address.offset,
+                    address.offset + 1,
+                    Some((address.block, address.occurrence)),
+                    frontier,
+                )
+            } else {
+                (
+                    0,
+                    receipt.offset,
+                    None,
+                    direction.frontier(cursor.map(|cursor| cursor.after), id),
+                )
+            };
+            member_positions(
+                &mut positions,
+                PositionSearch {
+                    source: id,
+                    start: i64::try_from(start).map_err(index)?,
+                    end: i64::try_from(end).map_err(index)?,
+                    predecessors: &predecessors,
+                    entry,
+                    frontier,
+                    capacity: limit,
+                },
+                |(position, kind)| {
+                    candidates.insert(
+                        position,
+                        (kind, reference.clone(), prefix.clone(), revision),
+                    );
+                    if candidates.len() > limit {
+                        direction.discard_extra(&mut candidates);
+                    }
+                },
+            )?;
         }
-    }
-    if cursor.is_some_and(|cursor| cursor.touched.len() != confirmed) {
-        return Err(ReadError::Restart);
     }
     let annotations = if let Target::Annotations(request) = target {
         Some(annotation_page(
@@ -303,7 +391,7 @@ fn read_retained_page(
             &binding,
             request,
             &annotation_members,
-            identity.harness != "copilot",
+            harness != "copilot",
         )?)
     } else {
         None
@@ -316,13 +404,48 @@ fn read_retained_page(
     let mut turns = if candidates.is_empty() {
         BTreeMap::new()
     } else {
-        frozen_turns(&tx, source, key, &identity, candidates.keys().copied())?
+        let mut search = causal::TurnSearch::new(&tx, candidates.keys().copied())?;
+        for (id, reference, predecessors) in &turn_members {
+            search.consider(
+                key,
+                &harness,
+                causal::BoundaryMember {
+                    id: *id,
+                    end: i64::try_from(reference.offset).map_err(index)?,
+                    predecessors,
+                    launch_at: None,
+                    native_id: &reference.native_id,
+                    path: &reference.path,
+                },
+                "{}",
+            )?;
+        }
+        search.finish()
     };
+    drop(tx);
+    let local_budget = Mutex::new(PAGE_BYTES);
+    let peer_reader = FrozenPeerReader {
+        source,
+        db: db.clone(),
+        carriers,
+        provider,
+        budget: &local_budget,
+        readers: Mutex::new(BTreeMap::new()),
+    };
+    let reader = crate::source_reader::BudgetedReader::new(&peer_reader, 1024);
+    if cursor.is_some_and(|cursor| cursor.touched.len() != prior_references.len()) {
+        return Err(ReadError::Restart);
+    }
+    for (prior, mut observed, reference) in prior_references {
+        observed.provider = Some(pin_provider(&reader, &reference)?);
+        if prior != &observed {
+            return Err(ReadError::Restart);
+        }
+    }
     let mut bytes_left = PAGE_BYTES;
     let mut touched = BTreeMap::new();
     let mut reply_records = BTreeMap::new();
     let mut records = Vec::with_capacity(candidates.len());
-    let mut prompts = tx.prepare_cached(PROMPT_AT).map_err(index)?;
     let mut read = |reference: &SessionSourceRef, offset| {
         crate::source_reader::read_record_bounded(
             &reader,
@@ -344,15 +467,22 @@ fn read_retained_page(
             block: position.block,
             occurrence: position.occurrence,
         };
-        let prompt_anchor = if let Some(turn) = turn
-            .as_ref()
-            .filter(|turn| turn.handoff && turn.address == address)
-        {
-            Some(turn.id.clone())
-        } else {
-            prompt_anchor(&mut prompts, key, &reference, position)?
+        let (prompt_anchor, inputs) = {
+            let tx = db.lock().map_err(index)?;
+            let prompt_anchor = if let Some(turn) = turn
+                .as_ref()
+                .filter(|turn| turn.handoff && turn.address == address)
+            {
+                Some(turn.id.clone())
+            } else {
+                let mut prompts = tx.prepare_cached(PROMPT_AT).map_err(index)?;
+                prompt_anchor(&mut prompts, key, &reference, position)?
+            };
+            (
+                prompt_anchor,
+                causal::Inputs::load(&tx, &reference, position, revision)?,
+            )
         };
-        let inputs = causal::Inputs::load(&tx, &reference, position, revision)?;
         let operation = inputs.operation();
         let causal = inputs.render(source, key, &reference, event_id.as_deref(), turn);
         if direction == Direction::Reverse {
@@ -395,38 +525,51 @@ fn read_retained_page(
             retained_body_error(error, cursor.is_some())
         })?);
     }
+    peer_reader
+        .finish()
+        .map_err(|error| retained_body_error(error, cursor.is_some()))?;
     source.validate_authority()?;
     let selection_identity = super::super::present_identity(
         source,
         CatalogReadScope::RetainedHistory,
         key,
-        identity.harness.clone(),
+        harness.clone(),
         references,
-        identity.witness.clone(),
+        witness.clone(),
     );
     let next = after
         .filter(|_| more || address.is_some())
         .map(|after| Cursor {
             direction,
             selection,
-            members: identity.witness,
+            members: witness,
             view: 0,
             opened_at,
             after,
             touched: touched.into_values().map(|(prefix, _)| prefix).collect(),
         });
-    let metadata: serde_json::Value = serde_json::from_str(&identity.metadata).map_err(index)?;
-    let title = metadata["name"].as_str().map(str::to_owned);
-    let model = metadata["model"].as_str().map(str::to_owned);
+    let metadata: Option<serde_json::Value> = metadata
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(index)?;
+    let title = metadata
+        .as_ref()
+        .and_then(|m| m["name"].as_str())
+        .map(str::to_owned);
+    let model = metadata
+        .as_ref()
+        .and_then(|m| m["model"].as_str())
+        .map(str::to_owned);
     Ok(Component {
         binding,
         identity: selection_identity,
-        harness: identity.harness,
-        native_id: identity.native_id,
+        harness,
+        native_id,
         title,
         model,
         metadata: None,
-        retained_metadata: cursor.is_none().then_some(metadata),
+        retained_metadata: metadata.filter(|_| cursor.is_none()),
         member_count,
         legacy_completion: None,
         records,
@@ -435,46 +578,60 @@ fn read_retained_page(
         annotations,
     })
 }
+struct FrozenPeerReader<'a> {
+    source: &'a Source<'a>,
+    db: Arc<chunk_proofs::Snapshot>,
+    carriers: BTreeMap<String, (String, String)>,
+    provider: &'a dyn SessionSourceReader,
+    budget: &'a Mutex<usize>,
+    readers: Mutex<BTreeMap<String, PrefixReader<'a>>>,
+}
 
-fn frozen_turns(
-    tx: &rusqlite::Connection,
-    source: &Source<'_>,
-    key: &str,
-    identity: &warehouse::RetainedIdentity,
-    positions: impl Iterator<Item = Position>,
-) -> Result<BTreeMap<Position, Option<causal::TurnStart>>, ReadError> {
-    let mut search = causal::TurnSearch::new(tx, positions)?;
-    let mut members = tx
-        .prepare_cached(
-            "SELECT source,json_extract(receipt,'$.path'),json_extract(receipt,'$.native_id'),
-                json_extract(receipt,'$.offset')
-         FROM warehouse_identity_member WHERE identity=?1 ORDER BY ordinal",
-        )
-        .map_err(index)?;
-    let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
-    let mut rows = members.query([identity.binding]).map_err(index)?;
-    while let Some(row) = rows.next().map_err(index)? {
-        let id = row.get(0).map_err(index)?;
-        let carrier: String = row.get(1).map_err(index)?;
-        let native_id: String = row.get(2).map_err(index)?;
-        let path = relative(source.options, &identity.harness, &carrier)
-            .ok_or(ReadError::RetainedUnverified)?;
-        let predecessors = predecessor_bounds(&mut copies, identity, &native_id, id)?;
-        search.consider(
-            key,
-            &identity.harness,
-            causal::BoundaryMember {
-                id,
-                end: row.get(3).map_err(index)?,
-                predecessors: &predecessors,
-                launch_at: None,
-                native_id: &native_id,
-                path,
-            },
-            "{}",
-        )?;
+impl FrozenPeerReader<'_> {
+    fn finish(&self) -> io::Result<()> {
+        for reader in self.readers.lock().map_err(|_| changed())?.values_mut() {
+            reader.finish()?;
+        }
+        Ok(())
     }
-    Ok(search.finish())
+}
+
+impl SessionSourceReader for FrozenPeerReader<'_> {
+    fn read_range(
+        &self,
+        reference: &SessionSourceRef,
+        generation: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> io::Result<SessionSourceRange> {
+        if let Some((carrier, ledger)) = self.carriers.get(&reference.path) {
+            let mut readers = self.readers.lock().map_err(|_| changed())?;
+            if let Some(reader) = readers.get(&reference.path) {
+                return reader.read_range(reference, generation, offset, max);
+            }
+            let current = decode(ledger).map_err(|_| changed())?;
+            if matches!(self.source.availability(&reference.root, carrier).map_err(|_| changed())?,
+                Availability::Expected(Some(stat)) if stable_or_grown(&current.stat, &stat))
+            {
+                let reader = PrefixReader::open(
+                    self.db.clone(),
+                    self.source.path,
+                    Arc::new(Member {
+                        carrier: carrier.clone(),
+                        current,
+                        reference: reference.clone(),
+                        remote: false,
+                    }),
+                    self.budget,
+                )
+                .map_err(|_| changed())?;
+                let result = reader.read_range(reference, generation, offset, max);
+                readers.insert(reference.path.clone(), reader);
+                return result;
+            }
+        }
+        self.provider.read_range(reference, generation, offset, max)
+    }
 }
 
 /// The host provides an independently authorized archive reader. The warehouse
@@ -606,13 +763,7 @@ pub(in super::super) fn retained_peer_relay_address(
             occurrence,
         };
         let mut search = causal::TurnSearch::new(tx, std::iter::once(position))?;
-        let mut copies = tx
-            .prepare_cached(
-                "SELECT e.source,min(e.pos),m.value FROM fact_relation_observation e
-             CROSS JOIN json_each(?1) m ON CAST(m.key AS INTEGER)=e.source
-             WHERE e.target=?2 AND e.kind='continued-in' AND e.source<>?3 GROUP BY e.source",
-            )
-            .map_err(index)?;
+        let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
         let mut address = None;
         for member in &observed.members {
             let reference = &member.receipt;
@@ -621,26 +772,20 @@ pub(in super::super) fn retained_peer_relay_address(
                 .to_str()
                 .and_then(|path| relative(source.options, &observed.harness, path))
                 .ok_or_else(unavailable)?;
-            let mut predecessors = BTreeMap::new();
-            if observed.harness == "claude" {
-                let mut copies = copies
-                    .query(params![bounds, reference.native_id, member.source])
-                    .map_err(index)?;
-                while let Some(copy) = copies.next().map_err(index)? {
-                    let edge: i64 = copy.get(1).map_err(index)?;
-                    let end: i64 = copy.get(2).map_err(index)?;
-                    if edge < end {
-                        predecessors.insert(copy.get::<_, i64>(0).map_err(index)?, end);
-                    }
-                }
-            }
+            let predecessors = predecessor_bounds(
+                &mut copies,
+                &observed.harness,
+                &bounds,
+                &reference.native_id,
+                member.source,
+            )?;
             search.consider(
                 peer,
                 &observed.harness,
                 causal::BoundaryMember {
                     id: member.source,
                     end: i64::try_from(reference.offset).map_err(index)?,
-                    predecessors: &encode(&predecessors)?,
+                    predecessors: &predecessors,
                     launch_at: None,
                     native_id: &reference.native_id,
                     path,

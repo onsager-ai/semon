@@ -816,12 +816,13 @@ impl<'a> Snapshot<'a> {
     }
 
     fn priced_usage(
-        &self,
+        transaction: &Connection,
+        paths: &str,
         owners: &str,
         table: &std::sync::Arc<crate::pricing::EffectiveTable>,
     ) -> Result<BTreeMap<i64, Usage>, ReadError> {
-        let mut usage = self.transaction.prepare_cached(USAGE).map_err(index)?;
-        let mut facts = usage.query(params![owners, self.paths]).map_err(index)?;
+        let mut usage = transaction.prepare_cached(USAGE).map_err(index)?;
+        let mut facts = usage.query(params![owners, paths]).map_err(index)?;
         let mut priced = BTreeMap::<i64, Usage>::new();
         while let Some(fact) = facts.next().map_err(index)? {
             priced
@@ -844,7 +845,7 @@ impl<'a> Snapshot<'a> {
         let status = self.runtime_status(&owners)?;
         let owners = encode(&owners)?;
         let table = crate::pricing::snapshot();
-        let mut priced = self.priced_usage(&owners, &table)?;
+        let mut priced = Self::priced_usage(self.transaction, &self.paths, &owners, &table)?;
         let mut members = self
             .transaction
             .prepare_cached(PAGE_MEMBERS)
@@ -1087,10 +1088,20 @@ fn selected_metadata(
             }))
         }).collect::<Vec<_>>()
     };
+    let price = match selected_family_price(transaction, source, owner) {
+        Ok(price) => Some(price),
+        Err(ReadError::Restart) => {
+            incomplete = true;
+            None
+        }
+        Err(error) => return Err(error),
+    };
     let family = serde_json::json!({
         "state": if incomplete { "incomplete" } else { "complete" },
         "ancestors": presentation(ancestors),
         "runs": presentation(runs),
+        "usd": price.as_ref().and_then(|price| price.usd),
+        "shared_usd": price.map(|price| price.shared),
     });
     row.source_refs = references.to_vec();
     row.details = Some(selected_details(transaction, &row, family)?);
@@ -1136,11 +1147,21 @@ fn selected_details(
         .map_err(index)?
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()
         .map_err(index)?;
+    let mut signals = transaction
+        .prepare_cached(include_str!("events/store/warehouse_selected_signals.sql"))
+        .map_err(index)?;
+    let signals = signals
+        .query_map([row.owner], |record| {
+            Ok((record.get::<_, String>(0)?, record.get::<_, i64>(1)?))
+        })
+        .map_err(index)?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(index)?;
     let calls = tools.values().sum::<i64>();
     Ok(serde_json::json!({
         "state": row.status.unwrap_or("off"), "cwd": cwd, "family": family,
         "turns": turns, "calls": calls, "errors": errors, "tool_calls": tools,
-        "signals": {}, "cost": row.cost, "copied_usage": row.usage[3..].iter().any(|count| *count > 0),
+        "signals": signals, "cost": row.cost, "copied_usage": row.usage[3..].iter().any(|count| *count > 0),
         "live_observation": row.status.is_some(),
         "copilot": null, "reported_runs": [], "cost_check": [],
     }))
@@ -1976,31 +1997,99 @@ pub(super) fn family_price(
     let Some((owner, _, _)) = current_identity(&tx, source, key, Some(&snapshot.paths))? else {
         return Ok(None);
     };
+    let price = selected_family_price(&tx, source, owner)?;
+    source.validate_authority()?;
+    Ok(Some(price))
+}
+
+fn selected_family_price(
+    tx: &Connection,
+    source: &Source<'_>,
+    owner: i64,
+) -> Result<FamilyPrice, ReadError> {
+    let mut graph = parents::Parents::new(tx)?;
+    let mut edges = BTreeMap::new();
+    let mut pending = vec![owner];
+    while let Some(parent) = pending.pop() {
+        if let std::collections::btree_map::Entry::Vacant(entry) = edges.entry(parent) {
+            let children = graph.owner_children(parent)?;
+            pending.extend(children.iter().copied());
+            entry.insert(children);
+        }
+    }
+    let owners = encode(&edges.keys().collect::<Vec<_>>())?;
+    let paths = encode(&selected_related_paths(tx, source, &owners)?)?;
     let mut members = tx
         .prepare_cached(include_str!("events/store/warehouse_selected_family.sql"))
         .map_err(index)?;
     let mut rows = members
-        .query(params![owner, snapshot.paths, source.namespace.binding()])
+        .query(params![owners, paths, source.namespace.binding()])
         .map_err(index)?;
     let mut family = BTreeMap::new();
-    let mut cycle = false;
     while let Some(row) = rows.next().map_err(index)? {
-        if !row.get::<_, bool>(3).map_err(index)? {
+        if !row.get::<_, bool>(2).map_err(index)? {
             return Err(ReadError::Restart);
         }
-        cycle = row.get(2).map_err(index)?;
         family.insert(
             row.get::<_, i64>(0).map_err(index)?,
             row.get::<_, String>(1).map_err(index)?,
         );
     }
     let mut shared = crate::events::session_activity::Measured::default();
-    if cycle {
-        return Ok(Some(FamilyPrice { usd: None, shared }));
+    let mut remaining = edges
+        .iter()
+        .map(|(&id, children)| (id, children.len()))
+        .collect::<BTreeMap<_, _>>();
+    let mut parents = BTreeMap::<i64, Vec<i64>>::new();
+    for (&parent, children) in &edges {
+        for &child in children {
+            parents.entry(child).or_default().push(parent);
+        }
     }
-    let owners = encode(&family.keys().collect::<Vec<_>>())?;
+    let mut leaves = remaining
+        .iter()
+        .filter_map(|(&id, &count)| (count == 0).then_some(id))
+        .collect::<Vec<_>>();
+    let keys: BTreeMap<_, _> = relative_keys(tx, &owners)?
+        .into_iter()
+        .map(|(owner, key, _)| (owner, key))
+        .collect();
+    // The native family fold starts with Catalog-key-ordered leaves. Children
+    // finish in order of subtree height and last key at that height.
+    let mut priority = BTreeMap::<i64, (usize, &str)>::new();
+    while let Some(node) = leaves.pop() {
+        let order = priority.get(&node).copied().unwrap_or((0, &keys[&node]));
+        priority.insert(node, order);
+        for &parent in parents.get(&node).into_iter().flatten() {
+            let candidate = (order.0 + 1, order.1);
+            let rank = priority.entry(parent).or_insert(candidate);
+            *rank = (*rank).max(candidate);
+            let count = remaining.get_mut(&parent).expect("selected family parent");
+            *count -= 1;
+            if *count == 0 {
+                leaves.push(parent);
+            }
+        }
+    }
+    if remaining.values().any(|count| *count != 0) {
+        return Ok(FamilyPrice { usd: None, shared });
+    }
+    // An owner's own observation wins before its children. The first visit
+    // also gives the winning branch when two paths reach the same owner.
+    let mut seen = BTreeSet::new();
+    let mut fold = Vec::new();
+    let mut pending = vec![owner];
+    while let Some(node) = pending.pop() {
+        if seen.insert(node) {
+            fold.push(node);
+            let mut children: Vec<_> = edges[&node].iter().copied().collect();
+            children.sort_by_key(|child| std::cmp::Reverse(priority[child]));
+            pending.extend(children);
+        }
+    }
+    let fold = encode(&fold)?;
     let table = crate::pricing::snapshot();
-    let mut priced = snapshot.priced_usage(&owners, &table)?;
+    let mut priced = Snapshot::priced_usage(tx, &paths, &owners, &table)?;
     let usd = family
         .into_iter()
         .map(|(owner, harness)| {
@@ -2020,9 +2109,7 @@ pub(super) fn family_price(
             "events/store/warehouse_selected_family_shared.sql"
         ))
         .map_err(index)?;
-    let mut steps = shared_usage
-        .query(params![owner, owners, snapshot.paths])
-        .map_err(index)?;
+    let mut steps = shared_usage.query(params![fold, paths]).map_err(index)?;
     while let Some(step) = steps.next().map_err(index)? {
         let billing = step.get::<_, Option<String>>(1).map_err(index)?;
         let usd = billing
@@ -2043,7 +2130,7 @@ pub(super) fn family_price(
             shared.unknown_steps += 1;
         }
     }
-    Ok(Some(FamilyPrice { usd, shared }))
+    Ok(FamilyPrice { usd, shared })
 }
 
 fn retained_error(error: warehouse::RetainedIdentityError) -> ReadError {

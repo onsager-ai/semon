@@ -681,6 +681,7 @@ fn read_transcript(
                 | "limit"
                 | "cursor"
                 | "address"
+                | "peer"
                 | "part"
                 | "image"
                 | "field_chunk"
@@ -725,6 +726,13 @@ fn read_transcript(
     if address.is_some() && (cursor.is_some() || argument("limit").is_some()) {
         return Err(invalid());
     }
+    let peer = argument("peer")
+        .map(crate::session_route::RetainedPeerAddress::parse)
+        .transpose()
+        .map_err(|_| invalid())?;
+    if peer.is_some() && scope != CatalogReadScope::RetainedHistory {
+        return Err(invalid());
+    }
     let part = match (
         expanded,
         argument("part"),
@@ -751,14 +759,29 @@ fn read_transcript(
         .map_err(|error| read_error(index(error)))?;
     let source = Source::focused(namespace, &path, &configured.options, current_provider)
         .map_err(read_error)?;
-    let component = match scope {
-        CatalogReadScope::Current => match &address {
+    let component = match (scope, peer.as_ref()) {
+        (CatalogReadScope::Current, _) => match &address {
             None => selected::latest_page(source.options, &source, key, limit, cursor.as_ref()),
             Some(address) => {
                 selected::addressed_window(&source, key, &address.record, &address.binding)
             }
         },
-        CatalogReadScope::RetainedHistory => {
+        (CatalogReadScope::RetainedHistory, Some(peer)) => selected::retained_peer_window(
+            &source,
+            key,
+            selected::PeerBinding {
+                trace: &peer.trace,
+                witness: &peer.witness,
+            },
+            limit,
+            cursor.as_ref(),
+            address
+                .as_ref()
+                .map(|address| (&address.record, address.binding.as_str())),
+            retained_provider,
+        )
+        .map(Some),
+        (CatalogReadScope::RetainedHistory, None) => {
             let archive = super::ArchiveReader::new(&configured.options);
             let provider = retained_provider.unwrap_or(&archive);
             match &address {

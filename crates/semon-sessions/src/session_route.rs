@@ -57,6 +57,26 @@ impl NativeEntryAddress {
     }
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedPeerAddress {
+    pub(crate) trace: String,
+    pub(crate) witness: String,
+}
+
+impl RetainedPeerAddress {
+    pub(crate) fn parse(value: &str) -> io::Result<Self> {
+        let peer: Self = serde_json::from_str(value).map_err(|_| malformed())?;
+        if !identifier(&peer.trace)
+            || peer.witness.len() != 64
+            || !peer.witness.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(malformed());
+        }
+        Ok(peer)
+    }
+}
+
 /// Decode once, after splitting on literal slashes. '+' is literal in a path.
 pub fn decode(value: &str) -> io::Result<String> {
     let mut bytes = Vec::with_capacity(value.len());
@@ -132,6 +152,7 @@ impl SessionRoute {
                 }
                 "generation" => !value.is_empty() && value.len() <= 4096,
                 "address" => NativeEntryAddress::parse(&value).is_ok(),
+                "peer" => RetainedPeerAddress::parse(&value).is_ok(),
                 "part" => matches!(value.as_str(), "output" | "script" | "attachment"),
                 _ => false,
             };
@@ -156,6 +177,13 @@ impl SessionRoute {
             || route.controls.contains_key("address")
                 && (route.controls.contains_key("after")
                     || route.controls.contains_key("generation"))
+        {
+            return Err(malformed());
+        }
+        if route.controls.contains_key("peer")
+            && (route.controls.get("scope").map(String::as_str) != Some("retained_history")
+                || route.turn.is_some()
+                || route.controls.contains_key("generation"))
         {
             return Err(malformed());
         }
