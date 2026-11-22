@@ -70,7 +70,9 @@ fn sealed_codex_fixture(turns: usize, padding: usize) -> (Home, PathBuf) {
         ));
     }
     let path = home.lines("codex/sessions/rollout-sealed-pages.jsonl", &records);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -2373,7 +2375,7 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_catalog_reads() 
     assert!(!home.options.cache.exists());
     assert!(!home.options.cache.with_extension("sqlite3").exists());
 
-    let view = MachineView::new(home.options.clone());
+    let view = MachineView::for_source_key("", home.options.clone());
     let parsed = || crate::events::PARSED.with(std::cell::Cell::get);
     let first = view.evidence.query_at(NOW).unwrap();
     let count = parsed();
@@ -2383,7 +2385,7 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_catalog_reads() 
         let mut work = view.evidence.storage.work.lock().unwrap();
         while !view.evidence.refresh_catalog(&mut work, NOW).unwrap() {}
         drop(work);
-        let page = crate::session_catalog_page(&home.options, "fixture", "limit=60");
+        let page = crate::session_catalog_page(&home.options, "local", "limit=60");
         assert_eq!(page.status, 200);
         let page: Value = serde_json::from_slice(&page.body).unwrap();
         assert!(
@@ -4463,7 +4465,9 @@ fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads()
             let id = format!("unrelated-{n}");
             home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
         }
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
