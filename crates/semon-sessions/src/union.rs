@@ -1610,7 +1610,7 @@ impl ViewerCore {
             }
             return match path {
                 "/api/sessions" => match crate::catalog::Request::parse(query) {
-                    Ok(request) => view.evidence.storage.page(key, &request, None),
+                    Ok(request) => view.evidence.storage.page(key, &request),
                     Err(reply) => reply,
                 },
                 "/api/session-transcript" | "/api/session-entry" => {

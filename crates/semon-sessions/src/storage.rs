@@ -19,11 +19,7 @@ mod conformance;
 
 use std::fmt;
 
-use crate::{
-    ViewerReply,
-    catalog::{CatalogSearchAdmission, Request},
-    model::summary::CatalogSource,
-};
+use crate::{ViewerReply, catalog::Request, model::summary::CatalogSource};
 
 /// The longest namespace accepted, the same bound as a Catalog source key.
 const NAMESPACE_MAX: usize = 4096;
@@ -200,7 +196,6 @@ impl ProjectionTag {
 }
 
 /// The search callback a Catalog page may admit after its snapshot closes.
-pub(crate) type OnSearch<'a> = Option<&'a mut dyn FnMut(CatalogSearchAdmission) -> bool>;
 
 /// A backend holding one database per placed namespace.
 #[cfg_attr(
@@ -234,12 +229,7 @@ pub(crate) trait SessionStore {
 )]
 pub(crate) trait CatalogRead {
     fn namespace(&self) -> &Namespace;
-    fn page(
-        &self,
-        namespace: &Namespace,
-        request: &Request,
-        on_search: OnSearch<'_>,
-    ) -> Result<ViewerReply, StorageError>;
+    fn page(&self, namespace: &Namespace, request: &Request) -> Result<ViewerReply, StorageError>;
 }
 
 /// Event index and consumed-prefix ledger writes.
@@ -298,13 +288,9 @@ pub(crate) fn catalog_page(
     options: &crate::Options,
     source_key: &str,
     request: &Request,
-    on_search: OnSearch<'_>,
 ) -> ViewerReply {
-    let read = local(options, source_key).and_then(|(namespace, store)| {
-        store
-            .reader(&namespace)?
-            .page(&namespace, request, on_search)
-    });
+    let read = local(options, source_key)
+        .and_then(|(namespace, store)| store.reader(&namespace)?.page(&namespace, request));
     read.unwrap_or_else(|_| {
         crate::catalog::error(
             503,

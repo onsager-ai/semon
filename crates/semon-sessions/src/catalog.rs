@@ -267,10 +267,9 @@ fn catalog_selection_read(
         Some(snapshot) => {
             let namespace =
                 crate::storage::Namespace::new(source_key).map_err(|_| InvalidArguments)?;
-            read_page_snapshot(options, &namespace, &request, snapshot, false, &mut None)
-                .map_err(|_| Unavailable)?
+            read_page_snapshot(options, &namespace, &request, snapshot).map_err(|_| Unavailable)?
         }
-        None => crate::storage::catalog_page(options, source_key, &request, None),
+        None => crate::storage::catalog_page(options, source_key, &request),
     };
     selection_from_reply(
         reply,
@@ -853,12 +852,6 @@ pub(crate) fn relative_status(
     .unwrap_or_else(|_| unavailable())
 }
 
-pub(crate) struct CatalogSearchAdmission {
-    pub(crate) query: String,
-    pub(crate) harness: Option<String>,
-    pub(crate) paths: Result<Vec<String>, ()>,
-}
-
 /// Whether a normal first Catalog page can read the current persisted
 /// warehouse. Source-scoped consumers can read committed partial coverage
 /// while the producer continues. Missing or blank stores return `false`; invalid, unsupported and
@@ -924,7 +917,6 @@ pub(crate) fn read_page(
     options: &Options,
     namespace: &crate::storage::Namespace,
     request: &Request,
-    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
@@ -932,23 +924,8 @@ pub(crate) fn read_page(
     )?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let transaction = connection.transaction()?;
-    let mut admission = None;
-    let reply = read_page_snapshot(
-        options,
-        namespace,
-        request,
-        &transaction,
-        on_search.is_some(),
-        &mut admission,
-    )?;
+    let reply = read_page_snapshot(options, namespace, request, &transaction)?;
     transaction.commit()?;
-    if reply.status == 200
-        && let (Some(on_search), Some(admission)) = (on_search, admission)
-    {
-        // Producer priority is advisory; a full queue cannot invalidate the
-        // Catalog page already read from a qualified publication.
-        let _ = on_search(admission);
-    }
     Ok(reply)
 }
 
@@ -990,8 +967,6 @@ fn read_page_snapshot(
     namespace: &crate::storage::Namespace,
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
-    admit_search: bool,
-    admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     crate::events::store::require_current(transaction)?;
     crate::storage::sqlite::qualify(transaction, namespace)?;
@@ -1183,32 +1158,6 @@ fn read_page_snapshot(
         .unwrap_or_else(|| "complete".into());
     if !matches!(completeness.as_str(), "partial" | "complete") {
         return Err(io::Error::other("catalog completeness is invalid").into());
-    }
-    if admit_search
-        && completeness == "partial"
-        && let Some((query, harness)) = request.search_interest()
-    {
-        let draining: bool = transaction
-            .query_row(
-                "SELECT value='draining' FROM meta WHERE key='catalog_backfill_state'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if draining {
-            *admission = Some(CatalogSearchAdmission {
-                query: query.to_owned(),
-                harness: harness.map(str::to_owned),
-                paths: EventCache::catalog_search_sources(
-                    transaction,
-                    options,
-                    crate::events::CatalogSearchInterest { query, harness },
-                    crate::events::CATALOG_SEARCH_LIMIT,
-                )
-                .map_err(|_| ()),
-            });
-        }
     }
     let more = selected.len() > request.limit;
     if more {

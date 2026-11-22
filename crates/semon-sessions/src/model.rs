@@ -473,6 +473,18 @@ fn stable_id(prefix: &str, source: &str) -> String {
     format!("{prefix}{:016x}", fnv(source))
 }
 
+pub(crate) fn question_id(native_id: &str, offset: u64, call: Option<&str>) -> String {
+    let fallback;
+    let source = match call {
+        Some(call) => call,
+        None => {
+            fallback = format!("{native_id}:{offset}");
+            &fallback
+        }
+    };
+    stable_id("q", &format!("toyou:{source}"))
+}
+
 pub(crate) fn spawn_turn_id(harness: &str, key: &str) -> String {
     stable_id("s", &format!("spawn:{harness}:{key}"))
 }
@@ -902,7 +914,6 @@ impl PidFile {
         self.status.as_deref() == Some("waiting") || self.waiting_for.is_some()
     }
 
-    #[cfg(test)]
     pub(crate) fn observed_state(&self) -> &'static str {
         if self.waiting() {
             "wait"
@@ -4594,14 +4605,10 @@ impl<'a> Builder<'a> {
                     .map(|question| question.question.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                let source = found
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("{}:{}", self.files[at.0].id, found.o));
                 let mut handoff = Handoff {
                     ask: Some("question"),
                     ..Handoff::new(
-                        stable_id("q", &format!("toyou:{source}")),
+                        question_id(&self.files[at.0].id, found.o, found.id.as_deref()),
                         "toyou",
                         (self.sessions[index].key.clone(), "you".into()),
                         found.t.unwrap_or(self.sessions[index].out.last),

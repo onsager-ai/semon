@@ -8,8 +8,8 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 use rusqlite::{Connection, OpenFlags};
 
 use super::{
-    CatalogPublish, CatalogRead, IndexWrite, Namespace, OnSearch, ProjectionTag, SessionStore,
-    StorageError, TagCheck, ensure,
+    CatalogPublish, CatalogRead, IndexWrite, Namespace, ProjectionTag, SessionStore, StorageError,
+    TagCheck, ensure,
 };
 use crate::{
     ViewerReply,
@@ -238,14 +238,9 @@ impl CatalogRead for Reader {
         &self.namespace
     }
 
-    fn page(
-        &self,
-        namespace: &Namespace,
-        request: &Request,
-        on_search: OnSearch<'_>,
-    ) -> Result<ViewerReply, StorageError> {
+    fn page(&self, namespace: &Namespace, request: &Request) -> Result<ViewerReply, StorageError> {
         ensure(&self.namespace, namespace)?;
-        crate::catalog::read_page(&self.options, namespace, request, on_search).map_err(|error| {
+        crate::catalog::read_page(&self.options, namespace, request).map_err(|error| {
             match error.downcast::<StorageError>() {
                 Ok(error) => *error,
                 Err(error) => backend(error),

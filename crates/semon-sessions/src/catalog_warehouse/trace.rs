@@ -108,11 +108,12 @@ pub(super) fn read(
         }));
     }
     let current = if scope == CatalogReadScope::Current {
-        let tx = view.lock()?;
-        let (owner, harness, _) =
-            super::current_identity(&tx, source, key, None)?.ok_or(ReadError::Restart)?;
-        Some(super::selected_metadata_at(
-            &tx,
+        let (owner, harness, _) = {
+            let tx = view.lock()?;
+            super::current_identity(&tx, source, key, None)?.ok_or(ReadError::Restart)?
+        };
+        Some(super::selected_metadata(
+            &view,
             source,
             key,
             owner,

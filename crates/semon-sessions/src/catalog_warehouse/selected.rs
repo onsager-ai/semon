@@ -53,12 +53,16 @@ impl<'a> ReadView<'a> {
         db.execute_batch("BEGIN DEFERRED").map_err(index)?;
         crate::events::store::require_current(&db).map_err(index)?;
         crate::storage::sqlite::qualify(&db, &source.namespace).map_err(index)?;
-        Ok(Self {
+        Ok(Self::from_connection(db, source))
+    }
+
+    pub(super) fn from_connection(db: rusqlite::Connection, source: &Source<'a>) -> Self {
+        Self {
             db: chunk_proofs::Snapshot::new(db),
             archive: super::ArchiveReader::new(source.options),
             body_bytes: Mutex::new(PAGE_BYTES),
             proof_bytes: Mutex::new(PAGE_BYTES),
-        })
+        }
     }
 
     pub(super) fn lock(
@@ -552,17 +556,18 @@ fn address_frontier(
 }
 
 pub(super) fn prompt_title(
+    view: &ReadView<'_>,
     source: &Source<'_>,
     carrier: String,
     ledger: &str,
     native_id: String,
     offset: i64,
 ) -> Result<Option<String>, ReadError> {
-    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    let db = chunk_proofs::Snapshot::new(db);
-    let mut bytes_left = 256 * 1024;
+    let mut budget = view.body_bytes.lock().map_err(index)?;
+    let allowance = (*budget).min(256 * 1024);
+    let mut bytes_left = allowance;
     let native = qualified_record(
-        db,
+        view.db.clone(),
         source,
         RecordProof {
             harness: "codex",
@@ -572,9 +577,10 @@ pub(super) fn prompt_title(
             offset,
         },
         &mut bytes_left,
-        &Mutex::new(PAGE_BYTES),
-    )?;
-    Ok(crate::model::prompt_text(&native)
+        &view.proof_bytes,
+    );
+    *budget -= allowance - bytes_left;
+    Ok(crate::model::prompt_text(&native?)
         .filter(|text| !text.trim().is_empty())
         .map(|text| crate::model::one_line(&text, 80)))
 }
@@ -1166,6 +1172,47 @@ fn member_turn_positions(
     turns: &[&str],
     mut keep: impl FnMut((Position, Option<String>)),
 ) -> Result<(), ReadError> {
+    if turns.iter().any(|turn| is_question_id(turn)) {
+        let mut calls = db
+            .prepare_cached(
+                "SELECT c.pos,c.call_id,r.occurrence FROM fact_tool_call c
+             JOIN fact_record r ON r.source=c.source AND r.pos=c.pos AND r.block=0 AND NOT r.gap
+             WHERE c.source=?1 AND c.pos<?2 AND c.tool IN (
+               'AskUserQuestion','request_user_input','request_user_input_async',
+               'functions.request_user_input','functions.request_user_input_async')
+             ORDER BY c.pos DESC,c.block DESC LIMIT 128",
+            )
+            .map_err(index)?;
+        let mut rows = calls
+            .query(params![id, i64::try_from(reference.offset).map_err(index)?])
+            .map_err(index)?;
+        while let Some(row) = rows.next().map_err(index)? {
+            let offset: i64 = row.get(0).map_err(index)?;
+            let call: Option<String> = row.get(1).map_err(index)?;
+            let event = crate::model::question_id(
+                &reference.native_id,
+                u64::try_from(offset).map_err(index)?,
+                call.as_deref(),
+            );
+            if !turns.contains(&event.as_str()) {
+                continue;
+            }
+            let occurrence = row.get(2).map_err(index)?;
+            member_positions(
+                positions,
+                PositionSearch {
+                    source: id,
+                    start: offset,
+                    end: offset + 1,
+                    predecessors,
+                    entry: Some((0, occurrence)),
+                    frontier: Direction::Forward.frontier(None, id),
+                    capacity: 1,
+                },
+                &mut keep,
+            )?;
+        }
+    }
     for turn in turns {
         turn_candidates(db, key, id, reference.offset, reference, turn, |address| {
             let Some(frontier) = address_frontier(db, Direction::Forward, id, address)? else {
@@ -1188,6 +1235,22 @@ fn member_turn_positions(
         })?;
     }
     Ok(())
+}
+
+pub(super) fn is_question_id(id: &str) -> bool {
+    id.strip_prefix('q')
+        .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+pub(super) fn is_question_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "AskUserQuestion"
+            | "request_user_input"
+            | "request_user_input_async"
+            | "functions.request_user_input"
+            | "functions.request_user_input_async"
+    )
 }
 
 fn turn_candidates(
@@ -2219,9 +2282,12 @@ fn read_current(
                 let (body, _) = read_body(position.source, &member, operation.parent)?;
                 entry.insert(body);
             }
+        }
+        if direction == Direction::Reverse || matches!(target, Target::Turns(_, Some(_))) {
             for reply in causal
                 .calls
                 .iter()
+                .filter(|call| direction == Direction::Reverse || call.tool == "AskUserQuestion")
                 .filter_map(causal::CallSlot::display_reply)
             {
                 if let std::collections::btree_map::Entry::Vacant(entry) =
@@ -2274,7 +2340,6 @@ fn read_current(
     // An earlier page may use historical prefix receipts with current row facts.
     // The browser keeps the metadata from its latest or addressed selection.
     let metadata = {
-        let transaction = read_view.lock()?;
         (cursor.is_none()
             && matches!(
                 target,
@@ -2282,12 +2347,13 @@ fn read_current(
             ))
         .then(|| {
             super::selected_metadata(
-                &transaction,
+                read_view,
                 source,
                 key,
                 owner,
                 &owner_identity.1,
                 &references,
+                source.current_provider.is_none(),
             )
         })
         .transpose()?

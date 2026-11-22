@@ -855,9 +855,12 @@ pub(super) fn read_frozen(
             {
                 entry.insert(read(&reference, operation.parent)?);
             }
+        }
+        if direction == Direction::Reverse || matches!(target, Target::Turns(_, Some(_))) {
             for reply in causal
                 .calls
                 .iter()
+                .filter(|call| direction == Direction::Reverse || call.tool == "AskUserQuestion")
                 .filter_map(causal::CallSlot::display_reply)
             {
                 if let std::collections::btree_map::Entry::Vacant(entry) =

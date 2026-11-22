@@ -139,9 +139,7 @@ fn read(
     bound: &Namespace,
     requested: &Namespace,
 ) -> Result<(u16, Value), StorageError> {
-    let reply = store
-        .reader(bound)?
-        .page(requested, &request("limit=10"), None)?;
+    let reply = store.reader(bound)?.page(requested, &request("limit=10"))?;
     Ok((reply.status, serde_json::from_slice(&reply.body).unwrap()))
 }
 
@@ -312,7 +310,7 @@ fn storage_wrong_namespace_is_refused_without_partial_success() {
     let reader = store.reader(&na).unwrap();
     assert_eq!(reader.namespace(), &na);
     assert!(matches!(
-        reader.page(&nb, &request("limit=10"), None),
+        reader.page(&nb, &request("limit=10")),
         Err(StorageError::WrongNamespace { .. })
     ));
     let mut writer = store.index_writer(&na).unwrap();
@@ -771,7 +769,7 @@ fn storage_withdrawal_during_a_failed_publication_keeps_history_in_custody() {
         let reply = store
             .reader(&na)
             .unwrap()
-            .page(&na, &request(query), None)
+            .page(&na, &request(query))
             .unwrap();
         assert_eq!(reply.status, 200);
         serde_json::from_slice(&reply.body).unwrap()

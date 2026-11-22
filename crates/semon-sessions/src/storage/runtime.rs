@@ -1,7 +1,7 @@
 //! Source-owned runtime access. SQLite keeps its existing writer and snapshots;
 //! PostgreSQL runs on a source-owned reactor, outside the embedding reactor.
 //! Startup selection remains private until every runtime consumer uses this port.
-use super::{Namespace, OnSearch, StorageError};
+use super::{Namespace, StorageError};
 use crate::{Options, ViewerReply, catalog::Request, events::EventCache};
 use std::{collections::BTreeSet, time::Instant};
 
@@ -198,6 +198,7 @@ impl RuntimeStore {
         super::sqlite::selected_connection(&self.options, key)
     }
 
+    #[cfg(all(test, feature = "postgres"))]
     pub(crate) fn generation(&self) -> io::Result<Option<String>> {
         self.validate()?;
         #[cfg(feature = "postgres")]
@@ -253,7 +254,7 @@ impl RuntimeStore {
             Request::parse(&query).map_err(|_| crate::CatalogIdentityError::InvalidArguments)?;
         request.require_complete = require_complete;
         crate::catalog::selection_from_reply(
-            self.page(key, &request, None),
+            self.page(key, &request),
             key,
             catalog_key,
             scope,
@@ -328,12 +329,7 @@ impl RuntimeStore {
         crate::catalog::sqlite_page_ready(&self.options)
     }
 
-    pub(crate) fn page(
-        &self,
-        key: &str,
-        request: &Request,
-        on_search: OnSearch<'_>,
-    ) -> ViewerReply {
+    pub(crate) fn page(&self, key: &str, request: &Request) -> ViewerReply {
         if self.validate().is_err() {
             return unavailable();
         }
@@ -365,7 +361,7 @@ impl RuntimeStore {
                 })
                 .unwrap_or_else(|_| unavailable());
         }
-        super::catalog_page(&self.options, key, request, on_search)
+        super::catalog_page(&self.options, key, request)
     }
 
     /// Only the injected PostgreSQL path handles this call. The SQLite caller

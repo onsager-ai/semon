@@ -357,11 +357,20 @@ pub(super) struct Continuation {
 }
 
 #[derive(Debug)]
+struct PromptTitle {
+    carrier: String,
+    ledger: String,
+    native_id: String,
+    offset: i64,
+}
+
+#[derive(Debug)]
 pub(super) struct Row {
     position: Position,
     owner: i64,
     pub(super) harness: String,
     pub(super) title: String,
+    prompt_title: Option<PromptTitle>,
     pub(super) model: String,
     effort: Option<String>,
     repo: Option<String>,
@@ -380,6 +389,25 @@ pub(super) struct Row {
 }
 
 impl Row {
+    fn resolve_title(
+        &mut self,
+        view: &selected::ReadView<'_>,
+        source: &Source<'_>,
+    ) -> Result<(), ReadError> {
+        if let Some(prompt) = self.prompt_title.take() {
+            self.title = selected::prompt_title(
+                view,
+                source,
+                prompt.carrier,
+                &prompt.ledger,
+                prompt.native_id,
+                prompt.offset,
+            )?
+            .unwrap_or_else(|| "Codex subagent".into());
+        }
+        Ok(())
+    }
+
     fn token_millions(&self) -> [f64; 3] {
         let [
             input,
@@ -635,8 +663,12 @@ impl<'a> Snapshot<'a> {
         })
     }
 
-    fn rows(&self, request: &Request, boundary: Option<&Boundary>) -> Result<LocalPage, ReadError> {
-        use crate::catalog_search::{MAX_CANDIDATES, MAX_SCAN_BYTES};
+    fn candidates(
+        &self,
+        request: &Request,
+        boundary: Option<&Boundary>,
+    ) -> Result<(Vec<Row>, usize), ReadError> {
+        use crate::catalog_search::MAX_CANDIDATES;
         let repo = encode(&self.repos)?;
         let machine = self.source.namespace.as_str();
         let (last, key, inclusive) = boundary.map_or((None, None, false), |b| {
@@ -663,52 +695,16 @@ impl<'a> Snapshot<'a> {
                 (limit + 1) as i64
             ])
             .map_err(index)?;
-        let (mut selected, mut examined, mut bytes, mut next, mut total) =
-            (Vec::new(), 0, 0, None, 0);
+        let mut candidates = Vec::new();
+        let mut total = 0;
         while let Some(record) = records.next().map_err(index)? {
             let Some(key) = record.get::<_, Option<String>>(0).map_err(index)? else {
                 total = usize::try_from(record.get::<_, i64>(8).map_err(index)?).map_err(index)?;
                 continue;
             };
-            if next.is_some() {
-                continue;
-            }
-            if selected.len() == request.limit || examined == limit || bytes >= MAX_SCAN_BYTES {
-                next = Some(Boundary {
-                    position: Position {
-                        last: record.get(3).map_err(index)?,
-                        key,
-                        source: machine.to_owned(),
-                    },
-                    inclusive: true,
-                });
-                continue;
-            }
-            let row = read_row(self.source, record, key, true)?;
-            let fields = [
-                Some(row.title.as_str()),
-                Some(row.position.key.as_str()),
-                row.repo.as_deref(),
-                row.branch.as_deref(),
-                Some(row.model.as_str()),
-                Some(row.harness.as_str()),
-            ];
-            examined += 1;
-            bytes += fields
-                .iter()
-                .flatten()
-                .map(|field| field.len())
-                .sum::<usize>();
-            if request.q.as_ref().is_none_or(|q| {
-                fields
-                    .into_iter()
-                    .flatten()
-                    .any(|field| field.to_lowercase().contains(q))
-            }) {
-                selected.push(row);
-            }
+            candidates.push(read_row(self.source, record, key, request.q.is_some())?);
         }
-        Ok((selected, total, examined, next))
+        Ok((candidates, total))
     }
 
     fn runtime_status(
@@ -1117,18 +1113,7 @@ fn selected_runtime_status(
 }
 
 fn selected_metadata(
-    transaction: &Connection,
-    source: &Source<'_>,
-    key: &str,
-    owner: i64,
-    harness: &str,
-    references: &[crate::CatalogSourceObservation],
-) -> Result<Row, ReadError> {
-    selected_metadata_at(transaction, source, key, owner, harness, references, true)
-}
-
-fn selected_metadata_at(
-    transaction: &Connection,
+    view: &selected::ReadView<'_>,
     source: &Source<'_>,
     key: &str,
     owner: i64,
@@ -1136,51 +1121,69 @@ fn selected_metadata_at(
     references: &[crate::CatalogSourceObservation],
     native_titles: bool,
 ) -> Result<Row, ReadError> {
-    list_functions(transaction).map_err(index)?;
-    let (ancestors, runs, mut incomplete) = parents::Parents::new(transaction)?.relatives(owner)?;
-    let visible = std::iter::once(&owner).chain(&ancestors).chain(&runs);
-    let identities = relative_keys(transaction, &encode(&visible.copied().collect::<Vec<_>>())?)?;
-    let owners = identities
-        .iter()
-        .map(|(owner, _, _)| owner)
-        .collect::<Vec<_>>();
-    let paths = encode(&selected_related_paths(
-        transaction,
-        source,
-        &encode(&owners)?,
-        true,
-    )?)?;
-    let repos = repositories(transaction, source, &paths)?;
-    let mut statement = transaction
-        .prepare_cached(SELECTED_METADATA)
-        .map_err(index)?;
-    let mut records = statement
-        .query(params![
-            paths,
-            source.namespace.binding(),
-            encode(&repos)?,
-            encode(&identities)?,
-        ])
-        .map_err(index)?;
-    let mut rows = Vec::new();
-    while let Some(record) = records.next().map_err(index)? {
-        rows.push(read_row(
+    let (ancestors, runs, incomplete, mut rows, price) = {
+        let tx = view.lock()?;
+        let transaction = &*tx;
+        list_functions(transaction).map_err(index)?;
+        let (ancestors, runs, mut incomplete) =
+            parents::Parents::new(transaction)?.relatives(owner)?;
+        let visible = std::iter::once(&owner).chain(&ancestors).chain(&runs);
+        let identities =
+            relative_keys(transaction, &encode(&visible.copied().collect::<Vec<_>>())?)?;
+        let owners = identities
+            .iter()
+            .map(|(owner, _, _)| owner)
+            .collect::<Vec<_>>();
+        let paths = encode(&selected_related_paths(
+            transaction,
             source,
-            record,
-            record.get(0).map_err(index)?,
-            native_titles,
-        )?);
-    }
-    incomplete |= rows.len() != owners.len();
-    let snapshot = Snapshot {
-        transaction,
-        source,
-        paths,
-        repos,
-        coverage: Coverage::default(),
-        revision: String::new(),
+            &encode(&owners)?,
+            true,
+        )?)?;
+        let repos = repositories(transaction, source, &paths)?;
+        let mut statement = transaction
+            .prepare_cached(SELECTED_METADATA)
+            .map_err(index)?;
+        let mut records = statement
+            .query(params![
+                paths,
+                source.namespace.binding(),
+                encode(&repos)?,
+                encode(&identities)?,
+            ])
+            .map_err(index)?;
+        let mut rows = Vec::new();
+        while let Some(record) = records.next().map_err(index)? {
+            rows.push(read_row(
+                source,
+                record,
+                record.get(0).map_err(index)?,
+                native_titles,
+            )?);
+        }
+        incomplete |= rows.len() != owners.len();
+        let snapshot = Snapshot {
+            transaction,
+            source,
+            paths,
+            repos,
+            coverage: Coverage::default(),
+            revision: String::new(),
+        };
+        snapshot.enrich(&mut rows, true)?;
+        let price = match selected_family_price(transaction, source, owner) {
+            Ok(price) => Some(price),
+            Err(ReadError::Restart) => {
+                incomplete = true;
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        (ancestors, runs, incomplete, rows, price)
     };
-    snapshot.enrich(&mut rows, true)?;
+    for row in &mut rows {
+        row.resolve_title(view, source)?;
+    }
     let mut relatives = rows
         .into_iter()
         .map(|row| (row.owner, row))
@@ -1200,14 +1203,6 @@ fn selected_metadata_at(
             }))
         }).collect::<Vec<_>>()
     };
-    let price = match selected_family_price(transaction, source, owner) {
-        Ok(price) => Some(price),
-        Err(ReadError::Restart) => {
-            incomplete = true;
-            None
-        }
-        Err(error) => return Err(error),
-    };
     let family = serde_json::json!({
         "state": if incomplete { "incomplete" } else { "complete" },
         "ancestors": presentation(ancestors),
@@ -1216,7 +1211,10 @@ fn selected_metadata_at(
         "shared_usd": price.map(|price| price.shared),
     });
     row.source_refs = references.to_vec();
-    row.details = Some(selected_details(transaction, source, &row, family)?);
+    row.details = {
+        let tx = view.lock()?;
+        Some(selected_details(&tx, source, &row, family)?)
+    };
     source.validate_authority()?;
     Ok(row)
 }
@@ -1311,18 +1309,27 @@ fn selected_details(
 }
 
 fn focused_metadata(source: &Source<'_>, key: &str) -> Result<Option<(Row, String)>, ReadError> {
-    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    let tx = db.transaction().map_err(index)?;
-    crate::events::store::require_current(&tx).map_err(index)?;
-    crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
-    let Some(identity) = current_identity(&tx, source, key, None)? else {
-        return Ok(None);
+    let view = selected::ReadView::open(source)?;
+    let (identity, references, witness) = {
+        let tx = view.lock()?;
+        let Some(identity) = current_identity(&tx, source, key, None)? else {
+            return Ok(None);
+        };
+        let Some(references) = focused_members(&tx, source, &identity)? else {
+            return Ok(None);
+        };
+        let witness = current_identity_witness(&tx, source, key, &identity, &references)?;
+        (identity, references, witness)
     };
-    let Some(references) = focused_members(&tx, source, &identity)? else {
-        return Ok(None);
-    };
-    let witness = current_identity_witness(&tx, source, key, &identity, &references)?;
-    let row = selected_metadata(&tx, source, key, identity.0, &identity.1, &references)?;
+    let row = selected_metadata(
+        &view,
+        source,
+        key,
+        identity.0,
+        &identity.1,
+        &references,
+        true,
+    )?;
     Ok(Some((row, witness)))
 }
 
@@ -1341,6 +1348,7 @@ fn read_row(
         owner: record.get(1).map_err(index)?,
         harness: record.get(2).map_err(index)?,
         title: record.get(4).map_err(index)?,
+        prompt_title: None,
         model: record.get(5).map_err(index)?,
         effort: record.get(18).map_err(index)?,
         repo: record.get(6).map_err(index)?,
@@ -1378,11 +1386,12 @@ fn read_row(
         let task: Option<String> = record.get(13).map_err(index)?;
         let prompt: Option<i64> = record.get(9).map_err(index)?;
         if let Some(offset) = prompt.filter(|_| native_titles) {
-            let path: String = record.get(10).map_err(index)?;
-            let ledger: String = record.get(11).map_err(index)?;
-            let native_id: String = record.get(12).map_err(index)?;
-            row.title = selected::prompt_title(source, path, &ledger, native_id, offset)?
-                .unwrap_or_else(|| "Codex subagent".into());
+            row.prompt_title = Some(PromptTitle {
+                carrier: record.get(10).map_err(index)?,
+                ledger: record.get(11).map_err(index)?,
+                native_id: record.get(12).map_err(index)?,
+                offset,
+            });
         } else if let Some(task) = task
             .as_deref()
             .and_then(|task| task.rsplit('/').next())
@@ -1497,23 +1506,90 @@ pub(super) fn read_list(
         cursor,
         workspace_read,
         |row| &row.position,
-        |tx, source, boundary| {
-            let snapshot = Snapshot::read(tx, source)?;
-            #[cfg(test)]
-            AFTER_LIST_SNAPSHOT.with(|hook| {
-                if let Some(hook) = hook.borrow_mut().take() {
-                    hook();
-                }
-            });
-            let (mut local, count, scanned, next) = snapshot.rows(request, boundary)?;
-            snapshot.enrich(&mut local, false)?;
+        |view, source, boundary| {
+            let (candidates, count, paths, repos, coverage, revision) = {
+                let tx = view.lock()?;
+                let snapshot = Snapshot::read(&tx, source)?;
+                #[cfg(test)]
+                AFTER_LIST_SNAPSHOT.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().take() {
+                        hook();
+                    }
+                });
+                let (candidates, count) = snapshot.candidates(request, boundary)?;
+                (
+                    candidates,
+                    count,
+                    snapshot.paths,
+                    snapshot.repos,
+                    snapshot.coverage,
+                    snapshot.revision,
+                )
+            };
+            let (mut rows, scanned, next) = select_list_rows(view, source, request, candidates)?;
+            let tx = view.lock()?;
+            let snapshot = Snapshot {
+                transaction: &tx,
+                source,
+                paths,
+                repos,
+                coverage,
+                revision,
+            };
+            snapshot.enrich(&mut rows, false)?;
             Ok((
-                (local, count, scanned, next),
+                (rows, count, scanned, next),
                 snapshot.coverage,
                 snapshot.revision,
             ))
         },
     )
+}
+
+fn select_list_rows(
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    request: &Request,
+    candidates: Vec<Row>,
+) -> Result<(Vec<Row>, usize, Option<Boundary>), ReadError> {
+    use crate::catalog_search::{MAX_CANDIDATES, MAX_SCAN_BYTES};
+    let (mut rows, mut examined, mut bytes) = (Vec::new(), 0, 0);
+    for mut row in candidates {
+        if rows.len() == request.limit || examined == MAX_CANDIDATES || bytes >= MAX_SCAN_BYTES {
+            return Ok((
+                rows,
+                examined,
+                Some(Boundary {
+                    position: row.position,
+                    inclusive: true,
+                }),
+            ));
+        }
+        row.resolve_title(view, source)?;
+        let fields = [
+            Some(row.title.as_str()),
+            Some(row.position.key.as_str()),
+            row.repo.as_deref(),
+            row.branch.as_deref(),
+            Some(row.model.as_str()),
+            Some(row.harness.as_str()),
+        ];
+        examined += 1;
+        bytes += fields
+            .iter()
+            .flatten()
+            .map(|field| field.len())
+            .sum::<usize>();
+        if request.q.as_ref().is_none_or(|q| {
+            fields
+                .into_iter()
+                .flatten()
+                .any(|field| field.to_lowercase().contains(q))
+        }) {
+            rows.push(row);
+        }
+    }
+    Ok((rows, examined, None))
 }
 
 struct RetainedRow {
@@ -1537,7 +1613,10 @@ fn read_retained_list(
         cursor,
         workspace_read,
         |row| &row.position,
-        |tx, source, boundary| retained_rows(tx, source, request, boundary),
+        |view, source, boundary| {
+            let tx = view.lock()?;
+            retained_rows(&tx, source, request, boundary)
+        },
     )
 }
 
@@ -1651,7 +1730,11 @@ fn read_pages<T>(
     cursor: Option<&Continuation>,
     workspace_read: bool,
     position: fn(&T) -> &Position,
-    read: impl Fn(&Connection, &Source<'_>, Option<&Boundary>) -> Result<SourcePage<T>, ReadError>,
+    read: impl Fn(
+        &selected::ReadView<'_>,
+        &Source<'_>,
+        Option<&Boundary>,
+    ) -> Result<SourcePage<T>, ReadError>,
 ) -> Result<Page<T>, ReadError> {
     let mut ordered: Vec<_> = sources.iter().collect();
     ordered.sort_by(|a, b| a.namespace.binding().cmp(b.namespace.binding()));
@@ -1686,7 +1769,7 @@ fn read_pages<T>(
     let (mut rows, mut total, mut examined, mut coverage, mut frontier) =
         (Vec::new(), 0, 0, Coverage::default(), None::<Boundary>);
     for source in ordered {
-        let mut db = match Connection::open_with_flags(
+        let db = match Connection::open_with_flags(
             source.path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         ) {
@@ -1705,15 +1788,16 @@ fn read_pages<T>(
             }
         };
         list_functions(&db).map_err(index)?;
-        let tx = db.transaction().map_err(index)?;
-        if workspace_read && !crate::events::store::current_or_fresh(&tx).map_err(index)? {
+        db.execute_batch("BEGIN DEFERRED").map_err(index)?;
+        if workspace_read && !crate::events::store::current_or_fresh(&db).map_err(index)? {
             digest.update(encode(&(source.namespace.binding(), "pending"))?);
             coverage.pending += source.inventory.len().max(1);
             source.validate_authority()?;
             continue;
         }
+        let view = selected::ReadView::from_connection(db, source);
         let ((local, count, scanned, local_next), source_coverage, revision) =
-            read(&tx, source, cursor.map(|cursor| &cursor.boundary))?;
+            read(&view, source, cursor.map(|cursor| &cursor.boundary))?;
         digest.update(revision);
         source.validate_authority()?;
         rows.extend(local);

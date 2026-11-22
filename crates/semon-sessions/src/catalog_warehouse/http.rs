@@ -656,7 +656,7 @@ pub(crate) fn home_with_mode(
             .turns
             .iter()
             .chain(selection.ids.iter().filter(|id| {
-                crate::model::is_ask(id) || (address.is_some() && id.starts_with('r'))
+                crate::model::is_ask(id) || selected::is_question_id(id) || id.starts_with('r')
             }))
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>()
@@ -735,7 +735,7 @@ pub(crate) fn home_with_mode(
                 if candidates.next().is_some() {
                     return None;
                 }
-                let kinds: &[_] = if address.is_some() && id.starts_with('r') {
+                let kinds: &[_] = if id.starts_with('r') {
                     &["received_cross", "received_agent", "received_down"]
                 } else {
                     &["trace_prompt"]
@@ -759,8 +759,56 @@ pub(crate) fn home_with_mode(
             .ids
             .iter()
             .filter_map(|id| {
-                (crate::model::is_ask(id) || (address.is_some() && id.starts_with('r')))
-                    .then_some(())?;
+                if selected::is_question_id(id) {
+                    let mut calls = component.records.iter().flat_map(|record| {
+                        record.causal.calls.iter().filter_map(move |call| {
+                            (selected::is_question_tool(&call.tool)
+                                && crate::model::question_id(
+                                    &record.reference.native_id,
+                                    record.address.offset,
+                                    Some(&call.id),
+                                ) == *id)
+                                .then_some((record, call))
+                        })
+                    });
+                    let (record, call) = calls.next()?;
+                    if calls.next().is_some() {
+                        return None;
+                    }
+                    let brief = crate::model::overview_text(
+                        &json!({"kind":"question","block":call.block}),
+                        &record.native,
+                        None,
+                    );
+                    let answer = if call.tool == "AskUserQuestion" {
+                        call.replies
+                            .iter()
+                            .rev()
+                            .find(|reply| reply.f & crate::events::ACK == 0)
+                            .and_then(|reply| {
+                                if reply.e || reply.f & crate::events::DENIED != 0 {
+                                    return Some(json!([]));
+                                }
+                                let body = component
+                                    .reply_records
+                                    .get(&(record.address.path.clone(), reply.o))?;
+                                Some(crate::model::overview_text(
+                                    &json!({
+                                        "kind":"answer","block":reply.b,"question_block":call.block,
+                                        "structured":reply.f & crate::events::ANSWERED != 0,
+                                    }),
+                                    body,
+                                    Some(&record.native),
+                                ))
+                            })
+                    } else {
+                        None
+                    };
+                    return Some((
+                        id.clone(),
+                        json!({"brief":brief,"answer":answer,"origin":null}),
+                    ));
+                }
                 let brief = previews.get(id.as_str())?;
                 Some((
                     id.clone(),

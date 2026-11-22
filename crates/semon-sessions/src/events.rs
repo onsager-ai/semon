@@ -1780,6 +1780,7 @@ impl EventCache {
         Some(inputs)
     }
 
+    #[cfg(test)]
     pub(crate) fn catalog_search_sources(
         connection: &rusqlite::Connection,
         options: &crate::Options,

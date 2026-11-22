@@ -3599,8 +3599,21 @@ fn warehouse_list_qualifies_codex_prompt_title_for_search() {
         actual.rows[0].title,
         "Check the parsing and result correlation"
     );
+    let ordinary = read_list(
+        &[fixture.source(&[&path, &parent])],
+        "workspace",
+        &request("limit=10"),
+        None,
+    )
+    .unwrap();
+    let child = ordinary
+        .rows
+        .iter()
+        .find(|row| row.position.key == "child")
+        .unwrap();
+    assert_ne!(child.title, actual.rows[0].title);
     let expected =
-        crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), "limit=10");
+        crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), "sid=child");
     assert_eq!(expected.status, 200);
     let oracle: serde_json::Value = serde_json::from_slice(&expected.body).unwrap();
     let expected = oracle["items"]
