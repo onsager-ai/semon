@@ -30,10 +30,12 @@
     ))) AS native_title
   FROM eligible_keys k CROSS JOIN lineage_member m ON m.source=k.owner
   JOIN components c ON c.component=m.component AND c.qualified=c.total
-  JOIN members latest ON latest.component=c.component AND latest.rank=1
-  JOIN members t ON t.component=c.component AND t.title_rank=1
-  JOIN members model ON model.component=c.component AND model.model_rank=1
-  JOIN members effort ON effort.component=c.component AND effort.effort_rank=1
+  -- Bind the component before looking up each rank. Otherwise SQLite can
+  -- multiply rank-one rows from unrelated components before filtering them.
+  CROSS JOIN members latest ON latest.component=c.component AND latest.rank=1
+  CROSS JOIN members t ON t.component=c.component AND t.title_rank=1
+  CROSS JOIN members model ON model.component=c.component AND model.model_rank=1
+  CROSS JOIN members effort ON effort.component=c.component AND effort.effort_rank=1
   JOIN dim_session owner ON owner.source=k.owner
   JOIN admitted owner_file ON owner_file.source=owner.source
   LEFT JOIN fact_session_observation source_meta ON source_meta.source=owner.source
