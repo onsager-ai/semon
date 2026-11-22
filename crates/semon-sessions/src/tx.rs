@@ -1083,6 +1083,43 @@ pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
     Some(selected)
 }
 
+/// Expand only text fields already interpreted by the selected native renderer.
+#[cfg(test)]
+pub(crate) fn selected_chunk_text(
+    lines: &mut Lines,
+    slot: &Slot,
+) -> Option<(&'static str, String)> {
+    let file = slot.file.as_ref()?;
+    let text = match &slot.kind {
+        SlotKind::U => prompt_text(lines.get(&file.path, slot.offset)?.as_ref()),
+        SlotKind::H(id) if model::is_ask(id) => {
+            prompt_text(lines.get(&file.path, slot.offset)?.as_ref())
+        }
+        SlotKind::A => model::assistant_text(
+            lines.get(&file.path, slot.offset)?.as_ref(),
+            slot.block as usize,
+        ),
+        SlotKind::Think => think_text(
+            lines.get(&file.path, slot.offset)?.as_ref(),
+            slot.block as usize,
+        )
+        .map(|text| text.trim().to_owned()),
+        SlotKind::Tool {
+            reply,
+            item,
+            result_source,
+            ..
+        } => {
+            let (text, source) =
+                tool_output(lines, &file.path, reply.as_ref(), *item, *result_source)?;
+            let (text, cut) = split_cut(&text, source);
+            return cut.is_none().then_some(("out", text));
+        }
+        _ => None,
+    }?;
+    Some(("text", text))
+}
+
 const SELECTED_OUTPUT_MAX: usize = 64 * 1024;
 const OUTPUT_BLOCKS_MAX: usize = 128;
 const OUTPUT_BLOCK_TYPE_MAX: usize = 128;

@@ -10,7 +10,13 @@ pub(in super::super) fn retained_page(
     cursor: Option<&Cursor>,
     provider: &dyn SessionSourceReader,
 ) -> Result<Component, ReadError> {
-    read_retained_page(source, key, limit, cursor, provider, Direction::Forward)
+    read_retained_page(
+        source,
+        key,
+        Target::Page(limit, Direction::Forward),
+        cursor,
+        provider,
+    )
 }
 
 pub(in super::super) fn retained_latest_page(
@@ -20,18 +26,44 @@ pub(in super::super) fn retained_latest_page(
     cursor: Option<&Cursor>,
     provider: &dyn SessionSourceReader,
 ) -> Result<Component, ReadError> {
-    read_retained_page(source, key, limit, cursor, provider, Direction::Reverse)
+    read_retained_page(
+        source,
+        key,
+        Target::Page(limit, Direction::Reverse),
+        cursor,
+        provider,
+    )
+}
+
+pub(in super::super) fn retained_addressed_window(
+    source: &Source<'_>,
+    key: &str,
+    address: &Address,
+    binding: &str,
+    provider: &dyn SessionSourceReader,
+) -> Result<Component, ReadError> {
+    read_retained_page(
+        source,
+        key,
+        Target::Address(address, Some(binding)),
+        None,
+        provider,
+    )
 }
 
 fn read_retained_page(
     source: &Source<'_>,
     key: &str,
-    limit: usize,
+    target: Target<'_>,
     cursor: Option<&Cursor>,
     provider: &dyn SessionSourceReader,
-    direction: Direction,
 ) -> Result<Component, ReadError> {
-    let limit = Target::Page(limit, direction).capacity()?.min(33);
+    let (direction, address) = match target {
+        Target::Page(_, direction) => (direction, None),
+        Target::Address(address, Some(binding)) => (Direction::Reverse, Some((address, binding))),
+        _ => unreachable!("retained transcript target"),
+    };
+    let limit = target.capacity()?.min(33);
     // Retained requests may touch both the previous page and this one. Stay
     // within the existing 64-source provider budget across the two sets.
     let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
@@ -49,6 +81,10 @@ fn read_retained_page(
         key,
         incarnation,
     ))?;
+    let binding = component_binding(&selection, &identity.witness)?;
+    if address.is_some_and(|(_, expected)| expected != binding) {
+        return Err(ReadError::Restart);
+    }
     let now = crate::model::now_ms();
     let opened_at = cursor.map_or(now, |cursor| cursor.opened_at);
     if cursor.is_some_and(|cursor| {
@@ -116,18 +152,34 @@ fn read_retained_page(
                 if let Some(prior) =
                     cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))
                 {
-                    if prior != &prefix
-                        || (reference.offset > 0
-                            && reader
-                                .read_range(&reference, None, 0, 1)
-                                .map_or(true, |part| {
-                                    part.bytes.len() != 1 || part.length < reference.offset
-                                }))
-                    {
+                    let mut observed = prefix.clone();
+                    observed.provider = Some(pin_provider(&reader, &reference)?);
+                    if prior != &observed {
                         return Err(ReadError::Restart);
                     }
                     confirmed += 1;
                 }
+                let (start, end, entry, frontier) = if let Some((address, _)) = address {
+                    if address.path != reference.path || address.offset >= receipt.offset {
+                        continue;
+                    }
+                    let Some(frontier) = address_frontier(&tx, direction, id, address)? else {
+                        continue;
+                    };
+                    (
+                        address.offset,
+                        address.offset + 1,
+                        Some((address.block, address.occurrence)),
+                        frontier,
+                    )
+                } else {
+                    (
+                        0,
+                        receipt.offset,
+                        None,
+                        direction.frontier(cursor.map(|cursor| cursor.after), id),
+                    )
+                };
                 let mut predecessor_bounds = BTreeMap::new();
                 if identity.harness == "claude" {
                     let mut predecessors = copies
@@ -145,11 +197,11 @@ fn read_retained_page(
                     &mut positions,
                     PositionSearch {
                         source: id,
-                        start: 0,
-                        end: i64::try_from(receipt.offset).map_err(index)?,
+                        start: i64::try_from(start).map_err(index)?,
+                        end: i64::try_from(end).map_err(index)?,
                         predecessors: &encode(&predecessor_bounds)?,
-                        entry: None,
-                        frontier: direction.frontier(cursor.map(|cursor| cursor.after), id),
+                        entry,
+                        frontier,
                         capacity: limit,
                     },
                     |(position, kind)| {
@@ -168,7 +220,7 @@ fn read_retained_page(
     if cursor.is_some_and(|cursor| cursor.touched.len() != confirmed) {
         return Err(ReadError::Restart);
     }
-    let more = candidates.len() == limit;
+    let more = address.is_none() && candidates.len() == limit;
     if more {
         direction.discard_extra(&mut candidates);
     }
@@ -177,7 +229,7 @@ fn read_retained_page(
     let mut touched = BTreeMap::new();
     let mut records = Vec::with_capacity(candidates.len());
     let mut prompts = tx.prepare_cached(PROMPT_AT).map_err(index)?;
-    for (position, (kind, reference, prefix)) in candidates {
+    for (position, (kind, reference, mut prefix)) in candidates {
         let offset = u64::try_from(position.offset).map_err(index)?;
         let native = crate::source_reader::read_record_bounded(
             &reader,
@@ -187,7 +239,10 @@ fn read_retained_page(
             &mut bytes_left,
         )
         .map_err(|_| ReadError::Restart)?;
-        touched.entry(position.source).or_insert(prefix);
+        if let std::collections::btree_map::Entry::Vacant(entry) = touched.entry(position.source) {
+            prefix.provider = Some(pin_provider(&reader, &reference)?);
+            entry.insert(prefix);
+        }
         records.push(Record {
             prompt_anchor: prompt_anchor(&mut prompts, key, &reference, position)?,
             entry_anchor: None,
@@ -206,16 +261,19 @@ fn read_retained_page(
             },
         });
     }
-    let next = after.filter(|_| more).map(|after| Cursor {
-        direction,
-        selection,
-        members: identity.witness,
-        view: 0,
-        opened_at,
-        after,
-        touched: touched.into_values().collect(),
-    });
+    let next = after
+        .filter(|_| more || address.is_some())
+        .map(|after| Cursor {
+            direction,
+            selection,
+            members: identity.witness,
+            view: 0,
+            opened_at,
+            after,
+            touched: touched.into_values().collect(),
+        });
     Ok(Component {
+        binding,
         harness: identity.harness,
         native_id: identity.native_id,
         title: None,

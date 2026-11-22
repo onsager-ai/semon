@@ -25,7 +25,8 @@ pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
-    retained_latest_page, retained_page, retained_peer_record_at, retained_record_at,
+    retained_addressed_window, retained_latest_page, retained_page, retained_peer_record_at,
+    retained_record_at,
 };
 
 const MEMBER_PAGE: i64 = 64;
@@ -261,6 +262,7 @@ impl Record {
 
 #[derive(Debug)]
 pub(super) struct Component {
+    pub(super) binding: String,
     pub(super) harness: String,
     pub(super) native_id: String,
     pub(super) title: Option<String>,
@@ -462,6 +464,26 @@ impl Direction {
         }
         .map(|(position, _)| *position)
     }
+}
+
+fn address_frontier(
+    db: &rusqlite::Connection,
+    direction: Direction,
+    source: i64,
+    address: &Address,
+) -> Result<Option<(i64, i64, i64, i64)>, ReadError> {
+    let offset = i64::try_from(address.offset).map_err(index)?;
+    let time: Option<i64> = db
+        .query_row(
+            "SELECT coalesce(ts,-9223372036854775808) FROM fact_record
+             WHERE source=?1 AND pos=?2 AND block=?3 AND occurrence=?4 AND NOT gap",
+            params![source, offset, address.block, address.occurrence],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(index)?;
+    let (_, offset, block, occurrence) = direction.frontier(None, source);
+    Ok(time.map(|time| (time, offset, block, occurrence)))
 }
 
 pub(super) fn prompt_title(
@@ -710,10 +732,27 @@ pub(super) fn record_at(
         source,
         CatalogReadScope::Current,
         key,
-        Target::Address(address),
+        Target::Address(address, None),
         cursor,
     )
     .map(|component| component.and_then(|component| component.records.into_iter().next()))
+}
+
+/// Select an exact native record only while its original component still qualifies.
+pub(super) fn addressed_window(
+    source: &Source<'_>,
+    key: &str,
+    address: &Address,
+    binding: &str,
+) -> Result<Option<Component>, ReadError> {
+    read(
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Address(address, Some(binding)),
+        None,
+    )
 }
 
 pub(super) fn tool_results(
@@ -842,7 +881,7 @@ const EVIDENCE: &str = include_str!("evidence.sql");
 
 enum Target<'a> {
     Page(usize, Direction),
-    Address(&'a Address),
+    Address(&'a Address, Option<&'a str>),
     Evidence(Evidence<'a>),
     Activity(&'a crate::transcript_range::StepAnchor),
     ToolResults(&'a Address),
@@ -853,7 +892,7 @@ impl Target<'_> {
         match *self {
             Self::Page(n @ 1..=100, _) => Ok(n + 1),
             Self::Page(..) => Err(index("Selected pages require a limit of 1–100")),
-            Self::Address(_) | Self::Evidence(_) | Self::Activity(_) => Ok(1),
+            Self::Address(..) | Self::Evidence(_) | Self::Activity(_) => Ok(1),
             Self::ToolResults(_) => Ok(101),
         }
     }
@@ -874,6 +913,7 @@ fn read(
             }
             direction
         }
+        Target::Address(_, Some(_)) => Direction::Reverse,
         _ => Direction::Forward,
     };
     let capacity = target.capacity()?;
@@ -1103,7 +1143,7 @@ fn read(
                 };
                 let (start, end, entry_block, entry_occurrence) = match target {
                     Target::Page(..) => (0, committed.offset, None, None),
-                    Target::Address(wanted)
+                    Target::Address(wanted, _)
                         if member.reference.path == wanted.path
                             && wanted.offset < committed.offset =>
                     {
@@ -1114,7 +1154,7 @@ fn read(
                             Some(wanted.occurrence),
                         )
                     }
-                    Target::Address(_) => continue,
+                    Target::Address(..) => continue,
                     Target::Activity(_) => {
                         let activity = activity
                             .as_ref()
@@ -1186,20 +1226,11 @@ fn read(
                 };
                 let start = i64::try_from(start).map_err(index)?;
                 let end = i64::try_from(end).map_err(index)?;
-                let frontier = if entry_block.is_some() {
-                    let Some(time) = db
-                        .query_row(
-                            "SELECT coalesce(ts,-9223372036854775808) FROM fact_record
-                         WHERE source=?1 AND pos=?2 AND block=?3 AND occurrence=?4 AND NOT gap",
-                            params![id, start, entry_block, entry_occurrence],
-                            |r| r.get::<_, i64>(0),
-                        )
-                        .optional()
-                        .map_err(index)?
-                    else {
+                let frontier = if let Target::Address(address, _) = target {
+                    let Some(frontier) = address_frontier(&db, direction, id, address)? else {
                         continue;
                     };
-                    (time, i64::MIN, i64::MIN, i64::MIN)
+                    frontier
                 } else {
                     direction.frontier(cursor.map(|cursor| cursor.after), id)
                 };
@@ -1228,6 +1259,12 @@ fn read(
         return Ok(None);
     }
     let members = format!("{:x}", witness.finalize());
+    let binding = component_binding(&selection, &members)?;
+    if let Target::Address(_, Some(expected)) = target
+        && expected != binding
+    {
+        return Err(ReadError::Restart);
+    }
     if cursor.is_some_and(|cursor| cursor.members != members || cursor.touched.len() != confirmed) {
         return Err(ReadError::Restart);
     }
@@ -1511,16 +1548,19 @@ fn read(
         return Err(ReadError::Restart);
     }
     source.validate_authority()?;
-    let next = after.filter(|_| more).map(|after| Cursor {
-        direction,
-        selection,
-        members,
-        view,
-        opened_at,
-        after,
-        touched: touched.into_values().collect(),
-    });
+    let next = after
+        .filter(|_| more || matches!(target, Target::Address(_, Some(_))))
+        .map(|after| Cursor {
+            direction,
+            selection,
+            members,
+            view,
+            opened_at,
+            after,
+            touched: touched.into_values().collect(),
+        });
     Ok(Some(Component {
+        binding,
         harness,
         native_id,
         title,
@@ -1531,6 +1571,13 @@ fn read(
         reply_records,
         next,
     }))
+}
+
+fn component_binding(selection: &str, members: &str) -> Result<String, ReadError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(encode(&(selection, members))?)
+    ))
 }
 
 fn local_missing(carrier: &str) -> bool {

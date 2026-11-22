@@ -2560,7 +2560,7 @@ mod budget_contract_tests {
     }
 }
 
-fn copy_selected_output_fields(entry: &mut Value, output: &Value) {
+pub(crate) fn copy_selected_output_fields(entry: &mut Value, output: &Value) {
     entry["out"] = output["text"].clone();
     if let Some(cut) = output.get("cut") {
         entry["cut"] = cut.clone();

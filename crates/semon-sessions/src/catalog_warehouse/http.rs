@@ -1,4 +1,5 @@
 //! Viewer transport over source-qualified warehouse reads.
+use super::selected::render::{EntryAddress, Expansion, Part};
 use super::{CatalogReadScope, Continuation, ReadError, Request, Row, Source, index, read_list};
 use crate::{OverviewSource, viewer::ViewerReply};
 use serde_json::{Value, json};
@@ -224,6 +225,245 @@ fn read(
                 "candidate_budget":scale * crate::catalog_search::MAX_CANDIDATES,
                 "byte_budget":scale * crate::catalog_search::MAX_SCAN_BYTES,
             })),
+        }),
+    ))
+}
+
+impl EntryAddress {
+    fn parse(value: &str) -> Result<Self, ViewerReply> {
+        let address: Self = serde_json::from_str(value).map_err(|_| invalid())?;
+        if !crate::session_route::identifier(&address.record.path)
+            || address.record.offset > i64::MAX as u64
+            || address.record.block < 0
+            || address.record.occurrence < 0
+            || address.binding.len() != 64
+            || !address.binding.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !crate::session_route::identifier(&address.entry_id)
+        {
+            return Err(invalid());
+        }
+        Ok(address)
+    }
+}
+
+pub(super) fn transcript(
+    configured: &OverviewSource,
+    query: &str,
+    current_provider: Option<&dyn crate::SessionSourceReader>,
+    retained_provider: Option<&dyn crate::SessionSourceReader>,
+) -> ViewerReply {
+    match read_transcript(
+        configured,
+        query,
+        current_provider,
+        retained_provider,
+        false,
+    ) {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
+
+pub(super) fn entry(
+    configured: &OverviewSource,
+    query: &str,
+    current_provider: Option<&dyn crate::SessionSourceReader>,
+    retained_provider: Option<&dyn crate::SessionSourceReader>,
+) -> ViewerReply {
+    match read_transcript(configured, query, current_provider, retained_provider, true) {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
+
+fn read_transcript(
+    configured: &OverviewSource,
+    query: &str,
+    current_provider: Option<&dyn crate::SessionSourceReader>,
+    retained_provider: Option<&dyn crate::SessionSourceReader>,
+    expanded: bool,
+) -> Result<ViewerReply, ViewerReply> {
+    use super::selected;
+    if query.len() > 128 * 1024 {
+        return Err(invalid());
+    }
+    let mut arguments = std::collections::BTreeMap::new();
+    for field in query.split('&').filter(|field| !field.is_empty()) {
+        let (name, value) = field.split_once('=').ok_or_else(invalid)?;
+        if !matches!(
+            name,
+            "machine"
+                | "sid"
+                | "scope"
+                | "limit"
+                | "cursor"
+                | "address"
+                | "part"
+                | "image"
+                | "field_chunk"
+        ) || arguments
+            .insert(name, crate::viewer::decoded(value).ok_or_else(invalid)?)
+            .is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    let argument = |name| arguments.get(name).map(String::as_str);
+    if argument("machine").is_some_and(|machine| machine != configured.key) {
+        return Err(invalid());
+    }
+    let key = argument("sid")
+        .filter(|key| crate::session_route::identifier(key))
+        .ok_or_else(invalid)?;
+    let scope = match argument("scope") {
+        None | Some("current") => CatalogReadScope::Current,
+        Some("retained_history") => CatalogReadScope::RetainedHistory,
+        Some(_) => return Err(invalid()),
+    };
+    let limit = argument("limit")
+        .map_or(Ok(32), str::parse::<usize>)
+        .ok()
+        .filter(|limit| (1..=32).contains(limit))
+        .ok_or_else(invalid)?;
+    let cursor: Option<selected::Cursor> = argument("cursor")
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| invalid())?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.touched_count() > 32)
+    {
+        return Err(invalid());
+    }
+    let address = argument("address").map(EntryAddress::parse).transpose()?;
+    if address.is_some() && (cursor.is_some() || argument("limit").is_some()) {
+        return Err(invalid());
+    }
+    let part = match (
+        expanded,
+        argument("part"),
+        argument("image"),
+        argument("field_chunk"),
+    ) {
+        (false, None, None, None) => None,
+        (true, Some("output"), None, None) => Some(Part::Output),
+        (true, Some("script"), None, None) => Some(Part::Script),
+        (true, Some("attachment"), Some(image), None) => {
+            Some(Part::Attachment(image.parse().map_err(|_| invalid())?))
+        }
+        (true, None, None, Some(chunk)) => Some(Part::Text(chunk.parse().map_err(|_| invalid())?)),
+        _ => return Err(invalid()),
+    };
+    if part.is_some() && address.is_none() {
+        return Err(invalid());
+    }
+    if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
+        return Err(reply);
+    }
+    let path = crate::events::EventCache::path(&configured.options.cache);
+    let namespace = crate::storage::Namespace::new(&configured.key)
+        .map_err(|error| read_error(index(error)))?;
+    let source = Source::focused(namespace, &path, &configured.options, current_provider)
+        .map_err(read_error)?;
+    let component = match scope {
+        CatalogReadScope::Current => match &address {
+            None => selected::latest_page(source.options, &source, key, limit, cursor.as_ref()),
+            Some(address) => {
+                selected::addressed_window(&source, key, &address.record, &address.binding)
+            }
+        },
+        CatalogReadScope::RetainedHistory => {
+            let Some(provider) = retained_provider else {
+                // Read the binding before reporting unavailable custody so an
+                // unverified original receives the same refusal on every route.
+                super::focused_identity(&source, scope, key).map_err(read_error)?;
+                return Err(error(
+                    503,
+                    "retained_source_unavailable",
+                    "No authorized source reader is available for this retained session.",
+                    false,
+                ));
+            };
+            match &address {
+                None => {
+                    selected::retained_latest_page(&source, key, limit, cursor.as_ref(), provider)
+                }
+                Some(address) => selected::retained_addressed_window(
+                    &source,
+                    key,
+                    &address.record,
+                    &address.binding,
+                    provider,
+                ),
+            }
+            .map(Some)
+        }
+    }
+    .map_err(read_error)?;
+    let Some(component) = component else {
+        return Err(error(
+            404,
+            "session_not_found",
+            "Session is unavailable.",
+            false,
+        ));
+    };
+    let entries =
+        selected::render::entries(&component, &configured.key, key, crate::model::now_ms());
+    if let Some(address) = &address
+        && !entries.iter().any(|entry| {
+            entry["entry_id"] == address.entry_id && entry["address"]["block"] == address.block
+        })
+    {
+        return Err(error(
+            404,
+            "entry_not_found",
+            "This native transcript entry is unavailable.",
+            false,
+        ));
+    }
+    if let (Some(address), Some(part)) = (&address, part) {
+        return match selected::render::expand(&component, &configured.key, key, address, part) {
+            Some(Expansion::Json(entry)) => Ok(crate::catalog::reply(
+                200,
+                json!({
+                    "api":1,"projection":7,"source_key":configured.key,"catalog_key":key,
+                    "read_scope":scope,"binding":component.binding,"entry":entry,
+                }),
+            )),
+            Some(Expansion::Image(content_type, body)) => Ok(ViewerReply {
+                status: 200,
+                content_type,
+                body,
+                etag: None,
+                extra_headers: Vec::new(),
+            }),
+            None if matches!(part, Part::Attachment(_)) => Err(error(
+                404,
+                "attachment_unavailable",
+                "This recorded image is unavailable.",
+                false,
+            )),
+            None => Err(error(
+                422,
+                "field_unsupported",
+                "This native entry has no qualified expansion for the requested field.",
+                false,
+            )),
+        };
+    }
+    let earlier = component
+        .next
+        .as_ref()
+        .map(super::encode)
+        .transpose()
+        .map_err(read_error)?;
+    Ok(crate::catalog::reply(
+        200,
+        json!({
+            "api":1, "projection":7,
+            "source_key":configured.key, "catalog_key":key, "read_scope":scope,
+            "binding":component.binding, "earlier_cursor":earlier, "entries":entries,
+            "position":if address.is_some() { "address" } else if cursor.is_some() { "earlier" } else { "latest" },
+            "selected":{"harness":component.harness,"native_id":component.native_id,"title":component.title,"model":component.model},
         }),
     ))
 }

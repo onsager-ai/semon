@@ -630,6 +630,111 @@ fn warehouse_latest_window_pages_earlier_with_the_same_committed_prefix() {
 }
 
 #[test]
+fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_across_appends() {
+    let mut fixture = Fixture::new("transcript-transport");
+    let path = fixture.claude("native", "Oldest prompt");
+    for second in 1..=4 {
+        append_native(&path, prompt("native", second, &format!("Prompt {second}")));
+    }
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let read = |parameters: &[(&str, &str)]| {
+        let query = crate::native_html::query(parameters);
+        let reply = http::transcript(&configured, &query, None, None);
+        (
+            reply.status,
+            serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap(),
+        )
+    };
+    let latest = || {
+        let (status, page) = read(&[("sid", "native"), ("limit", "2")]);
+        assert_eq!(status, 200, "{page}");
+        page
+    };
+    let tail = latest();
+    assert_eq!(tail["projection"], 7);
+    assert_eq!(tail["entries"][0]["text"], "Prompt 3");
+    assert_eq!(tail["entries"][1]["text"], "Prompt 4");
+    assert!(tail["entries"][1].get("slot").is_none());
+    let address = tail["entries"][1]["address"].to_string();
+
+    for second in 5..=7 {
+        append_native(&path, prompt("native", second, &format!("Prompt {second}")));
+        assert_eq!(
+            latest()["entries"][1]["text"],
+            format!("Prompt {}", second - 1)
+        );
+        scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+        assert_eq!(latest()["entries"][1]["text"], format!("Prompt {second}"));
+    }
+    let (status, earlier) = read(&[
+        ("sid", "native"),
+        ("limit", "2"),
+        ("cursor", tail["earlier_cursor"].as_str().unwrap()),
+    ]);
+    assert_eq!(status, 200, "{earlier}");
+    assert_eq!(earlier["position"], "earlier");
+    assert_eq!(earlier["entries"][0]["text"], "Prompt 1");
+    assert_eq!(earlier["entries"][1]["text"], "Prompt 2");
+    let (status, exact) = read(&[("sid", "native"), ("address", &address)]);
+    assert_eq!(status, 200, "{exact}");
+    assert_eq!(exact["position"], "address");
+    assert_eq!(
+        exact["entries"][0]["entry_id"],
+        tail["entries"][1]["entry_id"]
+    );
+
+    let mut text = "π🗺".repeat(25_000);
+    text.push_str(" end");
+    let image = b"\x89PNG\r\n\x1a\nexample";
+    let mut record = prompt("native", 8, &text);
+    record["message"]["content"] = json!([
+        {"type":"text","text":text},
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(image)}},
+    ]);
+    append_native(&path, record);
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let page = latest();
+    let long = &page["entries"][1];
+    assert_eq!(long["field"]["chunks"], 2);
+    assert!(long.get("img").is_some());
+    let long_address = long["address"].to_string();
+    let expand = |arguments: &[(&str, &str)]| {
+        let mut params = vec![("sid", "native"), ("address", long_address.as_str())];
+        params.extend_from_slice(arguments);
+        http::entry(&configured, &crate::native_html::query(&params), None, None)
+    };
+    let mut reconstructed = String::new();
+    for chunk in ["0", "1"] {
+        let reply = expand(&[("field_chunk", chunk)]);
+        let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200, "{value}");
+        reconstructed.push_str(value["entry"]["text"].as_str().unwrap());
+    }
+    assert_eq!(reconstructed, text);
+    let attachment = expand(&[("part", "attachment"), ("image", "0")]);
+    assert_eq!(attachment.status, 200);
+    assert_eq!(attachment.content_type, "image/png");
+    assert_eq!(attachment.body, image);
+
+    let replacement = path.with_extension("replacement");
+    fs::write(
+        &replacement,
+        format!("{}\n", prompt("native", 0, "Replacement")),
+    )
+    .unwrap();
+    fs::rename(replacement, &path).unwrap();
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    assert_eq!(read(&[("sid", "native"), ("address", &address)]).0, 409);
+}
+
+#[test]
 fn warehouse_component_cursor_pages_members_and_pins_unvisited_prefixes() {
     let mut fixture = Fixture::new("component-cursor");
     let mut paths = Vec::new();
@@ -2195,6 +2300,24 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         latest.records[0].text().as_deref(),
         Some("Original native prompt")
     );
+    let entries = selected::render::entries(&latest, fixture.namespace.as_str(), "native", 0);
+    let address = entries[0]["address"].to_string();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "retained_history"),
+        ("address", &address),
+    ]);
+    let reply = http::transcript(&configured, &query, None, Some(&provider));
+    let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{body}");
+    assert_eq!(body["entries"][0]["entry_id"], entries[0]["entry_id"]);
+    assert_eq!(body["entries"][0]["text"], "Original native prompt");
     let first = selected::retained_page(&source, "native", 1, None, &provider).unwrap();
     assert_eq!(first.member_count, 1);
     let cursor = first.next.unwrap();
