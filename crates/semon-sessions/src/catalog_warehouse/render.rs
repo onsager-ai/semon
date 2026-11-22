@@ -1,21 +1,13 @@
 //! Render a selected window using only records already verified by the warehouse reader.
-use super::{Address, Component, Record};
+use super::{Component, Record};
 use crate::{
     events::{SignalKind, UNKNOWN},
     model::{self, Shown, SignalData, Slot, SlotFile, SlotKind},
+    session_route::NativeEntryAddress,
     tx::{self, Lines, RenderContext},
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub(in super::super) struct EntryAddress {
-    pub(in super::super) record: Address,
-    pub(in super::super) binding: String,
-    pub(in super::super) block: u32,
-    pub(in super::super) entry_id: String,
-}
 
 #[derive(Clone, Copy)]
 pub(in super::super) enum Part {
@@ -43,7 +35,7 @@ pub(in super::super) fn expand(
     component: &Component,
     source: &str,
     key: &str,
-    address: &EntryAddress,
+    address: &NativeEntryAddress,
     part: Part,
 ) -> Option<Expansion> {
     render(
@@ -248,7 +240,7 @@ fn render<T>(
                 ),
                 str::to_owned,
             );
-            entry["address"] = json!(EntryAddress {
+            entry["address"] = json!(NativeEntryAddress {
                 record: record.address.clone(),
                 block: slot.block,
                 binding: component.binding.clone(),

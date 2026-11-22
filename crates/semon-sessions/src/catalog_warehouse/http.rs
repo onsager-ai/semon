@@ -1,7 +1,7 @@
 //! Viewer transport over source-qualified warehouse reads.
-use super::selected::render::{EntryAddress, Expansion, Part};
+use super::selected::render::{Expansion, Part};
 use super::{CatalogReadScope, Continuation, ReadError, Request, Row, Source, index, read_list};
-use crate::{OverviewSource, viewer::ViewerReply};
+use crate::{OverviewSource, session_route::NativeEntryAddress, viewer::ViewerReply};
 use serde_json::{Value, json};
 
 fn error(status: u16, code: &str, message: &str, retryable: bool) -> ViewerReply {
@@ -229,23 +229,6 @@ fn read(
     ))
 }
 
-impl EntryAddress {
-    fn parse(value: &str) -> Result<Self, ViewerReply> {
-        let address: Self = serde_json::from_str(value).map_err(|_| invalid())?;
-        if !crate::session_route::identifier(&address.record.path)
-            || address.record.offset > i64::MAX as u64
-            || address.record.block < 0
-            || address.record.occurrence < 0
-            || address.binding.len() != 64
-            || !address.binding.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || !crate::session_route::identifier(&address.entry_id)
-        {
-            return Err(invalid());
-        }
-        Ok(address)
-    }
-}
-
 pub(super) fn transcript(
     configured: &OverviewSource,
     query: &str,
@@ -333,7 +316,10 @@ fn read_transcript(
     {
         return Err(invalid());
     }
-    let address = argument("address").map(EntryAddress::parse).transpose()?;
+    let address = argument("address")
+        .map(NativeEntryAddress::parse)
+        .transpose()
+        .map_err(|_| invalid())?;
     if address.is_some() && (cursor.is_some() || argument("limit").is_some()) {
         return Err(invalid());
     }
@@ -462,6 +448,7 @@ fn read_transcript(
             "api":1, "projection":7,
             "source_key":configured.key, "catalog_key":key, "read_scope":scope,
             "binding":component.binding, "earlier_cursor":earlier, "entries":entries,
+            "identity":component.identity,
             "position":if address.is_some() { "address" } else if cursor.is_some() { "earlier" } else { "latest" },
             "selected":{"harness":component.harness,"native_id":component.native_id,"title":component.title,"model":component.model},
         }),

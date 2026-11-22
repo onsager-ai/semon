@@ -100,6 +100,7 @@ fn read_retained_page(
     let mut confirmed = 0;
     let mut candidates = BTreeMap::new();
     let mut member_count = 0;
+    let mut references = Vec::new();
     let mut ordinal = -1;
     {
         let mut members = tx
@@ -140,6 +141,10 @@ fn read_retained_page(
                     offset: receipt.offset,
                     prefix_sha256: receipt.prefix_sha256,
                     tail_sha256: receipt.tail_sha256,
+                });
+                references.push(crate::CatalogSourceObservation {
+                    source: (*reference).clone(),
+                    state: "unavailable".into(),
                 });
                 let prefix = Prefix {
                     source: id,
@@ -261,6 +266,15 @@ fn read_retained_page(
             },
         });
     }
+    source.validate_authority()?;
+    let selection_identity = super::super::present_identity(
+        source,
+        CatalogReadScope::RetainedHistory,
+        key,
+        identity.harness.clone(),
+        references,
+        identity.witness.clone(),
+    );
     let next = after
         .filter(|_| more || address.is_some())
         .map(|after| Cursor {
@@ -274,6 +288,7 @@ fn read_retained_page(
         });
     Ok(Component {
         binding,
+        identity: selection_identity,
         harness: identity.harness,
         native_id: identity.native_id,
         title: None,

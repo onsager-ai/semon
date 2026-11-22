@@ -1,4 +1,5 @@
 import { array, boolean, dictionary, number, object, text } from '../domain/validate';
+import { parseNativeEntryAddress, type NativeEntryAddress } from '../lib/sessionRoute';
 import {
   parseRecordedRelationship,
   parseRecordedTurn,
@@ -78,8 +79,12 @@ function ordinal(value: unknown): number {
 }
 function entry(value: unknown): CatalogTranscriptEntry {
   const row = object(value),
-    entryId = text(row.entry_id),
-    slot = ordinal(row.slot),
+    slot = ordinal(row.slot);
+  const parsed = entryDetails(row);
+  return { ...parsed, slot, entry: { ...parsed.entry, slot } };
+}
+function entryDetails(row: Record<string, unknown>): Omit<CatalogTranscriptEntry, 'slot'> {
+  const entryId = text(row.entry_id),
     parsed = parseEntry(row);
   const provenance = row.provenance === null && parsed.k === 'end' ? null : object(row.provenance);
   if (!provenance && (row.field !== undefined || row.clipped === true))
@@ -135,10 +140,8 @@ function entry(value: unknown): CatalogTranscriptEntry {
     freshness = { state };
   }
   parsed.key = entryId;
-  parsed.slot = slot;
   return {
     entry_id: entryId,
-    slot,
     observed_at: row.observed_at == null ? null : number(row.observed_at),
     entry: parsed,
     clipped: row.clipped === undefined ? undefined : boolean(row.clipped),
@@ -267,6 +270,82 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
         if (!/^[a-f0-9]{64}$/.test(generation)) throw Error('Invalid context generation');
         return generation;
       }),
+    },
+  };
+}
+
+export type CatalogNativeTranscriptEntry = Omit<CatalogTranscriptEntry, 'slot'> & {
+  address: NativeEntryAddress;
+};
+export interface CatalogNativeTranscriptPage {
+  identity: CatalogSessionIdentity;
+  binding: string;
+  position: 'latest' | 'earlier' | 'address';
+  earlierCursor: string | null;
+  entries: CatalogNativeTranscriptEntry[];
+  selected: { harness: string; nativeId: string; title: string | null; model: string | null };
+}
+export function parseCatalogNativeEntry(
+  value: unknown,
+  binding: string,
+): CatalogNativeTranscriptEntry {
+  const row = object(value),
+    address = parseNativeEntryAddress(row.address);
+  const item = entryDetails(row);
+  if (
+    row.slot !== undefined ||
+    address.binding !== binding ||
+    address.entry_id !== item.entry_id ||
+    !item.provenance ||
+    address.record.path !== item.provenance.source.path ||
+    address.block !== item.provenance.block ||
+    address.record.offset > item.provenance.source.offset
+  )
+    throw new Error('Invalid addressed transcript entry');
+  return { ...item, address };
+}
+export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeTranscriptPage {
+  const row = object(value),
+    identity = parseCatalogIdentity(row.identity),
+    selected = object(row.selected);
+  const binding = text(row.binding),
+    earlierCursor = row.earlier_cursor === null ? null : text(row.earlier_cursor);
+  if (
+    row.api !== 1 ||
+    row.projection !== 7 ||
+    !/^[a-f0-9]{64}$/.test(binding) ||
+    row.source_key !== identity.source_key ||
+    row.catalog_key !== identity.catalog_key ||
+    row.read_scope !== identity.read_scope ||
+    selected.harness !== identity.harness ||
+    !Array.isArray(row.entries) ||
+    row.entries.length > 4096 ||
+    (earlierCursor !== null && (!earlierCursor || earlierCursor.length > 65536)) ||
+    (row.position !== 'latest' && row.position !== 'earlier' && row.position !== 'address')
+  )
+    throw new Error('Invalid committed transcript window');
+  const entries = array(row.entries, (value) => parseCatalogNativeEntry(value, binding));
+  if (new Set(entries.map((entry) => entry.entry_id)).size !== entries.length)
+    throw new Error('Duplicate committed transcript entry');
+  const references = new Map(identity.source_refs.map(({ source }) => [source.path, source]));
+  if (
+    entries.some(({ provenance }) => {
+      const source = provenance!.source;
+      return JSON.stringify(references.get(source.path)) !== JSON.stringify(source);
+    })
+  )
+    throw new Error('Committed transcript provenance is outside the selected component');
+  return {
+    identity,
+    binding,
+    position: row.position,
+    earlierCursor,
+    entries,
+    selected: {
+      harness: identity.harness,
+      nativeId: text(selected.native_id),
+      title: selected.title === null ? null : text(selected.title),
+      model: selected.model === null ? null : text(selected.model),
     },
   };
 }

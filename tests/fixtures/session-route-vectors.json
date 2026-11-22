@@ -1,5 +1,33 @@
 [
   {
+    "name": "retained native address preserves scope",
+    "path": "/session/alpha/same",
+    "query": "scope=retained_history&address=%7B%22record%22%3A%7B%22path%22%3A%22projects%2Fproj%2Fsession.jsonl%22%2C%22offset%22%3A54%2C%22block%22%3A0%2C%22occurrence%22%3A0%7D%2C%22binding%22%3A%22aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%22%2C%22block%22%3A1%2C%22entry_id%22%3A%22recorded-entry%22%7D",
+    "outcome": "valid",
+    "candidates": [
+      {
+        "source_key": "alpha",
+        "catalog_key": "same",
+        "harness": "claude"
+      }
+    ],
+    "canonical": "/session/alpha/same?address=%7B%22record%22%3A%7B%22path%22%3A%22projects%2Fproj%2Fsession.jsonl%22%2C%22offset%22%3A54%2C%22block%22%3A0%2C%22occurrence%22%3A0%7D%2C%22binding%22%3A%22aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%22%2C%22block%22%3A1%2C%22entry_id%22%3A%22recorded-entry%22%7D&scope=retained_history"
+  },
+  {
+    "name": "native address and numeric bookmark conflict",
+    "path": "/session/alpha/same",
+    "query": "address=%7B%22record%22%3A%7B%22path%22%3A%22projects%2Fproj%2Fsession.jsonl%22%2C%22offset%22%3A54%2C%22block%22%3A0%2C%22occurrence%22%3A0%7D%2C%22binding%22%3A%22aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%22%2C%22block%22%3A1%2C%22entry_id%22%3A%22recorded-entry%22%7D&after=0",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
+    "name": "native address requires a selection binding",
+    "path": "/session/alpha/same",
+    "query": "address=%7B%22record%22%3A%7B%22path%22%3A%22projects%2Fproj%2Fsession.jsonl%22%2C%22offset%22%3A54%2C%22block%22%3A0%2C%22occurrence%22%3A0%7D%2C%22block%22%3A1%2C%22entry_id%22%3A%22recorded-entry%22%7D",
+    "outcome": "malformed",
+    "candidates": []
+  },
+  {
     "name": "retained trace preserves explicit scope",
     "path": "/session/alpha/same/trace/turn",
     "query": "scope=retained_history&all_machines=1",

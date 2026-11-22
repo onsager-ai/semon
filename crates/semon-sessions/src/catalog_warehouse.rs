@@ -910,6 +910,12 @@ fn list_functions(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_LIST_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 pub(super) fn read_list(
     sources: &[Source<'_>],
     workspace: &str,
@@ -955,6 +961,12 @@ pub(super) fn read_list(
         list_functions(&db).map_err(index)?;
         let tx = db.transaction().map_err(index)?;
         let snapshot = Snapshot::read(&tx, source)?;
+        #[cfg(test)]
+        AFTER_LIST_SNAPSHOT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
         digest.update(&snapshot.revision);
         let (mut local, count, scanned, local_next) =
             snapshot.rows(request, cursor.map(|cursor| &cursor.boundary))?;
@@ -1177,6 +1189,25 @@ pub(super) fn focused_identity(
             (identity.harness, references, identity.witness)
         }
     };
+    source.validate_authority()?;
+    Ok(Some(present_identity(
+        source,
+        scope,
+        key,
+        harness,
+        references,
+        identity_witness,
+    )))
+}
+
+fn present_identity(
+    source: &Source<'_>,
+    scope: CatalogReadScope,
+    key: &str,
+    harness: String,
+    references: Vec<crate::CatalogSourceObservation>,
+    identity_witness: String,
+) -> crate::CatalogSessionIdentity {
     let recorded = source
         .focused
         .as_ref()
@@ -1221,8 +1252,7 @@ pub(super) fn focused_identity(
     } else {
         "cached"
     };
-    source.validate_authority()?;
-    Ok(Some(crate::CatalogSessionIdentity {
+    crate::CatalogSessionIdentity {
         source_key: source.namespace.as_str().to_owned(),
         read_scope: scope,
         catalog_key: key.to_owned(),
@@ -1242,7 +1272,7 @@ pub(super) fn focused_identity(
         freshness: freshness(state),
         facts_observation: freshness(if facts_known { "cached" } else { "unavailable" }),
         native_selection,
-    }))
+    }
 }
 
 pub(super) fn resolve_current_native(

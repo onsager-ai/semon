@@ -3,6 +3,7 @@ use super::{
     Availability, CatalogReadScope, Ledger, ReadError, Source, Stat, current_identity, encode,
     index, warehouse,
 };
+pub(super) use crate::session_route::NativeRecordAddress as Address;
 use crate::{
     Options, SessionSourceRange, SessionSourceReader, SessionSourceRef, events::store::chunk_proofs,
 };
@@ -125,15 +126,6 @@ impl Cursor {
     pub(super) fn touched_count(&self) -> usize {
         self.touched.len()
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Address {
-    pub(super) path: String,
-    pub(super) offset: u64,
-    pub(super) block: i64,
-    pub(super) occurrence: i64,
 }
 
 #[derive(Debug)]
@@ -263,6 +255,7 @@ impl Record {
 #[derive(Debug)]
 pub(super) struct Component {
     pub(super) binding: String,
+    pub(super) identity: crate::CatalogSessionIdentity,
     pub(super) harness: String,
     pub(super) native_id: String,
     pub(super) title: Option<String>,
@@ -1020,6 +1013,7 @@ fn read(
     let mut witness = Sha256::new_with_prefix(encode(&(owner, component))?);
     let mut candidates = BTreeMap::new();
     let mut member_count = 0;
+    let mut references = Vec::new();
     let mut evidence_matches = 0;
     let mut prior_provider = Vec::new();
     let mut confirmed = 0;
@@ -1107,6 +1101,10 @@ fn read(
                     prefix_sha256: committed.prefix,
                     tail_sha256: committed.tail,
                 };
+                references.push(crate::CatalogSourceObservation {
+                    source: reference.clone(),
+                    state: if remote { "unavailable" } else { "cached" }.into(),
+                });
                 if let Some(prior) =
                     cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))
                 {
@@ -1548,6 +1546,15 @@ fn read(
         return Err(ReadError::Restart);
     }
     source.validate_authority()?;
+    let identity_witness = format!("{:x}", Sha256::digest(encode(&(&binding, &references))?));
+    let identity = super::present_identity(
+        source,
+        scope,
+        key,
+        harness.clone(),
+        references,
+        identity_witness,
+    );
     let next = after
         .filter(|_| more || matches!(target, Target::Address(_, Some(_))))
         .map(|after| Cursor {
@@ -1561,6 +1568,7 @@ fn read(
         });
     Ok(Some(Component {
         binding,
+        identity,
         harness,
         native_id,
         title,

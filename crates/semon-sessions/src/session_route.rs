@@ -21,6 +21,42 @@ pub fn identifier(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeRecordAddress {
+    pub(crate) path: String,
+    pub(crate) offset: u64,
+    pub(crate) block: i64,
+    pub(crate) occurrence: i64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeEntryAddress {
+    pub(crate) record: NativeRecordAddress,
+    pub(crate) binding: String,
+    pub(crate) block: u32,
+    pub(crate) entry_id: String,
+}
+
+impl NativeEntryAddress {
+    pub(crate) fn parse(value: &str) -> io::Result<Self> {
+        let address: Self = serde_json::from_str(value).map_err(|_| malformed())?;
+        let ordinal = |value| (0..=9_007_199_254_740_991).contains(&value);
+        if !identifier(&address.record.path)
+            || address.record.offset > 9_007_199_254_740_991
+            || !ordinal(address.record.block)
+            || !ordinal(address.record.occurrence)
+            || address.binding.len() != 64
+            || !address.binding.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !identifier(&address.entry_id)
+        {
+            return Err(malformed());
+        }
+        Ok(address)
+    }
+}
+
 /// Decode once, after splitting on literal slashes. '+' is literal in a path.
 pub fn decode(value: &str) -> io::Result<String> {
     let mut bytes = Vec::with_capacity(value.len());
@@ -95,6 +131,7 @@ impl SessionRoute {
                             .is_ok_and(|n| n <= 9_007_199_254_740_991)
                 }
                 "generation" => !value.is_empty() && value.len() <= 4096,
+                "address" => NativeEntryAddress::parse(&value).is_ok(),
                 "part" => matches!(value.as_str(), "output" | "script" | "attachment"),
                 _ => false,
             };
@@ -113,8 +150,12 @@ impl SessionRoute {
             .is_some_and(|after| after.parse::<u64>().unwrap_or(0) > 0)
             && !route.controls.contains_key("generation")
             || (route.controls.contains_key("field_chunk") || route.controls.contains_key("part"))
+                && !route.controls.contains_key("address")
                 && (!route.controls.contains_key("after")
                     || !route.controls.contains_key("generation"))
+            || route.controls.contains_key("address")
+                && (route.controls.contains_key("after")
+                    || route.controls.contains_key("generation"))
         {
             return Err(malformed());
         }

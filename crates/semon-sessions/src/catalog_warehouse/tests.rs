@@ -455,6 +455,64 @@ fn warehouse_list_transport_uses_committed_index_while_publication_is_absent() {
 }
 
 #[test]
+fn warehouse_list_transport_reads_one_commit_while_ingestion_advances() {
+    use std::sync::mpsc::sync_channel;
+
+    let mut fixture = Fixture::new("list-transport-concurrent");
+    fixture.claude("first", "First title");
+    let pending = fixture
+        .options
+        .claude_home
+        .join("projects/proj/second.jsonl");
+    fs::write(
+        &pending,
+        format!("{}\n", prompt("second", 1, "Second title")),
+    )
+    .unwrap();
+    let configured = [crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    }];
+    let (opened, snapshot) = sync_channel(0);
+    let (committed, continue_read) = sync_channel(0);
+    let old = std::thread::scope(|scope| {
+        let configured = &configured;
+        let reader = scope.spawn(move || {
+            AFTER_LIST_SNAPSHOT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    opened.send(()).unwrap();
+                    continue_read.recv_timeout(Duration::from_secs(5)).unwrap();
+                }));
+            });
+            http::list(configured, "fixture", "limit=10", false)
+        });
+        snapshot.recv_timeout(Duration::from_secs(5)).unwrap();
+        scan_file(&pending, "claude", &mut fixture.cache, &mut false).unwrap();
+        committed.send(()).unwrap();
+        reader.join().unwrap()
+    });
+    let first: serde_json::Value = serde_json::from_slice(&old.body).unwrap();
+    assert_eq!(old.status, 200, "{first}");
+    assert_eq!(first["total"], 1);
+    assert_eq!(
+        first["coverage"],
+        json!({"committed":1,"pending":1,"unavailable":0})
+    );
+    assert_eq!(first["items"][0]["key"], "first");
+    let fresh = http::list(&configured, "fixture", "limit=10", false);
+    let second: serde_json::Value = serde_json::from_slice(&fresh.body).unwrap();
+    assert_eq!(fresh.status, 200, "{second}");
+    assert_eq!(second["total"], 2);
+    assert_eq!(
+        second["coverage"],
+        json!({"committed":2,"pending":0,"unavailable":0})
+    );
+    assert_eq!(second["items"][0]["key"], "second");
+}
+
+#[test]
 fn warehouse_reads_keep_verified_growth_and_exclude_unadmitted_replacement() {
     use std::io::Write;
     let mut fixture = Fixture::new("replacement-witness");
