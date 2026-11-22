@@ -164,6 +164,7 @@ pub(crate) enum Fact {
     },
     Operation {
         parent: Position,
+        tool: &'static str,
         ok: Option<bool>,
     },
     ToolResult {

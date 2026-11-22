@@ -6928,7 +6928,11 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                     time,
                 );
             }
-            let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
+            let operation_tool = match field(item, "type") {
+                Some("CommandExecution") => Some("exec_command"),
+                Some("FileChange") => Some("apply_patch"),
+                _ => None,
+            };
             let legacy_tool = field(item, "id").is_some_and(|id| non_code_mode_tool(summary, id));
             let open = open_code_mode_call(summary);
             let code = item.get("exit_code").and_then(Value::as_i64);
@@ -6964,12 +6968,14 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
             // call is open to own it. Otherwise it is a plain call's item, or
             // its owner is ambiguous: its wrapper, or the plain call, is the
             // step, and the item adds nothing but the exit code below.
-            let parent = if operation && !legacy_tool && yielded.is_none() {
+            let parent = if operation_tool.is_some() && !legacy_tool && yielded.is_none() {
                 open
             } else {
                 None
             };
-            if operation && let Some(id) = field(item, "id") {
+            if operation_tool.is_some()
+                && let Some(id) = field(item, "id")
+            {
                 summary.tool_result_fact(
                     id,
                     yielded
@@ -6994,7 +7000,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                     code,
                 );
             }
-            if let Some(parent) = parent {
+            if let (Some(parent), Some(tool)) = (parent, operation_tool) {
                 let call = &summary.events[parent];
                 let position = warehouse::Position {
                     offset: call.o,
@@ -7002,6 +7008,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                 };
                 summary.warehouse_fact(offset, 0, || Fact::Operation {
                     parent: position,
+                    tool,
                     ok: known.then_some(!failed),
                 });
                 extra(

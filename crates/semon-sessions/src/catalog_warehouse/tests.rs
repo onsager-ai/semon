@@ -1528,6 +1528,11 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         .find(|record| record.address.offset == operation)
         .unwrap();
     assert_eq!(found.operation.unwrap().parent, call);
+    let (row, _) = focused_metadata(&source, "codex-native").unwrap().unwrap();
+    let details = row.details.unwrap();
+    assert_eq!(details["calls"], 1);
+    assert_eq!(details["errors"], 1);
+    assert_eq!(details["tool_calls"], json!({"exec_command":1}));
     let transcript = oracle("codex-native");
     let entry = transcript["entries"]
         .as_array()

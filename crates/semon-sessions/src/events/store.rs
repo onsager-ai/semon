@@ -263,7 +263,8 @@ fn emit_catalog_publish_attempt(
 // v52: warehouse-owned retained identity and certified original component receipts.
 // v53: committed warehouse prefix receipts for selected read continuations.
 // v54: as-of native signal observations for warehouse read continuations.
-pub(crate) const SCHEMA_VERSION: i64 = 59;
+// v60: native operation tool labels for selected call totals.
+pub(crate) const SCHEMA_VERSION: i64 = 60;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.

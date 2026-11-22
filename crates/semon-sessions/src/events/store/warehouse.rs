@@ -603,8 +603,8 @@ fn write_fact(
             }
             Ok(())
         }
-        Fact::Operation { parent, ok } => {
-            at!(fact_operation,call_pos=>int(parent.offset),call_block=>parent.block,ok=>ok)
+        Fact::Operation { parent, tool, ok } => {
+            at!(fact_operation,call_pos=>int(parent.offset),call_block=>parent.block,tool=>tool,ok=>ok)
         }
         Fact::ToolResult {
             id,

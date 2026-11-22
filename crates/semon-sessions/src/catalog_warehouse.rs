@@ -1126,56 +1126,62 @@ fn selected_details(
     row: &Row,
     family: serde_json::Value,
 ) -> Result<serde_json::Value, ReadError> {
-    let cwd = transaction
+    let (cwd, copilot) = transaction
         .query_row(
-            "SELECT f.cwd FROM dim_session d
-         JOIN warehouse_current c USING(source) JOIN files f USING(path) WHERE d.source=?1",
+            "SELECT f.cwd,f.copilot FROM warehouse_current c
+             CROSS JOIN files f USING(path) WHERE c.source=?1",
             [row.owner],
-            |record| record.get::<_, Option<String>>(0),
+            |record| {
+                Ok((
+                    record.get::<_, Option<String>>(0)?,
+                    record.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .map_err(index)?;
-    let (turns, errors): (i64, i64) = transaction.query_row(
-        "WITH member AS MATERIALIZED (
-           SELECT m.source FROM lineage_member root
-           CROSS JOIN lineage_member m ON m.component=root.component WHERE root.source=?1
-         ) SELECT
-           (SELECT count(*) FROM member m CROSS JOIN fact_prompt p USING(source)),
-           (SELECT count(*) FROM member m CROSS JOIN fact_tool_result r USING(source) WHERE r.failed)",
-        [row.owner],
-        |record| Ok((record.get(0)?, record.get(1)?)),
-    ).map_err(index)?;
-    let mut tools = transaction
-        .prepare_cached(
-            "SELECT c.tool,count(*) FROM lineage_member root
-         CROSS JOIN lineage_member m ON m.component=root.component
-         CROSS JOIN fact_tool_call c ON c.source=m.source
-         WHERE root.source=?1 AND c.tool IS NOT NULL GROUP BY c.tool",
-        )
-        .map_err(index)?;
-    let tools = tools
-        .query_map([row.owner], |record| {
-            Ok((record.get::<_, String>(0)?, record.get::<_, i64>(1)?))
-        })
+    let copilot = copilot
+        .as_deref()
+        .map(serde_json::from_str::<crate::copilot::Index>)
+        .transpose()
         .map_err(index)?
-        .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map(|projection| projection.evidence());
+    let mut statement = transaction
+        .prepare_cached(include_str!("events/store/warehouse_selected_details.sql"))
         .map_err(index)?;
-    let mut signals = transaction
-        .prepare_cached(include_str!("events/store/warehouse_selected_signals.sql"))
+    let mut records = statement
+        .query(params![
+            row.owner,
+            crate::events::ACK,
+            crate::events::UNKNOWN
+        ])
         .map_err(index)?;
-    let signals = signals
-        .query_map([row.owner], |record| {
-            Ok((record.get::<_, String>(0)?, record.get::<_, i64>(1)?))
-        })
-        .map_err(index)?
-        .collect::<rusqlite::Result<BTreeMap<_, _>>>()
-        .map_err(index)?;
-    let calls = tools.values().sum::<i64>();
+    let (mut turns, mut calls, mut errors) = (0, 0, 0);
+    let mut tools = BTreeMap::new();
+    let mut signals = BTreeMap::new();
+    while let Some(record) = records.next().map_err(index)? {
+        let count = usize::try_from(record.get::<_, i64>(2).map_err(index)?).map_err(index)?;
+        match record.get::<_, String>(0).map_err(index)?.as_str() {
+            "turns" => turns = count,
+            "call" => {
+                let tool: String = record.get(1).map_err(index)?;
+                *tools.entry(crate::model::tool_label(&tool)).or_default() += count;
+                calls += count;
+                errors +=
+                    usize::try_from(record.get::<_, i64>(3).map_err(index)?).map_err(index)?;
+            }
+            "signal" => {
+                signals.insert(record.get::<_, String>(1).map_err(index)?, count);
+            }
+            _ => return Err(index("Unknown selected detail count")),
+        }
+    }
+    let tools = crate::model::capped_tool_counts(tools);
     Ok(serde_json::json!({
         "state": row.status.unwrap_or("off"), "cwd": cwd, "family": family,
         "turns": turns, "calls": calls, "errors": errors, "tool_calls": tools,
         "signals": signals, "cost": row.cost, "copied_usage": row.usage[3..].iter().any(|count| *count > 0),
         "live_observation": row.status.is_some(),
-        "copilot": null, "reported_runs": [], "cost_check": [],
+        "copilot": copilot, "reported_runs": [], "cost_check": [],
     }))
 }
 

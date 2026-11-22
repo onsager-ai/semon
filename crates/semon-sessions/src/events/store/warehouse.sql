@@ -127,6 +127,7 @@ CREATE TABLE fact_tool_call (
 CREATE TABLE fact_operation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   occurrence INTEGER NOT NULL, ordinal INTEGER, call_pos INTEGER NOT NULL, call_block INTEGER NOT NULL,
+  tool TEXT NOT NULL CHECK(tool IN ('exec_command','apply_patch')),
   ok INTEGER CHECK(ok IN (0,1)),
   PRIMARY KEY(source,pos,block,occurrence)
 ) STRICT, WITHOUT ROWID;
