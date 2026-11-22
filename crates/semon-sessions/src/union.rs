@@ -1514,6 +1514,21 @@ impl ViewerCore {
         if reply.status == 200 || reply.status >= 500 || matches!(reply.status, 409 | 423 | 429) {
             return view.respond("GET", "/", "", None);
         }
+        if reply.status == 404
+            && route
+                .controls
+                .get("scope")
+                .is_none_or(|scope| scope == "current")
+        {
+            let pending = match view.evidence.storage.work.try_lock() {
+                Ok(work) => view.evidence.catalog_pending(&work),
+                Err(_) => true,
+            };
+            if pending || crate::events::store::catalog_work_pending(view.options()).unwrap_or(true)
+            {
+                return view.respond("GET", "/", "", None);
+            }
+        }
         reply
     }
 

@@ -733,10 +733,10 @@ impl<'a> Snapshot<'a> {
         &self,
         owners: &[i64],
         selected: bool,
+        observed: &crate::native_evidence::RuntimeObservations,
     ) -> Result<BTreeMap<i64, &'static str>, ReadError> {
         use crate::facts::source_authority::CurrentSources;
         let options = self.source.options;
-        let observed = crate::native_evidence::RuntimeObservations::new(options);
         let authority = options
             .facts
             .as_deref()
@@ -924,12 +924,17 @@ impl<'a> Snapshot<'a> {
         Ok(priced)
     }
 
-    fn enrich(&self, rows: &mut [Row], selected: bool) -> Result<(), ReadError> {
+    fn enrich(
+        &self,
+        rows: &mut [Row],
+        selected: bool,
+        view: &selected::ReadView<'_>,
+    ) -> Result<(), ReadError> {
         if rows.is_empty() {
             return Ok(());
         }
         let owners = rows.iter().map(|row| row.owner).collect::<Vec<_>>();
-        let status = self.runtime_status(&owners, selected)?;
+        let status = self.runtime_status(&owners, selected, view.runtime())?;
         self.enrich_with_status(rows, &status)
     }
 
@@ -1125,6 +1130,7 @@ fn selected_runtime_status(
     transaction: &Connection,
     source: &Source<'_>,
     owner: i64,
+    view: &selected::ReadView<'_>,
 ) -> Result<Option<&'static str>, ReadError> {
     let (ancestors, _) = parents::Parents::new(transaction)?.ancestors(owner)?;
     let authorized = std::iter::once(owner).chain(ancestors).collect::<Vec<_>>();
@@ -1142,7 +1148,9 @@ fn selected_runtime_status(
         coverage: Coverage::default(),
         revision: String::new(),
     };
-    Ok(snapshot.runtime_status(&[owner], true)?.remove(&owner))
+    Ok(snapshot
+        .runtime_status(&[owner], true, view.runtime())?
+        .remove(&owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1205,7 +1213,7 @@ fn selected_metadata(
             coverage: Coverage::default(),
             revision: String::new(),
         };
-        snapshot.enrich(&mut rows, true)?;
+        snapshot.enrich(&mut rows, true, view)?;
         let price = match selected_family_price(transaction, source, owner) {
             Ok(price) => Some(price),
             Err(ReadError::Restart) => {
@@ -1612,7 +1620,7 @@ pub(super) fn read_list(
             };
             #[cfg(test)]
             let phase = crate::catalog::baseline_start();
-            snapshot.enrich(&mut rows, false)?;
+            snapshot.enrich(&mut rows, false, view)?;
             #[cfg(test)]
             crate::catalog::baseline_record(phase, |sample| &mut sample.runtime_and_custody);
             Ok((

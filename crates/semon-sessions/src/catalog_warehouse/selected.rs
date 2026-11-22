@@ -5,12 +5,14 @@ use super::{
 };
 pub(super) use crate::session_route::NativeRecordAddress as Address;
 use crate::{
-    Options, SessionSourceRange, SessionSourceReader, SessionSourceRef, events::store::chunk_proofs,
+    Options, SessionSourceRange, SessionSourceReader, SessionSourceRef,
+    events::store::chunk_proofs, native_evidence::RuntimeObservations,
 };
 use rusqlite::{OptionalExtension, named_params, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    cell::OnceCell,
     collections::BTreeMap,
     io,
     path::Path,
@@ -63,6 +65,8 @@ impl BodyMode {
 /// within one request. Release the SQL guard before any native proof read.
 pub(super) struct ReadView<'a> {
     db: Arc<chunk_proofs::Snapshot>,
+    options: &'a Options,
+    runtime: OnceCell<RuntimeObservations>,
     pub(super) archive: super::ArchiveReader<'a>,
     body_bytes: Mutex<usize>,
     transcript: bool,
@@ -105,12 +109,19 @@ impl<'a> ReadView<'a> {
     fn with_budget(db: rusqlite::Connection, source: &Source<'a>, bytes: usize) -> Self {
         Self {
             db: chunk_proofs::Snapshot::new(db),
+            options: source.options,
+            runtime: OnceCell::new(),
             archive: super::ArchiveReader::with_budget(source.options, bytes),
             body_bytes: Mutex::new(bytes),
             transcript: false,
             part: None,
             proof_bytes: Mutex::new(bytes),
         }
+    }
+
+    pub(super) fn runtime(&self) -> &RuntimeObservations {
+        self.runtime
+            .get_or_init(|| RuntimeObservations::new(self.options))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2420,7 +2431,7 @@ fn read_current(
         || include_home_activity
         || matches!(target, Target::Annotations(_))
     {
-        super::selected_runtime_status(db, source, owner)?
+        super::selected_runtime_status(db, source, owner, read_view)?
     } else {
         None
     };

@@ -8,7 +8,7 @@ const RECENT: &str = concat!(
     include_str!("../events/store/warehouse_list.sql"),
     include_str!("../events/store/warehouse_catalog_row.sql"),
     "\n) SELECT id,owner,harness,last,title,model,repo,branch,NULL,
-         prompt_pos,owner_path,owner_ledger,native_id,agent_path,is_child,start,lineage,guardian,effort
+         prompt_pos,owner_path,owner_ledger,native_id,agent_path,is_child,start,lineage,guardian,effort,native_title
        FROM rows ORDER BY last DESC,id",
 );
 
@@ -49,7 +49,7 @@ fn read_source(
             )?);
         }
         let owners = rows.iter().map(|row| row.owner).collect::<Vec<_>>();
-        let runtime = snapshot.runtime_status(&owners, true)?;
+        let runtime = snapshot.runtime_status(&owners, true, view.runtime())?;
         let mut position = 0;
         rows.retain(|row| {
             position += 1;

@@ -2213,21 +2213,22 @@ mod tests {
             storage_refusals: Mutex::default(),
         };
         let db = crate::events::EventCache::path(&fixture.options.cache);
-        let revision = || {
+        let revision = |path: &Path| {
             rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .unwrap()
                 .query_row(
-                    "SELECT coalesce(max(revision),0) FROM warehouse_prefix",
-                    [],
+                    "SELECT coalesce(max(p.revision),0) FROM warehouse_current c
+                     JOIN warehouse_prefix p ON p.source=c.source WHERE c.path=?1",
+                    [path.to_str().unwrap()],
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap()
         };
         let admit = || {
-            let mut work = lock(&view.evidence.storage.work);
-            view.refresh_catalog_locked(&mut work, model::now_ms())
-                .unwrap();
+            view.invalidate();
+            publish_native(&view);
         };
+        let lane = fixture.root.join("claude/projects/project/lane.jsonl");
         let request = |path: &str, during_read: Option<&dyn Fn()>| {
             committed_http_request(&server, &viewer, path, during_read)
         };
@@ -2254,12 +2255,12 @@ mod tests {
             list,
             Some(&|| {
                 admit();
-                let before = revision();
+                let before = revision(&pending);
                 let mut file = fs::OpenOptions::new().append(true).open(&pending).unwrap();
                 writeln!(file).unwrap();
                 admit();
                 assert!(
-                    revision() > before,
+                    revision(&pending) > before,
                     "the Index committed a complete record during the list read"
                 );
             }),
@@ -2282,11 +2283,11 @@ mod tests {
             let during = request(
                 latest,
                 Some(&|| {
-                    let before = revision();
+                    let before = revision(&lane);
                     say(&fixture, "lane", round + 1, text);
                     admit();
                     assert!(
-                        revision() > before,
+                        revision(&lane) > before,
                         "the Index advanced while the transcript body was held"
                     );
                 }),
@@ -2300,7 +2301,7 @@ mod tests {
             let concurrent = request(
                 list,
                 Some(&|| {
-                    let before = revision();
+                    let before = revision(&pending);
                     say(
                         &fixture,
                         "new-lane",
@@ -2309,7 +2310,7 @@ mod tests {
                     );
                     admit();
                     assert!(
-                        revision() > before,
+                        revision(&pending) > before,
                         "the writer progressed during a repeated list read"
                     );
                 }),
@@ -2330,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_http_uses_one_committed_snapshot_per_source() {
+    fn workspace_union_uses_one_committed_snapshot_per_source() {
         let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
         let mut core = ViewerCore::with_machines(vec![
             ("a".into(), alpha.options.clone()),
@@ -2362,9 +2363,22 @@ mod tests {
             })
             .unwrap()
         };
-        let path = "/api/sessions?limit=8";
-        let first = committed_http_request(&server, &viewer, path, None);
+        let sources = [(&alpha, "a"), (&bravo, "b")].map(|(fixture, key)| crate::OverviewSource {
+            key: key.into(),
+            label: key.into(),
+            options: fixture.options.clone(),
+            up: true,
+        });
+        let reply = crate::session_catalog_union(&sources, "workspace", "limit=1");
+        assert_eq!(reply.status, 200);
+        let first = body_of(&reply);
         assert_eq!(first["total"], 2);
+        let cursor = first["next_cursor"].as_str().unwrap();
+        let continuation = format!("limit=1&cursor={}", percent_encode(cursor));
+        assert_eq!(
+            crate::session_catalog_union(&sources, "workspace", &continuation).status,
+            200
+        );
         let pending = [(&alpha, "new-a"), (&bravo, "new-b")].map(|(fixture, key)| {
             fixture.write(
                 &format!("claude/projects/project/{key}.jsonl"),
@@ -2372,35 +2386,57 @@ mod tests {
                     "origin":{"kind":"human"},"message":{"role":"user","content":"Committed during workspace list"}}).to_string(),
             )
         });
-        let during = committed_http_request(
-            &server,
-            &viewer,
-            path,
-            Some(&|| {
-                for path in &pending {
-                    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
-                    writeln!(file).unwrap();
-                }
-                for view in &views {
-                    let before = revision(view);
-                    publish_native(view);
-                    assert!(
-                        revision(view) > before,
-                        "the configured source committed during the list request"
-                    );
-                }
-            }),
+        let (opened, snapshot) = mpsc::sync_channel(0);
+        let (release, resume) = mpsc::sync_channel(0);
+        let deadline = Duration::from_secs(10);
+        let sources = &sources;
+        let during = thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                crate::catalog::warehouse::after_list_snapshot(move || {
+                    opened.send(()).unwrap();
+                    resume.recv_timeout(deadline).unwrap();
+                });
+                crate::session_catalog_union(sources, "workspace", "limit=8")
+            });
+            snapshot.recv_timeout(deadline).unwrap();
+            for path in &pending {
+                let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+                writeln!(file).unwrap();
+            }
+            for view in &views {
+                let before = revision(view);
+                view.invalidate();
+                publish_native(view);
+                assert!(
+                    revision(view) > before,
+                    "the source committed during the union read"
+                );
+            }
+            release.send(()).unwrap();
+            reader.join().unwrap()
+        });
+        assert_eq!(
+            during.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&during.body)
         );
+        let during = body_of(&during);
         let rows = during["items"].as_array().unwrap();
         assert_eq!(during["total"], 3);
         assert_eq!(rows.len(), 3);
-        for (key, source) in [("lane-a", "a"), ("lane-b", "b")] {
+        for (key, source) in [("lane-a", "a"), ("lane-b", "b"), ("new-b", "b")] {
             assert!(
                 rows.iter()
                     .any(|row| row["key"] == key && row["machine"]["key"] == source)
             );
         }
-        let fresh = committed_http_request(&server, &viewer, path, None);
+        let fresh = crate::session_catalog_union(sources, "workspace", "limit=8");
+        assert_eq!(fresh.status, 200);
+        let stale = crate::session_catalog_union(sources, "workspace", &continuation);
+        assert_eq!(stale.status, 409);
+        assert_eq!(body_of(&stale)["error"]["code"], "stale_cursor");
+        let fresh = body_of(&fresh);
         let rows = fresh["items"].as_array().unwrap();
         assert_eq!(fresh["total"], 4);
         assert_eq!(rows.len(), 4);
@@ -2434,6 +2470,7 @@ mod tests {
                 Some(&|| {
                     let before = revision(selected);
                     say(fixture, sid, 1, appended);
+                    selected.invalidate();
                     publish_native(selected);
                     assert!(
                         revision(selected) > before,
@@ -3042,11 +3079,8 @@ mod tests {
         assert_eq!(parsed(), lines + 3);
     }
 
-    /// A process that dies mid-call writes no line, but its running step is
-    /// no longer running: the transcript's mark moves, so the page tails it.
     #[cfg(unix)]
-    #[test]
-    fn a_process_that_dies_mid_call_moves_its_transcripts_mark() {
+    fn claude_running_call() -> (Fixture, PathBuf) {
         let fixture = Fixture::new();
         fixture.write("proc/sys/kernel/hostname", "testbox\n");
         fixture.claude(
@@ -3069,6 +3103,45 @@ mod tests {
             &json!({"pid":100,"sessionId":"lane","procStart":777,"status":"busy","name":"lane"})
                 .to_string(),
         );
+        (fixture, stat)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_keeps_its_runtime_observation_when_the_process_exits_during_read() {
+        let (fixture, stat) = claude_running_call();
+        let viewer = fixture.viewer();
+        publish_native(&viewer);
+        crate::catalog::warehouse::after_transcript_body(move || fs::remove_file(stat).unwrap());
+
+        let held = native_selected(&viewer, "lane");
+        assert_eq!(held["session"]["details"]["state"], "work");
+        assert!(
+            held["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["live"] == true)
+        );
+
+        let fresh = native_selected(&viewer, "lane");
+        assert_ne!(fresh["session"]["details"]["state"], "work");
+        assert!(
+            fresh["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["live"] != true)
+        );
+        assert_ne!(held["errors_generation"], fresh["errors_generation"]);
+    }
+
+    /// A process that dies mid-call writes no line, but its running step is
+    /// no longer running: the transcript's mark moves, so the page tails it.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_dies_mid_call_moves_its_transcripts_mark() {
+        let (fixture, stat) = claude_running_call();
         let viewer = fixture.viewer();
         publish_native(&viewer);
         let selected = native_selected(&viewer, "lane");

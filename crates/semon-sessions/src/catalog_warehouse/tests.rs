@@ -977,10 +977,7 @@ fn warehouse_failed_tool_marker_opens_the_rendered_entry() {
     let query = crate::native_html::query(&[
         ("sid", "native"),
         ("kind", "errors"),
-        (
-            "generation",
-            page["identity"]["generation"].as_str().unwrap(),
-        ),
+        ("generation", page["errors_generation"].as_str().unwrap()),
     ]);
     let markers = parse(http::annotations(&configured, &query, None, None));
     assert_eq!(markers["total"], 1);
@@ -2024,7 +2021,12 @@ impl crate::SessionSourceReader for RelayFixtureProvider {
             .get(..source.offset as usize)
             .ok_or(PermissionDenied)?;
         let generation = format!("fixture-{}-{}", source.native_id, source.offset);
-        if source.root != "claude"
+        let expected_root = if source.path.starts_with("projects/") {
+            "claude"
+        } else {
+            "codex"
+        };
+        if source.root != expected_root
             || <[u8; 32]>::from(Sha256::digest(prefix)) != source.prefix_sha256
             || expected.is_some_and(|expected| expected != generation)
         {
