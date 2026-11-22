@@ -11304,6 +11304,8 @@ fn native_name_updates_do_not_change_transcripts_and_remain_source_qualified() {
 #[test]
 fn failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes() {
     let home = relay_home();
+    let namespace = crate::storage::Namespace::new("fixture").unwrap();
+    drop(crate::storage::sqlite::open_index(&home.options, &namespace).unwrap());
     home.build_query();
     fs::remove_dir_all(&home.options.claude_home).unwrap();
     let resolve = |query: &str| crate::session_bookmark(&home.options, "fixture", query);

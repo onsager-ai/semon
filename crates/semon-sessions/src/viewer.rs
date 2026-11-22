@@ -2164,6 +2164,9 @@ mod tests {
             &format!("{child}\n"),
         );
         let view = fixture.viewer();
+        let pool = RefreshPool::new(1);
+        view.set_pool(pool.clone());
+        let _dispatch = pool.hold_dispatch();
         publish_native(&view);
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();

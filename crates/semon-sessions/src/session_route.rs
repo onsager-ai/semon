@@ -217,6 +217,16 @@ pub struct Candidate {
     pub harness: String,
 }
 
+impl From<crate::CatalogSessionIdentity> for Candidate {
+    fn from(identity: crate::CatalogSessionIdentity) -> Self {
+        Self {
+            source_key: identity.source_key,
+            catalog_key: identity.catalog_key,
+            harness: identity.harness,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Resolution {
     Valid(usize),

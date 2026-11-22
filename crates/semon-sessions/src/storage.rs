@@ -195,8 +195,6 @@ impl ProjectionTag {
     }
 }
 
-/// The search callback a Catalog page may admit after its snapshot closes.
-
 /// A backend holding one database per placed namespace.
 #[cfg_attr(
     not(test),

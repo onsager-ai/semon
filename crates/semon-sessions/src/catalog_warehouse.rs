@@ -2105,25 +2105,35 @@ pub(super) fn focused_identity(
     let tx = db.transaction().map_err(index)?;
     crate::events::store::require_current(&tx).map_err(index)?;
     crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
+    let identity = focused_identity_in(&tx, source, scope, key)?;
+    source.validate_authority()?;
+    Ok(identity)
+}
+
+fn focused_identity_in(
+    tx: &Connection,
+    source: &Source<'_>,
+    scope: CatalogReadScope,
+    key: &str,
+) -> Result<Option<crate::CatalogSessionIdentity>, ReadError> {
     let (harness, references, identity_witness) = match scope {
         CatalogReadScope::Current => {
-            let Some(identity) = current_identity(&tx, source, key, None)? else {
+            let Some(identity) = current_identity(tx, source, key, None)? else {
                 return Ok(None);
             };
-            let Some(references) = focused_members(&tx, source, &identity)? else {
+            let Some(references) = focused_members(tx, source, &identity)? else {
                 return Ok(None);
             };
-            let witness = current_identity_witness(&tx, source, key, &identity, &references)?;
+            let witness = current_identity_witness(tx, source, key, &identity, &references)?;
             (identity.1, references, witness)
         }
         CatalogReadScope::RetainedHistory => {
-            let identity = warehouse::retained_identity(&tx, &source.namespace, key)
-                .map_err(retained_error)?;
-            let references = retained_references(&tx, source, &identity)?;
+            let identity =
+                warehouse::retained_identity(tx, &source.namespace, key).map_err(retained_error)?;
+            let references = retained_references(tx, source, &identity)?;
             (identity.harness, references, identity.witness)
         }
     };
-    source.validate_authority()?;
     Ok(Some(present_identity(
         source,
         scope,
@@ -2132,6 +2142,69 @@ pub(super) fn focused_identity(
         references,
         identity_witness,
     )))
+}
+
+fn focused_locate(
+    source: &Source<'_>,
+    scope: CatalogReadScope,
+    key: &str,
+) -> Result<Vec<crate::session_route::Candidate>, ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    crate::events::store::require_current(&tx).map_err(index)?;
+    crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
+    let candidates = match focused_identity_in(&tx, source, scope, key)? {
+        Some(identity) => vec![identity.into()],
+        None => match key.strip_prefix("unsent:") {
+            Some(target)
+                if !target.is_empty() && current_identity(&tx, source, key, None)?.is_none() =>
+            {
+                failed_send_candidates(&tx, source, target)?
+            }
+            _ => Vec::new(),
+        },
+    };
+    source.validate_authority()?;
+    Ok(candidates)
+}
+
+fn failed_send_candidates(
+    tx: &Connection,
+    source: &Source<'_>,
+    target: &str,
+) -> Result<Vec<crate::session_route::Candidate>, ReadError> {
+    let mut statement = tx.prepare_cached(
+        "WITH senders AS MATERIALIZED (
+           SELECT DISTINCT m.owner FROM fact_relay_send s
+           JOIN warehouse_current c ON c.source=s.source
+           JOIN warehouse_source w ON w.source=s.source AND w.origin=?2 AND w.carrier=c.path
+           JOIN warehouse_prefix p ON p.source=s.source AND NOT p.superseded
+           JOIN files f ON f.path=c.path AND f.resume_at=p.pos
+           JOIN bridge_session_owner m ON m.source=s.source
+           JOIN fact_relay_result r ON r.source=s.source AND r.call_id=s.call_id
+             AND (r.call_pos=s.pos AND r.call_block=s.block OR r.call_pos IS NULL AND
+               (SELECT count(*) FROM fact_relay_send other
+                WHERE other.source=s.source AND other.call_id=s.call_id)=1)
+           WHERE s.target=?1 AND r.failed AND (s.pos,s.block)<(r.pos,r.block) AND r.pos<p.pos
+             AND NOT EXISTS (SELECT 1 FROM fact_relay_receipt receipt
+               JOIN warehouse_current rc ON rc.source=receipt.source
+               JOIN warehouse_source rw ON rw.source=rc.source AND rw.origin=?2 AND rw.carrier=rc.path
+               JOIN warehouse_prefix rp ON rp.source=receipt.source AND NOT rp.superseded
+               WHERE receipt.correlation=r.correlation AND receipt.pos<rp.pos)
+         )
+         SELECT k.id,k.harness FROM senders s JOIN catalog_keys k ON k.owner=s.owner
+         ORDER BY k.id LIMIT 3",
+    ).map_err(index)?;
+    let rows = statement
+        .query_map(params![target, source.namespace.binding()], |row| {
+            Ok(crate::session_route::Candidate {
+                source_key: source.namespace.to_string(),
+                catalog_key: row.get(0)?,
+                harness: row.get(1)?,
+            })
+        })
+        .map_err(index)?;
+    rows.collect::<rusqlite::Result<_>>().map_err(index)
 }
 
 fn retained_references(

@@ -404,7 +404,6 @@ fn shared_owner_names_group_display_but_keep_machine_sources() {
         semon_sessions::ReceivedMachines::new(root.0.join("received"), &options),
     );
     for source in ["machine-aaaaaaaaaaaaaaaa", "machine-bbbbbbbbbbbbbbbb"] {
-        assert!(core.demand_catalog_source(source).unwrap());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let query = format!("machine={source}");
         loop {

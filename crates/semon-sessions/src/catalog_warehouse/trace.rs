@@ -333,14 +333,19 @@ pub(super) fn recorded_end(
     root: &selected::Record,
 ) -> Result<(Value, bool), ReadError> {
     let unavailable = || json!({"st":"off","why":"unavailable"});
-    // A Codex terminal fact names the same native turn as a reducer-qualified
-    // start. Stop at the next human turn so a later task cannot close this one.
+    let last = root
+        .causal
+        .turn
+        .as_ref()
+        .is_some_and(|turn| component.latest_turn.as_ref() == Some(turn));
     if component.harness != "codex"
         || root.causal.turn.as_ref().is_none_or(|turn| turn.handoff)
         || root.prompt_anchor.is_none()
     {
-        return Ok((unavailable(), false));
+        return Ok((unavailable(), last));
     }
+    // A Codex terminal fact names the same native turn as a reducer-qualified
+    // start. Stop at the next human turn so a later task cannot close this one.
     let carrier = source.options.codex_home.join(&root.address.path);
     let tx = view.lock()?;
     let (start, limit) = (
@@ -352,7 +357,6 @@ pub(super) fn recorded_end(
         "SELECT min(pos) FROM fact_prompt WHERE source=?1 AND pos>?2 AND pos<?3 AND kind IN ('user','ask')",
         params![source_id, start, limit], |row| row.get(0),
     ).map_err(super::index)?;
-    let last = next.is_none() && component.member_count == 1;
     let owned_turn = tx
         .query_row(
             "WITH boundary AS (

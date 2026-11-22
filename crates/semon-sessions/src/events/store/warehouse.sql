@@ -257,6 +257,7 @@ CREATE INDEX process_environment_target ON fact_environment_observation(parent_h
 CREATE INDEX process_ancestor_pid ON fact_ancestor_observation(capture,ancestor_pid,source);
 CREATE INDEX operation_parent ON fact_operation(source,call_pos,pos);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
+CREATE INDEX relay_send_target ON fact_relay_send(target,source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
 CREATE INDEX relay_receipt_position ON fact_relay_receipt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
 CREATE INDEX relay_receipt_correlation ON fact_relay_receipt(correlation,source,pos,block,occurrence);

@@ -360,7 +360,7 @@ fn read(
     ))
 }
 
-fn selected_request(configured: &OverviewSource, query: &str) -> Result<Request, ViewerReply> {
+fn selected_request(source_key: &str, query: &str) -> Result<Request, ViewerReply> {
     let mut arguments = std::collections::BTreeSet::new();
     for field in query.split('&') {
         let (name, value) = field.split_once('=').ok_or_else(invalid)?;
@@ -368,7 +368,7 @@ fn selected_request(configured: &OverviewSource, query: &str) -> Result<Request,
             return Err(invalid());
         }
         let value = crate::viewer::decoded(value).ok_or_else(invalid)?;
-        if name == "machine" && value != configured.key {
+        if name == "machine" && value != source_key {
             return Err(invalid());
         }
     }
@@ -379,11 +379,21 @@ fn selected_request(configured: &OverviewSource, query: &str) -> Result<Request,
     Ok(request)
 }
 
-fn selected_identity(
+#[cfg(feature = "postgres")]
+pub(crate) fn locate_request(
+    source_key: &str,
+    query: &str,
+) -> Result<(String, CatalogReadScope), ViewerReply> {
+    let request = selected_request(source_key, query)?;
+    Ok((request.sid.expect("validated sid"), request.scope))
+}
+
+fn selected_read<T>(
     configured: &OverviewSource,
     query: &str,
-) -> Result<Option<crate::CatalogSessionIdentity>, ViewerReply> {
-    let request = selected_request(configured, query)?;
+    read: impl FnOnce(&Source<'_>, CatalogReadScope, &str) -> Result<T, ReadError>,
+) -> Result<T, ViewerReply> {
+    let request = selected_request(&configured.key, query)?;
     if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
         return Err(reply);
     }
@@ -393,8 +403,14 @@ fn selected_identity(
         .map_err(read_error)?;
     let source =
         Source::focused(namespace, &path, &configured.options, None).map_err(read_error)?;
-    super::focused_identity(&source, request.scope, &request.sid.expect("validated sid"))
-        .map_err(read_error)
+    read(&source, request.scope, &request.sid.expect("validated sid")).map_err(read_error)
+}
+
+fn selected_identity(
+    configured: &OverviewSource,
+    query: &str,
+) -> Result<Option<crate::CatalogSessionIdentity>, ViewerReply> {
+    selected_read(configured, query, super::focused_identity)
 }
 
 pub(crate) fn identity(configured: &OverviewSource, query: &str) -> ViewerReply {
@@ -406,24 +422,18 @@ pub(crate) fn identity(configured: &OverviewSource, query: &str) -> ViewerReply 
 }
 
 pub(crate) fn locate(configured: &OverviewSource, query: &str) -> ViewerReply {
-    match selected_identity(configured, query) {
-        Ok(identity) => {
-            let matches = identity
-                .into_iter()
-                .map(|identity| crate::session_route::Candidate {
-                    source_key: identity.source_key,
-                    catalog_key: identity.catalog_key,
-                    harness: identity.harness,
-                })
-                .collect::<Vec<_>>();
-            crate::catalog::reply(200, json!({"api":1,"matches":matches,"unavailable":0}))
-        }
+    match selected_read(configured, query, super::focused_locate) {
+        Ok(matches) => located(matches),
         Err(reply) => reply,
     }
 }
 
+pub(crate) fn located(matches: Vec<crate::session_route::Candidate>) -> ViewerReply {
+    crate::catalog::reply(200, json!({"api":1,"matches":matches,"unavailable":0}))
+}
+
 pub(crate) fn observe(configured: &OverviewSource, query: &str) -> ViewerReply {
-    match selected_request(configured, query) {
+    match selected_request(&configured.key, query) {
         Ok(request) if request.scope == CatalogReadScope::RetainedHistory => (),
         Ok(_) => return invalid(),
         Err(reply) => return reply,
@@ -524,7 +534,7 @@ pub(crate) fn annotations(
         {
             return Err(invalid());
         }
-        let request = selected_request(configured, &selected_query.join("&"))?;
+        let request = selected_request(&configured.key, &selected_query.join("&"))?;
         let key = request.sid.as_deref().ok_or_else(invalid)?;
         if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
             return Err(reply);
@@ -858,7 +868,7 @@ fn turn_request(
         }
     }
     let turn = turn.ok_or_else(invalid)?;
-    let request = selected_request(configured, &selected_query.join("&"))?;
+    let request = selected_request(&configured.key, &selected_query.join("&"))?;
     Ok((request, turn))
 }
 
@@ -983,7 +993,7 @@ pub(crate) fn activity_anchor(
                 selected.push(field);
             }
         }
-        let request = selected_request(configured, &selected.join("&"))?;
+        let request = selected_request(&configured.key, &selected.join("&"))?;
         let key = request.sid.as_deref().ok_or_else(invalid)?;
         let field = |name| evidence.get(name).map(String::as_str).ok_or_else(invalid);
         let requested = crate::transcript_range::StepAnchor {

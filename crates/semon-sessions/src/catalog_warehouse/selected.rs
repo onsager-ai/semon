@@ -314,7 +314,9 @@ pub(super) struct Component {
     pub(super) model: Option<String>,
     pub(super) metadata: Option<super::Row>,
     pub(super) retained_metadata: Option<serde_json::Value>,
+    #[cfg(test)]
     pub(super) member_count: usize,
+    pub(super) latest_turn: Option<causal::TurnStart>,
     #[cfg(test)]
     pub(super) legacy_completion: Option<RelayReceipt>,
     pub(super) records: Vec<Record>,
@@ -1665,7 +1667,6 @@ fn read_current(
         Target::Turns(_, Some(HomeFields { activity: true, .. }))
     );
     let mut annotation_members = BTreeMap::new();
-    let mut member_count = 0;
     let mut references = Vec::new();
     #[cfg(test)]
     let mut evidence_matches = 0;
@@ -1696,7 +1697,6 @@ fn read_current(
             let mut count = 0;
             while let Some(row) = page.next().map_err(index)? {
                 count += 1;
-                member_count += 1;
                 let id: i64 = row.get(0).map_err(index)?;
                 member_after = id;
                 let incarnation: i64 = row.get(1).map_err(index)?;
@@ -2185,7 +2185,11 @@ fn read_current(
         causal
             .keys()
             .copied()
-            .chain((include_home_detail || home_activity.is_some()).then_some(Position::END))
+            .chain(
+                (matches!(target, Target::Turns(..) | Target::Address(..))
+                    || home_activity.is_some())
+                .then_some(Position::END),
+            )
             .chain(home_activity.as_ref().map(|activity| activity.position)),
         &encode(&incoming)?,
     )?;
@@ -2288,14 +2292,13 @@ fn read_current(
         let causal = inputs.map_or_else(causal::Context::default, |inputs| {
             inputs.render(source, key, reference, native_id.as_deref(), turn)
         });
-        if direction == Direction::Reverse {
-            if let Some(operation) = operation
-                && let std::collections::btree_map::Entry::Vacant(entry) =
-                    reply_records.entry((reference.path.clone(), operation.parent))
-            {
-                let (body, _) = read_body(position.source, &member, operation.parent)?;
-                entry.insert(body);
-            }
+        if direction == Direction::Reverse
+            && let Some(operation) = operation
+            && let std::collections::btree_map::Entry::Vacant(entry) =
+                reply_records.entry((reference.path.clone(), operation.parent))
+        {
+            let (body, _) = read_body(position.source, &member, operation.parent)?;
+            entry.insert(body);
         }
         if direction == Direction::Reverse || matches!(target, Target::Turns(_, Some(_))) {
             for reply in causal
@@ -2394,6 +2397,8 @@ fn read_current(
         });
     Ok(Some(Component {
         binding,
+        #[cfg(test)]
+        member_count: identity.source_refs.len(),
         identity,
         harness,
         native_id,
@@ -2401,7 +2406,7 @@ fn read_current(
         model,
         metadata,
         retained_metadata: None,
-        member_count,
+        latest_turn,
         #[cfg(test)]
         legacy_completion,
         records,

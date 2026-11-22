@@ -525,6 +525,7 @@ pub(super) fn read_frozen(
     } else {
         None
     };
+    #[cfg(test)]
     let member_count = members.len();
     let prefixes = encode(
         &members
@@ -764,13 +765,14 @@ pub(super) fn read_frozen(
     } else {
         "{}".into()
     };
+    let include_latest_turn = matches!(target, Target::Turns(..) | Target::Address(..));
     let mut turns = if candidates.is_empty() && !include_home_detail {
         BTreeMap::new()
     } else {
         let positions = candidates
             .keys()
             .copied()
-            .chain(include_home_detail.then_some(Position::END));
+            .chain(include_latest_turn.then_some(Position::END));
         let tx = view.lock()?;
         let mut search = causal::TurnSearch::new(&tx, positions)?;
         for (id, reference, predecessors, carrier) in &turn_members {
@@ -805,7 +807,8 @@ pub(super) fn read_frozen(
         }
         search.finish()
     };
-    let home_detail = match turns.remove(&Position::END).flatten() {
+    let latest_turn = turns.remove(&Position::END).flatten();
+    let home_detail = match latest_turn.as_ref().filter(|_| include_home_detail) {
         Some(turn) => {
             let (_, reference, _, _) = turn_members
                 .iter()
@@ -815,7 +818,7 @@ pub(super) fn read_frozen(
             pin_provider_with(&reader, reference, |error| {
                 retained_body_error(error, false)
             })?;
-            Some(HomeDetail::from_turn(&turn, &native))
+            Some(HomeDetail::from_turn(turn, &native))
         }
         None => None,
     };
@@ -848,13 +851,12 @@ pub(super) fn read_frozen(
         };
         let operation = inputs.operation();
         let causal = inputs.render(source, key, &reference, event_id.as_deref(), turn);
-        if direction == Direction::Reverse {
-            if let Some(operation) = operation
-                && let std::collections::btree_map::Entry::Vacant(entry) =
-                    reply_records.entry((reference.path.clone(), operation.parent))
-            {
-                entry.insert(read(&reference, operation.parent)?);
-            }
+        if direction == Direction::Reverse
+            && let Some(operation) = operation
+            && let std::collections::btree_map::Entry::Vacant(entry) =
+                reply_records.entry((reference.path.clone(), operation.parent))
+        {
+            entry.insert(read(&reference, operation.parent)?);
         }
         if direction == Direction::Reverse || matches!(target, Target::Turns(_, Some(_))) {
             for reply in causal
@@ -937,7 +939,9 @@ pub(super) fn read_frozen(
         model,
         metadata: None,
         retained_metadata: metadata.filter(|_| cursor.is_none()),
+        #[cfg(test)]
         member_count,
+        latest_turn,
         #[cfg(test)]
         legacy_completion: None,
         records,

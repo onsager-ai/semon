@@ -1,13 +1,13 @@
 //! Selected immutable slot/range reads, independent of the global event model.
 #[cfg(any(test, feature = "postgres"))]
-use crate::catalog::CatalogSessionIdentity;
+use crate::catalog::{self, CatalogSessionIdentity};
 #[cfg(test)]
 use crate::{
     CatalogIdentityError,
     viewer::{decoded, query_value},
 };
 use crate::{
-    Options, SessionSourceReader, SessionSourceRef, catalog,
+    Options, SessionSourceReader, SessionSourceRef,
     events::EventCache,
     model::summary::CatalogSource,
     slot_projection::{SavedSlot, VERSION},

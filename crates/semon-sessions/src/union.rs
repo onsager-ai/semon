@@ -108,6 +108,39 @@ fn wait_for_catalog_read(
     result
 }
 
+fn sqlite_locate(view: &MachineView, source: &str, query: &str) -> ViewerReply {
+    let _ = view.note_catalog_read();
+    let configured = crate::catalog::warehouse::host_source(view.options(), source);
+    crate::catalog::warehouse::http::locate(&configured, query)
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_locate(
+    view: &MachineView,
+    source: &str,
+    query: &str,
+    deadline: Instant,
+    allow_wait: bool,
+) -> ViewerReply {
+    use crate::catalog::warehouse::http;
+    let (key, scope) = match http::locate_request(source, query) {
+        Ok(request) => request,
+        Err(reply) => return reply,
+    };
+    if let Err(reply) = wait_for_catalog_read(view, deadline, allow_wait) {
+        return reply;
+    }
+    match view.evidence.storage.selection(source, &key, scope, false) {
+        Ok(selection) => http::located(
+            selection
+                .into_iter()
+                .map(|(identity, _)| identity.into())
+                .collect(),
+        ),
+        Err(_) => catalog_unavailable(),
+    }
+}
+
 fn catalog_unavailable() -> ViewerReply {
     crate::catalog::error(
         503,
@@ -1358,13 +1391,23 @@ impl ViewerCore {
                 }
                 let _ = view.note_catalog_read();
             }
-            let resolution = match crate::session_catalog_resolve_native(
-                view.options(),
-                source,
-                harness,
-                native_id,
-                crate::CatalogReadScope::Current,
-            ) {
+            let resolve = if view.evidence.storage.is_postgres() {
+                view.evidence.storage.resolve_native(
+                    source,
+                    harness,
+                    native_id,
+                    crate::CatalogReadScope::Current,
+                )
+            } else {
+                crate::session_catalog_resolve_native(
+                    view.options(),
+                    source,
+                    harness,
+                    native_id,
+                    crate::CatalogReadScope::Current,
+                )
+            };
+            let resolution = match resolve {
                 Ok(resolution) => resolution,
                 Err(crate::CatalogIdentityError::InvalidArguments) => {
                     return text(400, "Invalid native session address");
@@ -1417,15 +1460,6 @@ impl ViewerCore {
             return text(503, &error.to_string());
         }
         let views = self.views();
-        if views
-            .iter()
-            .any(|(_, view)| view.evidence.storage.is_postgres())
-        {
-            return text(
-                503,
-                "Selected session routing is not yet available on PostgreSQL",
-            );
-        }
         let inventory = self.source_inventory(&views);
         let Some((_, view)) = inventory
             .index(&route.source)
@@ -1435,6 +1469,12 @@ impl ViewerCore {
         };
         if !inventory.valid() || view.evidence.validate_configuration().is_err() {
             return catalog_unavailable();
+        }
+        if view.evidence.storage.is_postgres() {
+            return text(
+                503,
+                "Selected session routing is not yet available on PostgreSQL",
+            );
         }
         let _ = view.note_catalog_read();
         let configured = crate::catalog::warehouse::host_source(view.options(), &route.source);
@@ -1503,6 +1543,7 @@ impl ViewerCore {
         _deadline: Instant,
         _allow_catalog_wait: bool,
     ) -> ViewerReply {
+        use crate::catalog::warehouse::http;
         if path == "/api/session-locate"
             && query_value(query, "machine").is_none()
             && views.len() > 1
@@ -1515,15 +1556,22 @@ impl ViewerCore {
             let mut unavailable = 0_u64;
             for (source, view) in views.iter() {
                 let source = if source.is_empty() { "local" } else { source };
-                let configured = crate::catalog::warehouse::host_source(view.options(), source);
-                if view.evidence.storage.is_postgres()
-                    || view.evidence.validate_configuration().is_err()
-                {
+                if view.evidence.validate_configuration().is_err() {
                     unavailable += 1;
                     continue;
                 }
-                let _ = view.note_catalog_read();
-                let reply = crate::catalog::warehouse::http::locate(&configured, query);
+                #[cfg(feature = "postgres")]
+                let reply = if view.evidence.storage.is_postgres() {
+                    postgres_locate(view, source, query, _deadline, _allow_catalog_wait)
+                } else {
+                    sqlite_locate(view, source, query)
+                };
+                #[cfg(not(feature = "postgres"))]
+                let reply = sqlite_locate(view, source, query);
+                if reply.status >= 500 {
+                    unavailable += 1;
+                    continue;
+                }
                 if reply.status != 200 {
                     return reply;
                 }
@@ -1605,6 +1653,9 @@ impl ViewerCore {
         }
         #[cfg(feature = "postgres")]
         if view.evidence.storage.is_postgres() {
+            if path == "/api/session-locate" {
+                return postgres_locate(view, key, query, _deadline, _allow_catalog_wait);
+            }
             if let Err(reply) = wait_for_catalog_read(view, _deadline, _allow_catalog_wait) {
                 return reply;
             }
@@ -1636,7 +1687,6 @@ impl ViewerCore {
             };
         }
         let configured = crate::catalog::warehouse::host_source(view.options(), key);
-        use crate::catalog::warehouse::http;
         #[cfg(test)]
         let queue = crate::catalog::baseline_start();
         if path != "/api/session-capabilities" {
