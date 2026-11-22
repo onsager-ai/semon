@@ -1131,7 +1131,7 @@ export function createCatalogViewer(
         return;
       const previous = causal;
       next.previewReady = new Set();
-      if (previous?.source === source) {
+      if (!next.evidence && previous?.source === source) {
         for (const sid of previous.previewReady ?? []) {
           if (previous.previews[sid] !== next.previews[sid]) continue;
           if (
@@ -1166,9 +1166,32 @@ export function createCatalogViewer(
           }
         }
       }
-      const jobs: { sid: string; events: string[]; turns: string[] }[] = [];
+      const jobs: {
+        sid: string;
+        events: string[];
+        turns: string[];
+        address?: NativeEntryAddress;
+        peer?: RetainedPeerAddress;
+      }[] = [];
       for (const sid of new Set([...Object.keys(next.previews), ...Object.keys(next.sessions)])) {
         if (next.previewReady.has(sid)) continue;
+        if (next.evidence) {
+          for (const turn of next.turns[sid] ?? []) {
+            const events =
+              turn.start && next.previewOwners.get(turn.start.id)?.brief === sid
+                ? [turn.start.id]
+                : [];
+            const turns = turn.u ? [turn.id] : [];
+            if (!events.length && !turns.length) continue;
+            const evidence = causalEvidence(next, sid, turn.id);
+            if (!evidence || !('address' in evidence)) {
+              next.previewsIncomplete = true;
+              continue;
+            }
+            jobs.push({ sid, events, turns, address: evidence.address, peer: evidence.peer });
+          }
+          continue;
+        }
         const entries = [...next.handoffs.values()]
             .filter((edge) => {
               const owner = next.previewOwners.get(edge.id);
@@ -1219,6 +1242,11 @@ export function createCatalogViewer(
               query.set('generation', generation);
               query.set('events', JSON.stringify(job.events));
               query.set('turns', JSON.stringify(job.turns));
+              if (job.address) {
+                query.set('address', JSON.stringify(job.address));
+                query.set('session_fields', '[]');
+              }
+              if (job.peer) query.set('peer', JSON.stringify(job.peer));
               const detail = object(await api('/api/session-home?' + query));
               if (
                 disposed ||
@@ -1241,7 +1269,7 @@ export function createCatalogViewer(
                   ...job.events.map((event) => ({ event })),
                   ...job.turns.map((turn) => ({ turn })),
                 ];
-                if (values.length > 1) {
+                if (!job.address && values.length > 1) {
                   const half = Math.ceil(values.length / 2);
                   for (const part of [values.slice(0, half), values.slice(half)])
                     jobs.push({

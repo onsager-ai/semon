@@ -2048,6 +2048,58 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
 }
 
 #[test]
+fn warehouse_trace_codex_end_belongs_to_selected_turn() {
+    let mut fixture = Fixture::new("trace-codex-end");
+    let path = fixture.codex("trace-codex");
+    for (second, kind, id) in [
+        (1, "task_started", "first"),
+        (3, "task_complete", "first"),
+        (4, "task_started", "second"),
+        (6, "turn_aborted", "second"),
+    ] {
+        append_native(
+            &path,
+            json!({"type":"event_msg","timestamp":format!("2026-09-24T00:00:{second:02}Z"),
+            "payload":{"type":kind,"turn_id":id,"reason":"interrupted"}}),
+        );
+        if kind == "task_started" {
+            append_native(
+                &path,
+                json!({"type":"response_item","timestamp":format!("2026-09-24T00:00:{:02}Z", second + 1),
+                "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":id}]}}),
+            );
+        }
+    }
+    scan_file(&path, "codex", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let component = selected_page(&fixture, &[&path], "trace-codex", 20, None)
+        .unwrap()
+        .unwrap();
+    for (prompt, expected, last) in [
+        ("first", "completed", false),
+        ("second", "interrupted", true),
+    ] {
+        let record = component
+            .records
+            .iter()
+            .find(|record| record.text().as_deref() == Some(prompt))
+            .unwrap();
+        let turn = &record.causal.turn.as_ref().unwrap().id;
+        let query = crate::native_html::query(&[("sid", "trace-codex"), ("turn", turn)]);
+        let response = http::trace(&configured, &query, None, None);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.status, 200, "{body}");
+        assert_eq!(body["turns"][0]["end"]["why"], expected, "{body}");
+        assert_eq!(body["turns"][0]["last"], last);
+    }
+}
+
+#[test]
 fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let mut fixture = Fixture::new("legacy-relay-detail");
     let root = fixture.claude("root", "Delegate");
@@ -2289,6 +2341,31 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
             .iter()
             .any(|entry| entry["address"] == evidence["address"] && entry["turn"] == relay_turn)
     );
+    let preview = |generation: &str, address: &serde_json::Value| {
+        let query = crate::native_html::query(&[
+            ("sid", "root"),
+            ("scope", "retained_history"),
+            ("generation", generation),
+            ("session_fields", "[]"),
+            ("events", &json!([relay_turn]).to_string()),
+            ("address", &address.to_string()),
+            ("peer", &evidence["peer"].to_string()),
+        ]);
+        http::home(&configured, &query, None, Some(&provider))
+    };
+    let generation = trace["previews"]["root"].as_str().unwrap();
+    let response = preview(generation, &evidence["address"]);
+    let home: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response.status, 200, "{home}");
+    assert_eq!(
+        home["events"][relay_turn.as_str()]["brief"],
+        "Still working"
+    );
+    assert_eq!(home["incomplete"], false);
+    let mut wrong_entry = evidence["address"].clone();
+    wrong_entry["block"] = json!(1);
+    assert_eq!(preview(generation, &wrong_entry).status, 409);
+    assert_eq!(preview(&"0".repeat(64), &evidence["address"]).status, 409);
     let opened = selected::retained_peer_window(
         &source,
         "root",

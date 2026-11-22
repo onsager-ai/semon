@@ -123,7 +123,7 @@ pub(in super::super) fn retained_peer_window(
 ) -> Result<Component, ReadError> {
     let target = address.map_or(
         Target::Page(limit, Direction::Reverse),
-        |(address, binding)| Target::Address(address, Some(binding)),
+        |(address, binding)| Target::Address(address, Some(binding), None),
     );
     let archive = super::super::ArchiveReader::new(source.options);
     read_frozen_page(
@@ -163,7 +163,7 @@ pub(in super::super) fn retained_peer_trace_window(
         view,
         source,
         key,
-        Target::Address(address, Some(&binding)),
+        Target::Address(address, Some(&binding), None),
         None,
         provider.unwrap_or(&view.archive),
         Some((peer, provider.is_none())),
@@ -182,7 +182,7 @@ pub(in super::super) fn retained_trace_send_window(
         view,
         source,
         key,
-        Target::Address(address, Some(binding)),
+        Target::Address(address, Some(binding), None),
         None,
         provider.unwrap_or(&view.archive),
         None,
@@ -233,7 +233,7 @@ pub(in super::super) fn retained_addressed_window(
     read_retained_page(
         source,
         key,
-        Target::Address(address, Some(binding)),
+        Target::Address(address, Some(binding), None),
         None,
         provider,
     )
@@ -270,6 +270,25 @@ pub(in super::super) fn retained_preview_turns(
         Target::Turns(turns, Some(home)),
         None,
         provider,
+    )
+}
+
+pub(in super::super) fn retained_addressed_preview(
+    source: &Source<'_>,
+    key: &str,
+    address: &crate::session_route::NativeEntryAddress,
+    generation: &str,
+    peer: Option<PeerBinding<'_>>,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<Component, ReadError> {
+    let archive = super::super::ArchiveReader::new(source.options);
+    read_frozen_page(
+        source,
+        key,
+        Target::Address(&address.record, Some(&address.binding), Some(generation)),
+        None,
+        provider.unwrap_or(&archive),
+        peer.map(|peer| (peer, provider.is_none())),
     )
 }
 
@@ -356,7 +375,9 @@ pub(super) fn read_frozen(
         Target::Turns(..) | Target::Annotations(_) | Target::Activity(_) => {
             (Direction::Forward, None)
         }
-        Target::Address(address, Some(binding)) => (Direction::Reverse, Some((address, binding))),
+        Target::Address(address, Some(binding), _) => {
+            (Direction::Reverse, Some((address, binding)))
+        }
         _ => unreachable!("retained transcript target"),
     };
     let limit = target.capacity()?.min(33);
@@ -472,8 +493,9 @@ pub(super) fn read_frozen(
                 false,
             )
         };
-    if let Target::Turns(_, Some(home)) = target
-        && home.expected != witness
+    if target
+        .expected_generation()
+        .is_some_and(|expected| expected != witness)
     {
         return Err(ReadError::Restart);
     }

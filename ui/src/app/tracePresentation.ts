@@ -643,6 +643,10 @@ export function traceTurnOutcome(
       state: 'done',
       text: withTime(`Returned to ${nameOf(turn.start.from)}`, turn.start.done),
     };
+  if (end?.why === 'completed') return { state: 'done', text: withTime('Completed', end.at) };
+  if (end?.why === 'interrupted') return { state: 'off', text: withTime('Interrupted', end.at) };
+  if (end?.why === 'unavailable')
+    return { state: 'off', text: 'Recorded turn outcome unavailable' };
   if (end?.why === 'replied') return { state: 'done', text: 'Replied' };
   return { state, text: 'No reply in these logs' };
 }

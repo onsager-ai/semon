@@ -566,8 +566,36 @@ pub(super) fn home(
     retained_provider: Option<&dyn crate::SessionSourceReader>,
 ) -> ViewerReply {
     let read = || -> Result<ViewerReply, ViewerReply> {
+        let mut fields = Vec::new();
+        let (mut address, mut peer) = (None, None);
+        for field in query.split('&') {
+            match field.split_once('=') {
+                Some(("address", value)) if address.is_none() => {
+                    address = Some(
+                        NativeEntryAddress::parse(
+                            &crate::viewer::decoded(value).ok_or_else(invalid)?,
+                        )
+                        .map_err(|_| invalid())?,
+                    );
+                }
+                Some(("peer", value)) if peer.is_none() => {
+                    peer = Some(
+                        crate::session_route::RetainedPeerAddress::parse(
+                            &crate::viewer::decoded(value).ok_or_else(invalid)?,
+                        )
+                        .map_err(|_| invalid())?,
+                    );
+                }
+                Some(("address" | "peer", _)) => return Err(invalid()),
+                _ => fields.push(field),
+            }
+        }
         let (selection, scope, machine) =
-            crate::overview::parse_session_home_scope(query, true).map_err(|_| invalid())?;
+            crate::overview::parse_session_home_scope(&fields.join("&"), true)
+                .map_err(|_| invalid())?;
+        if peer.is_some() && (address.is_none() || scope != CatalogReadScope::RetainedHistory) {
+            return Err(invalid());
+        }
         let key = selection.key.as_str();
         if !crate::session_route::identifier(key)
             || machine.is_some_and(|machine| machine != configured.key)
@@ -586,7 +614,9 @@ pub(super) fn home(
         let requested = selection
             .turns
             .iter()
-            .chain(selection.ids.iter().filter(|id| crate::model::is_ask(id)))
+            .chain(selection.ids.iter().filter(|id| {
+                crate::model::is_ask(id) || (address.is_some() && id.starts_with('r'))
+            }))
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -602,9 +632,35 @@ pub(super) fn home(
                 .iter()
                 .any(|field| field == "activity"),
         };
-        let component = match scope {
-            CatalogReadScope::Current => selected::preview_turns(&source, key, &requested, home),
-            CatalogReadScope::RetainedHistory => {
+        if address.is_some()
+            && (requested.len() != 1
+                || !selection.session_fields.is_empty()
+                || selection.ids.iter().any(|id| id != requested[0]))
+        {
+            return Err(invalid());
+        }
+        let component = match (scope, address.as_ref()) {
+            (CatalogReadScope::Current, Some(address)) => {
+                selected::addressed_preview(&source, key, address, home.expected)
+            }
+            (CatalogReadScope::Current, None) => {
+                selected::preview_turns(&source, key, &requested, home)
+            }
+            (CatalogReadScope::RetainedHistory, Some(address)) => {
+                selected::retained_addressed_preview(
+                    &source,
+                    key,
+                    address,
+                    home.expected,
+                    peer.as_ref().map(|peer| selected::PeerBinding {
+                        trace: &peer.trace,
+                        witness: &peer.witness,
+                    }),
+                    retained_provider,
+                )
+                .map(Some)
+            }
+            (CatalogReadScope::RetainedHistory, None) => {
                 let archive = super::ArchiveReader::new(&configured.options);
                 selected::retained_preview_turns(
                     &source,
@@ -618,6 +674,12 @@ pub(super) fn home(
         }
         .map_err(read_error)?
         .ok_or_else(not_found)?;
+        if let Some(address) = &address
+            && selected::render::turn_address(&component, &configured.key, key, requested[0])
+                != Some(json!(address))
+        {
+            return Err(read_error(ReadError::Restart));
+        }
         let previews = requested
             .into_iter()
             .filter_map(|id| {
@@ -632,12 +694,19 @@ pub(super) fn home(
                 if candidates.next().is_some() {
                     return None;
                 }
-                let text = crate::model::overview_text(
-                    &json!({"kind":"trace_prompt","block":record.address.block}),
-                    &record.native,
-                    None,
-                );
-                text.is_string().then_some((id, text))
+                let kinds: &[_] = if address.is_some() && id.starts_with('r') {
+                    &["received_cross", "received_agent", "received_down"]
+                } else {
+                    &["trace_prompt"]
+                };
+                kinds.iter().find_map(|kind| {
+                    let text = crate::model::overview_text(
+                        &json!({"kind":kind,"block":record.address.block}),
+                        &record.native,
+                        None,
+                    );
+                    text.is_string().then_some((id, text))
+                })
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let turns = selection
@@ -649,7 +718,8 @@ pub(super) fn home(
             .ids
             .iter()
             .filter_map(|id| {
-                crate::model::is_ask(id).then_some(())?;
+                (crate::model::is_ask(id) || (address.is_some() && id.starts_with('r')))
+                    .then_some(())?;
                 let brief = previews.get(id.as_str())?;
                 Some((
                     id.clone(),

@@ -26,11 +26,11 @@ pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
-    PeerBinding, retained_activity_anchor, retained_addressed_window, retained_annotations,
-    retained_latest_page, retained_page, retained_peer_launch_call, retained_peer_launch_in_view,
-    retained_peer_record_at, retained_peer_relay_address, retained_peer_relay_in_view,
-    retained_peer_trace_window, retained_peer_window, retained_preview_turns, retained_record_at,
-    retained_trace_send_window, retained_turn,
+    PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_addressed_window,
+    retained_annotations, retained_latest_page, retained_page, retained_peer_launch_call,
+    retained_peer_launch_in_view, retained_peer_record_at, retained_peer_relay_address,
+    retained_peer_relay_in_view, retained_peer_trace_window, retained_peer_window,
+    retained_preview_turns, retained_record_at, retained_trace_send_window, retained_turn,
 };
 
 const MEMBER_PAGE: i64 = 64;
@@ -808,7 +808,7 @@ pub(super) fn record_at(
         source,
         CatalogReadScope::Current,
         key,
-        Target::Address(address, None),
+        Target::Address(address, None, None),
         cursor,
     )
     .map(|component| component.and_then(|component| component.records.into_iter().next()))
@@ -826,7 +826,23 @@ pub(super) fn addressed_window(
         source,
         CatalogReadScope::Current,
         key,
-        Target::Address(address, Some(binding)),
+        Target::Address(address, Some(binding), None),
+        None,
+    )
+}
+
+pub(super) fn addressed_preview(
+    source: &Source<'_>,
+    key: &str,
+    address: &crate::session_route::NativeEntryAddress,
+    generation: &str,
+) -> Result<Option<Component>, ReadError> {
+    read(
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Address(&address.record, Some(&address.binding), Some(generation)),
         None,
     )
 }
@@ -1058,7 +1074,7 @@ pub(super) fn trace_record(
         source,
         CatalogReadScope::Current,
         key,
-        Target::Address(address, None),
+        Target::Address(address, None, None),
         None,
     )
 }
@@ -1363,7 +1379,7 @@ pub(super) struct HomeFields<'a> {
 
 enum Target<'a> {
     Page(usize, Direction),
-    Address(&'a Address, Option<&'a str>),
+    Address(&'a Address, Option<&'a str>, Option<&'a str>),
     Evidence(Evidence<'a>),
     Turns(&'a [&'a str], Option<HomeFields<'a>>),
     Annotations(AnnotationRequest<'a>),
@@ -1372,6 +1388,14 @@ enum Target<'a> {
 }
 
 impl Target<'_> {
+    fn expected_generation(&self) -> Option<&str> {
+        match *self {
+            Self::Turns(_, Some(home)) => Some(home.expected),
+            Self::Address(_, _, generation) => generation,
+            _ => None,
+        }
+    }
+
     fn capacity(&self) -> Result<usize, ReadError> {
         match *self {
             Self::Page(n @ 1..=100, _) => Ok(n + 1),
@@ -1412,7 +1436,7 @@ fn read_current(
             }
             direction
         }
-        Target::Address(_, Some(_)) => Direction::Reverse,
+        Target::Address(_, Some(_), _) => Direction::Reverse,
         _ => Direction::Forward,
     };
     let capacity = target.capacity()?;
@@ -1651,7 +1675,7 @@ fn read_current(
                 };
                 let (start, end, entry_block, entry_occurrence) = match target {
                     Target::Page(..) => (0, committed.offset, None, None),
-                    Target::Address(wanted, _)
+                    Target::Address(wanted, ..)
                         if member.reference.path == wanted.path
                             && wanted.offset < committed.offset =>
                     {
@@ -1764,7 +1788,7 @@ fn read_current(
                 };
                 let start = i64::try_from(start).map_err(index)?;
                 let end = i64::try_from(end).map_err(index)?;
-                let frontier = if let Target::Address(address, _) = target {
+                let frontier = if let Target::Address(address, ..) = target {
                     let Some(frontier) = address_frontier(db, direction, id, address)? else {
                         continue;
                     };
@@ -1811,7 +1835,7 @@ fn read_current(
     } else {
         None
     };
-    if let Target::Address(_, Some(expected)) = target
+    if let Target::Address(_, Some(expected), _) = target
         && expected != binding
     {
         return Err(ReadError::Restart);
@@ -1822,8 +1846,9 @@ fn read_current(
     let owner_identity = (owner, harness.clone(), native_id);
     let identity_witness =
         super::current_identity_witness(db, source, key, &owner_identity, &references)?;
-    if let Target::Turns(_, Some(home)) = target
-        && home.expected != identity_witness
+    if target
+        .expected_generation()
+        .is_some_and(|expected| expected != identity_witness)
     {
         return Err(ReadError::Restart);
     }
@@ -2160,7 +2185,7 @@ fn read_current(
         (cursor.is_none()
             && matches!(
                 target,
-                Target::Page(_, Direction::Reverse) | Target::Address(_, Some(_))
+                Target::Page(_, Direction::Reverse) | Target::Address(_, Some(_), None)
             ))
         .then(|| {
             super::selected_metadata(
@@ -2184,7 +2209,7 @@ fn read_current(
         identity_witness,
     );
     let next = after
-        .filter(|_| more || matches!(target, Target::Address(_, Some(_))))
+        .filter(|_| more || matches!(target, Target::Address(_, Some(_), _)))
         .map(|after| Cursor {
             direction,
             selection,

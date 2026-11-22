@@ -1,7 +1,7 @@
 //! Assemble selected Trace evidence from one committed warehouse view.
 use super::{CatalogReadScope, ReadError, Source, selected};
 use crate::SessionSourceReader;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -159,18 +159,29 @@ pub(super) fn read(
             "name":name,"harness":component.harness,"model":model,"state":status.unwrap_or("off"),"live_observation":status.is_some(),"start":first,"last":last,
             "tokens":tokens,"cost":cost,"busy":[],"wait_edges":[],"wait_edges_truncated":false,
     }});
+    let (end, last_turn) = recorded_end(&view, source, &component, record)?;
     let mut turns = vec![
         json!({"id":root,"sid":key,"start":start,"at":record.at,"u":!turn.handoff,
-        "sent":[],"end":{"st":"off","why":"unavailable"},"last":false}),
+        "sent":[],"end":end,"last":last_turn}),
     ];
     let mut sent = Vec::new();
+    let mut previews = json!({(key):component.identity.generation});
     let peer = (scope == CatalogReadScope::RetainedHistory).then_some(selected::PeerBinding {
         trace: key,
         witness: &component.identity.generation,
     });
+    let mut refusals = Vec::new();
     let relays = match peer {
-        Some(peer) => retained_relays(&view, source, &component, peer, record, provider)?,
-        None => current_relays(&view, source, &component, key, record)?,
+        Some(peer) => retained_relays(
+            &view,
+            source,
+            &component,
+            peer,
+            record,
+            provider,
+            &mut refusals,
+        )?,
+        None => current_relays(&view, source, &component, key, record, &mut refusals)?,
     };
     let mut ids = BTreeSet::from([root.to_owned()]);
     for receipt in relays {
@@ -181,11 +192,13 @@ pub(super) fn read(
             address,
             sent_at,
             received_at,
+            generation,
         } = receipt;
         if !ids.insert(turn.clone()) || target == key || target == "you" {
             continue;
         }
         participants.remove(&target);
+        previews[target.as_str()] = json!(generation);
         sessions[target.as_str()] = json!({
             "name":target,"harness":harness,"model":"","state":"off","start":received_at,"last":received_at,
             "tokens":[0,0,0],"cost":{"usd":null,"unpriced_models":[]},
@@ -193,7 +206,7 @@ pub(super) fn read(
         });
         handoffs.push(json!({
             "id":turn,"kind":"relay","from":key,"to":target,"at":sent_at,"status":"done",
-            "declined":false,"target_turn":turn,"source_turn":root,
+            "declined":false,"target_turn":turn,"source_turn":root,"brief_session":target,
         }));
         turns.push(json!({
             "id":turn,"sid":target,"start":turn,"at":received_at,"u":false,"sent":[],
@@ -205,15 +218,161 @@ pub(super) fn read(
         }));
         sent.push(turn);
     }
-    let previews_incomplete = !sent.is_empty();
+    let mut reported = BTreeSet::new();
+    for (id, target, at, reason) in refusals {
+        if target == key || target == "you" || !ids.insert(id.clone()) {
+            continue;
+        }
+        if sessions.get(&target).is_none() {
+            participants
+                .entry(target.clone())
+                .or_insert_with(|| json!(target));
+        }
+        if reported.insert(target.clone())
+            && !evidence
+                .iter()
+                .any(|row| row["catalog_key"] == target && row.get("turn").is_none())
+        {
+            evidence.push(
+                json!({"catalog_key":target,"reason":reason.chars().take(256).collect::<String>()}),
+            );
+        }
+        handoffs.push(
+            json!({"id":id,"kind":"relay","from":key,"to":target,"at":at,
+            "status":"off","declined":false,"source_turn":root}),
+        );
+        sent.push(id);
+    }
+    let previews_incomplete = !reported.is_empty();
     turns[0]["sent"] = json!(sent);
     Ok(Some(json!({
         "api":1,"projection":7,"source_key":source_key,"catalog_key":key,"root":root,
         "generation":component.identity.generation,"identity":component.identity,
         "sessions":sessions,"participants":participants,"handoffs":handoffs,"turns":turns,
-        "frontier":[],"evidence":evidence,"previews":{(key):component.identity.generation},
+        "frontier":[],"evidence":evidence,"previews":previews,
         "incomplete":true,"previews_incomplete":previews_incomplete,
     })))
+}
+
+fn recorded_end(
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    component: &selected::Component,
+    root: &selected::Record,
+) -> Result<(Value, bool), ReadError> {
+    let unavailable = || json!({"st":"off","why":"unavailable"});
+    // A Codex terminal fact names the same native turn as a reducer-qualified
+    // start. Stop at the next human turn so a later task cannot close this one.
+    if component.harness != "codex" || component.member_count != 1 || root.prompt_anchor.is_none() {
+        return Ok((unavailable(), false));
+    }
+    let carrier = source.options.codex_home.join(&root.address.path);
+    let tx = view.lock()?;
+    let (start, limit) = (
+        i64::try_from(root.address.offset).map_err(super::index)?,
+        i64::try_from(root.reference.offset).map_err(super::index)?,
+    );
+    let source_id = if component.identity.read_scope == CatalogReadScope::RetainedHistory {
+        let identity = crate::events::store::warehouse::retained_identity(
+            &tx,
+            &source.namespace,
+            &component.identity.catalog_key,
+        )
+        .map_err(super::retained_error)?;
+        identity.owner
+    } else {
+        let Some((owner, _, _)) =
+            super::current_identity(&tx, source, &component.identity.catalog_key, None)?
+        else {
+            return Ok((unavailable(), false));
+        };
+        owner
+    };
+    let next: Option<i64> = tx.query_row(
+        "SELECT min(pos) FROM fact_prompt WHERE source=?1 AND pos>?2 AND pos<?3 AND kind IN ('user','ask')",
+        params![source_id, start, limit], |row| row.get(0),
+    ).map_err(super::index)?;
+    let last = next.is_none();
+    let owned_turn = tx
+        .query_row(
+            "WITH boundary AS (
+           SELECT coalesce(max(pos),-1) AS at FROM fact_prompt
+           WHERE source=?1 AND pos<?2 AND kind IN ('user','ask')
+         ), active AS (
+           SELECT t.turn_id,t.pos FROM boundary b
+           CROSS JOIN fact_codex_turn t ON t.source=?1 AND t.pos>b.at AND t.pos<?3
+             AND t.thread_id=?4 AND t.phase='active'
+           WHERE NOT EXISTS (SELECT 1 FROM fact_codex_turn earlier
+              WHERE earlier.source=t.source AND earlier.turn_id=t.turn_id
+                AND earlier.pos>t.pos AND earlier.pos<?2 AND earlier.phase<>'active')
+           ORDER BY (t.pos>?2), CASE WHEN t.pos<=?2 THEN -t.pos ELSE t.pos END LIMIT 1
+         ), stop AS (
+           SELECT coalesce(min(t.pos),?3) AS pos FROM active a
+           CROSS JOIN fact_codex_turn t ON t.source=?1 AND t.pos>a.pos AND t.pos<?3
+             AND t.thread_id=?4 AND t.phase='active'
+         )
+         SELECT a.turn_id,t.phase,r.ts FROM active a CROSS JOIN stop
+         LEFT JOIN fact_codex_turn t ON t.source=?1 AND t.turn_id=a.turn_id AND t.thread_id=?4
+           AND t.pos>a.pos AND t.pos>=?2 AND t.pos<stop.pos AND t.phase<>'active'
+         LEFT JOIN fact_record r ON r.source=t.source AND r.pos=t.pos AND r.block=0 AND NOT r.gap
+         WHERE stop.pos>?2
+         ORDER BY t.pos LIMIT 1",
+            params![
+                source_id,
+                start,
+                next.unwrap_or(limit),
+                root.reference.native_id
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(super::index)?;
+    let end = match owned_turn {
+        Some((_, Some(phase), at)) => {
+            let (state, reason) = match phase.as_str() {
+                "completed" => ("done", "completed"),
+                "aborted" => ("off", "interrupted"),
+                "errored" => ("err", "failed"),
+                _ => return Ok((unavailable(), last)),
+            };
+            json!({"st":state,"why":reason,"at":at})
+        }
+        Some((native_turn, None, _))
+            if last && component.identity.read_scope == CatalogReadScope::Current =>
+        {
+            let ledger = tx
+                .query_row(
+                    "SELECT ledger FROM warehouse_source WHERE source=?1",
+                    [source_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(super::index)?;
+            let ledger = serde_json::from_str(&ledger).map_err(super::index)?;
+            let lifecycle = crate::events::store::committed_codex_lifecycle(
+                &tx,
+                carrier.to_str().ok_or(ReadError::Restart)?,
+                &ledger,
+                &root.reference.native_id,
+            )
+            .map_err(super::index)?;
+            if lifecycle.is_some_and(|turn| {
+                turn.turn_id == native_turn && turn.phase == crate::TurnPhase::Active
+            }) && super::selected_runtime_status(&tx, source, source_id)? == Some("work")
+            {
+                json!({"st":"work","why":"working"})
+            } else {
+                unavailable()
+            }
+        }
+        _ => unavailable(),
+    };
+    Ok((end, last))
 }
 
 struct Relay {
@@ -223,6 +382,93 @@ struct Relay {
     address: Value,
     sent_at: i64,
     received_at: i64,
+    generation: String,
+}
+
+struct Send {
+    address: selected::Address,
+    block: u32,
+    recipient: String,
+    at: i64,
+}
+
+fn relay_sends(
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    component: &selected::Component,
+    root: &selected::Record,
+    retained: Option<i64>,
+) -> Result<Vec<Send>, ReadError> {
+    let Some(harness) = crate::InputRoot::parse(&component.harness) else {
+        return Ok(Vec::new());
+    };
+    let tx = view.lock()?;
+    let mut query = tx
+        .prepare_cached(
+            "WITH member AS (
+           SELECT m.source FROM warehouse_identity_member m
+           WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
+           UNION ALL
+           SELECT w.source FROM warehouse_current w
+           CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?3
+           WHERE ?1 IS NULL AND w.path=?2
+         )
+         SELECT s.pos,r.occurrence,s.block,s.target,s.ts FROM member m
+         CROSS JOIN fact_relay_send s ON s.source=m.source AND s.pos>=?4 AND s.pos<?5
+         CROSS JOIN fact_record r ON r.source=s.source AND r.pos=s.pos AND r.block=0 AND NOT r.gap
+         WHERE s.ts>=?6 ORDER BY s.pos,s.block,s.occurrence LIMIT 16",
+        )
+        .map_err(super::index)?;
+    let mut sends = Vec::new();
+    for member in &component.identity.source_refs {
+        let reference = &member.source;
+        let same = reference.path == root.address.path;
+        let start = if same {
+            i64::try_from(root.address.offset).map_err(super::index)?
+        } else {
+            0
+        };
+        let since = if same {
+            i64::MIN
+        } else {
+            root.at.unwrap_or(i64::MIN)
+        };
+        let carrier = harness.home(source.options).join(&reference.path);
+        let mut rows = query
+            .query(params![
+                retained,
+                carrier.to_str(),
+                source.namespace.binding(),
+                start,
+                i64::try_from(reference.offset).map_err(super::index)?,
+                since
+            ])
+            .map_err(super::index)?;
+        while let Some(row) = rows.next().map_err(super::index)? {
+            sends.push(Send {
+                address: selected::Address {
+                    path: reference.path.clone(),
+                    offset: u64::try_from(row.get::<_, i64>(0).map_err(super::index)?)
+                        .map_err(super::index)?,
+                    block: 0,
+                    occurrence: row.get(1).map_err(super::index)?,
+                },
+                block: row.get(2).map_err(super::index)?,
+                recipient: row.get(3).map_err(super::index)?,
+                at: row.get(4).map_err(super::index)?,
+            });
+        }
+        sends.sort_by(|a, b| {
+            (a.at, &a.address.path, a.address.offset, a.block).cmp(&(
+                b.at,
+                &b.address.path,
+                b.address.offset,
+                b.block,
+            ))
+        });
+        sends.truncate(16);
+    }
+    Ok(sends)
 }
 
 fn retained_relays(
@@ -232,57 +478,28 @@ fn retained_relays(
     peer: selected::PeerBinding<'_>,
     root: &selected::Record,
     provider: Option<&dyn SessionSourceReader>,
+    refusals: &mut Vec<(String, String, i64, String)>,
 ) -> Result<Vec<Relay>, ReadError> {
-    let tx = view.lock()?;
-    let identity =
-        crate::events::store::warehouse::retained_identity(&tx, &source.namespace, peer.trace)
-            .map_err(super::retained_error)?;
-    let observed = identity.observed_peers().map_err(super::index)?;
-    let Some(harness) = crate::InputRoot::parse(&component.harness) else {
-        return Ok(Vec::new());
+    let (binding, observed) = {
+        let tx = view.lock()?;
+        let identity =
+            crate::events::store::warehouse::retained_identity(&tx, &source.namespace, peer.trace)
+                .map_err(super::retained_error)?;
+        (
+            identity.binding,
+            identity.observed_peers().map_err(super::index)?,
+        )
     };
-    let path = harness.home(source.options).join(&root.address.path);
-    let mut query = tx
-        .prepare_cached(
-            "SELECT s.pos,r.occurrence,s.block,s.target,s.ts FROM warehouse_identity_member m
-         CROSS JOIN fact_relay_send s ON s.source=m.source AND s.pos>=?3
-         CROSS JOIN fact_record r ON r.source=s.source AND r.pos=s.pos AND r.block=0 AND NOT r.gap
-         WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
-           AND s.pos<json_extract(m.receipt,'$.offset') AND s.ts IS NOT NULL
-         ORDER BY s.pos,s.block,s.occurrence LIMIT 16",
-        )
-        .map_err(super::index)?;
-    let sends = query
-        .query_map(
-            params![
-                identity.binding,
-                path.to_str(),
-                i64::try_from(root.address.offset).map_err(super::index)?
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, u32>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .map_err(super::index)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(super::index)?;
-    drop(query);
-    drop(tx);
+    let sends = relay_sends(view, source, component, root, Some(binding))?;
     let mut relays = Vec::new();
     let mut attempts = 0;
-    for (offset, occurrence, block, recipient, sent_at) in sends {
-        let send = selected::Address {
-            path: root.address.path.clone(),
-            offset: u64::try_from(offset).map_err(super::index)?,
-            block: 0,
-            occurrence,
-        };
+    for Send {
+        address: send,
+        block,
+        recipient,
+        at: sent_at,
+    } in sends
+    {
         let window = selected::retained_trace_send_window(
             view,
             source,
@@ -303,15 +520,25 @@ fn retained_relays(
             .as_ref()
             .and_then(|row| row["parent"].as_str());
         let mut found = None;
-        for (key, observation) in observed.iter().filter(|(key, observation)| {
-            if recipient == "main" {
-                parent == Some(key.as_str())
-            } else {
-                recipient == observation.native_id || recipient == key.as_str()
-            }
-        }) {
+        let mut candidates = observed
+            .iter()
+            .filter(|(key, observation)| {
+                if recipient == "main" {
+                    parent == Some(key.as_str())
+                } else {
+                    recipient == observation.native_id || recipient == key.as_str()
+                }
+            })
+            .peekable();
+        let target = candidates.peek().map(|(key, _)| key.as_str());
+        let mut reason = "No certified peer receipt could be matched to this relay.".to_string();
+        for (key, observation) in candidates {
             if attempts == 32 {
-                return Ok(relays);
+                reason =
+                    "The certified peer receipt could not be checked within this Trace request."
+                        .into();
+                found = None;
+                break;
             }
             attempts += 1;
             let (address, turn) = match selected::retained_peer_relay_in_view(
@@ -324,7 +551,14 @@ fn retained_relays(
                 provider,
             ) {
                 Ok(receipt) => receipt,
-                Err(ReadError::PeerUnavailable(_) | ReadError::RetainedPreparing) => continue,
+                Err(
+                    error @ (ReadError::PeerUnavailable(_)
+                    | ReadError::RetainedPreparing
+                    | ReadError::RetainedUnavailable),
+                ) => {
+                    reason = error.to_string();
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             let window = match selected::retained_peer_trace_window(
@@ -337,11 +571,14 @@ fn retained_relays(
             ) {
                 Ok(window) => window,
                 Err(
-                    ReadError::PeerUnavailable(_)
+                    error @ (ReadError::PeerUnavailable(_)
                     | ReadError::RetainedPreparing
                     | ReadError::RetainedUnavailable
-                    | ReadError::Restart,
-                ) => continue,
+                    | ReadError::Restart),
+                ) => {
+                    reason = error.to_string();
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             let Some(received_at) = window
@@ -355,9 +592,11 @@ fn retained_relays(
             if selected::render::turn_address(&window, source.namespace.as_str(), key, &turn)
                 != Some(json!(address))
             {
+                reason = "The certified receipt has no matching rendered entry.".into();
                 continue;
             }
             if found.is_some() {
+                reason = "More than one certified peer receipt matches this relay.".into();
                 found = None;
                 break;
             }
@@ -368,9 +607,26 @@ fn retained_relays(
                 address: json!(address),
                 sent_at,
                 received_at,
+                generation: window.identity.generation,
             });
         }
-        relays.extend(found);
+        if let Some(accepted) = found {
+            relays.push(accepted);
+        } else {
+            let target = target.or_else(|| (recipient == "main").then_some(parent).flatten());
+            let label = target.unwrap_or(&recipient);
+            if crate::session_route::identifier(label) {
+                if target.is_none() {
+                    reason = "The recipient is absent from the original certified peer set.".into();
+                }
+                refusals.push((
+                    refused_relay_id(&send, block),
+                    label.into(),
+                    sent_at,
+                    reason,
+                ));
+            }
+        }
     }
     Ok(relays)
 }
@@ -381,50 +637,17 @@ fn current_relays(
     component: &selected::Component,
     key: &str,
     root: &selected::Record,
+    refusals: &mut Vec<(String, String, i64, String)>,
 ) -> Result<Vec<Relay>, ReadError> {
-    let Some(harness) = crate::InputRoot::parse(&component.harness) else {
-        return Ok(Vec::new());
-    };
-    let carrier = harness.home(source.options).join(&root.address.path);
-    let sends = {
-        let tx = view.lock()?;
-        let mut query = tx.prepare_cached(
-            "SELECT s.pos,r.occurrence,s.block,s.ts FROM warehouse_current w
-             CROSS JOIN warehouse_source ws ON ws.source=w.source AND ws.origin=?2
-             CROSS JOIN fact_relay_send s ON s.source=w.source AND s.pos>=?3
-             CROSS JOIN fact_record r ON r.source=s.source AND r.pos=s.pos AND r.block=0 AND NOT r.gap
-             WHERE w.path=?1 AND s.pos<?4 AND s.ts IS NOT NULL
-             ORDER BY s.pos,s.block,s.occurrence LIMIT 16",
-        ).map_err(super::index)?;
-        query
-            .query_map(
-                params![
-                    carrier.to_str(),
-                    source.namespace.binding(),
-                    i64::try_from(root.address.offset).map_err(super::index)?,
-                    i64::try_from(root.reference.offset).map_err(super::index)?
-                ],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .map_err(super::index)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(super::index)?
-    };
+    let sends = relay_sends(view, source, component, root, None)?;
     let mut out = Vec::new();
-    for (offset, occurrence, block, sent_at) in sends {
-        let mut call = selected::Address {
-            path: root.address.path.clone(),
-            offset: u64::try_from(offset).map_err(super::index)?,
-            block: 0,
-            occurrence,
-        };
+    for Send {
+        address: mut call,
+        block,
+        at: sent_at,
+        recipient,
+    } in sends
+    {
         let Some(window) = selected::trace_record(view, source, key, &call)? else {
             continue;
         };
@@ -436,101 +659,130 @@ fn current_relays(
             continue;
         }
         call.block = block;
-        let Some(results) = selected::trace_results(view, source, key, &call)? else {
-            continue;
-        };
-        let receipts = results
-            .records
-            .into_iter()
-            .flat_map(|record| record.relay_receipts)
-            .map(|receipt| (receipt.path, receipt.offset))
-            .collect::<BTreeSet<_>>();
-        if receipts.len() != 1 {
-            continue;
-        }
-        let Some((carrier, offset)) = receipts.into_iter().next() else {
-            continue;
-        };
-        let hit = {
-            let tx = view.lock()?;
-            let mut query = tx.prepare_cached(
+        let mut reason = "No receipt could be matched to this relay in the selected prefixes.";
+        let mut read = || -> Result<Option<Relay>, ReadError> {
+            let Some(results) = selected::trace_results(view, source, key, &call)? else {
+                return Ok(None);
+            };
+            let receipts = results
+                .records
+                .into_iter()
+                .flat_map(|record| record.relay_receipts)
+                .map(|receipt| (receipt.path, receipt.offset, receipt.block))
+                .collect::<BTreeSet<_>>();
+            let (carrier, offset, _) = match receipts.len() {
+                0 => return Ok(None),
+                1 => receipts.into_iter().next().expect("one receipt"),
+                _ => {
+                    reason = "More than one receipt matches this relay in the selected prefixes.";
+                    return Ok(None);
+                }
+            };
+            reason = "The matched relay receipt has no qualified transcript entry.";
+            let hit = {
+                let tx = view.lock()?;
+                let mut query = tx.prepare_cached(
                 "SELECT b.owner,s.harness,r.occurrence FROM warehouse_current w
                  CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?2
                  CROSS JOIN bridge_session_owner b ON b.source=w.source
                  CROSS JOIN fact_record r ON r.source=w.source AND r.pos=?3 AND r.block=0 AND NOT r.gap
                  WHERE w.path=?1 AND r.pos<json_extract(s.ledger,'$.offset') LIMIT 2",
             ).map_err(super::index)?;
-            let mut rows = query
-                .query(params![
-                    carrier,
-                    source.namespace.binding(),
-                    i64::try_from(offset).map_err(super::index)?
-                ])
-                .map_err(super::index)?;
-            let Some(row) = rows.next().map_err(super::index)? else {
-                continue;
+                let mut rows = query
+                    .query(params![
+                        carrier,
+                        source.namespace.binding(),
+                        i64::try_from(offset).map_err(super::index)?
+                    ])
+                    .map_err(super::index)?;
+                let Some(row) = rows.next().map_err(super::index)? else {
+                    return Ok(None);
+                };
+                let owner: i64 = row.get(0).map_err(super::index)?;
+                let harness: String = row.get(1).map_err(super::index)?;
+                let occurrence = row.get(2).map_err(super::index)?;
+                if rows.next().map_err(super::index)?.is_some() {
+                    return Ok(None);
+                }
+                let Some((_, target, _)) =
+                    super::relative_keys(&tx, &super::encode(&[owner])?)?.pop()
+                else {
+                    return Ok(None);
+                };
+                (target, harness, occurrence)
             };
-            let owner: i64 = row.get(0).map_err(super::index)?;
-            let harness: String = row.get(1).map_err(super::index)?;
-            let occurrence = row.get(2).map_err(super::index)?;
-            if rows.next().map_err(super::index)?.is_some() {
-                continue;
+            let (target, harness, occurrence) = hit;
+            if target == key {
+                return Ok(None);
             }
-            let Some((_, target, _)) = super::relative_keys(&tx, &super::encode(&[owner])?)?.pop()
-            else {
-                continue;
+            let Some(path) = selected::relative(source.options, &harness, &carrier) else {
+                return Ok(None);
             };
-            (target, harness, occurrence)
+            let native = selected::Address {
+                path: path.into(),
+                offset,
+                block: 0,
+                occurrence,
+            };
+            let Some(window) = selected::trace_record(view, source, &target, &native)? else {
+                return Ok(None);
+            };
+            let Some(record) = window
+                .records
+                .iter()
+                .find(|record| record.address == native)
+            else {
+                return Ok(None);
+            };
+            let Some(turn) =
+                record.causal.turn.as_ref().filter(|turn| {
+                    turn.handoff && turn.address == native && turn.id.starts_with('r')
+                })
+            else {
+                return Ok(None);
+            };
+            let Some(address) = selected::render::turn_address(
+                &window,
+                source.namespace.as_str(),
+                &target,
+                &turn.id,
+            ) else {
+                return Ok(None);
+            };
+            let Some(received_at) = record.at else {
+                return Ok(None);
+            };
+            Ok(Some(Relay {
+                key: target,
+                harness,
+                turn: turn.id.clone(),
+                address,
+                sent_at,
+                received_at,
+                generation: window.identity.generation,
+            }))
         };
-        let (target, harness, occurrence) = hit;
-        if target == key {
-            continue;
+        match read()? {
+            Some(relay) => out.push(relay),
+            None if crate::session_route::identifier(&recipient) => {
+                refusals.push((
+                    refused_relay_id(&call, block),
+                    recipient,
+                    sent_at,
+                    reason.into(),
+                ));
+            }
+            None => (),
         }
-        let Some(path) = selected::relative(source.options, &harness, &carrier) else {
-            continue;
-        };
-        let native = selected::Address {
-            path: path.into(),
-            offset,
-            block: 0,
-            occurrence,
-        };
-        let Some(window) = selected::trace_record(view, source, &target, &native)? else {
-            continue;
-        };
-        let Some(record) = window
-            .records
-            .iter()
-            .find(|record| record.address == native)
-        else {
-            continue;
-        };
-        let Some(turn) = record
-            .causal
-            .turn
-            .as_ref()
-            .filter(|turn| turn.handoff && turn.address == native && turn.id.starts_with('r'))
-        else {
-            continue;
-        };
-        let Some(address) =
-            selected::render::turn_address(&window, source.namespace.as_str(), &target, &turn.id)
-        else {
-            continue;
-        };
-        let Some(received_at) = record.at else {
-            continue;
-        };
-        out.push(Relay {
-            key: target,
-            harness,
-            turn: turn.id.clone(),
-            address,
-            sent_at,
-            received_at,
-        });
     }
     Ok(out)
+}
+
+fn refused_relay_id(address: &selected::Address, block: u32) -> String {
+    crate::model::legacy_relay_turn_id(&format!(
+        "unavailable:{}:{}:{block}",
+        address.path, address.offset
+    ))
 }
 
 fn current_launch_evidence(
