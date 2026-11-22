@@ -149,9 +149,16 @@ fn list_item(
         })
         .and_then(|id| annotations.get(&row.harness, id));
     let status = row.recorded_status();
+    let title = if row.native_title || row.kind == "subagent" {
+        row.title.as_str()
+    } else {
+        annotation
+            .and_then(|annotation| annotation.title.as_deref())
+            .unwrap_or(&row.title)
+    };
     let mut item = json!({
         "lifecycle":"current",
-        "key":row.position.key,"name":row.title,"harness":row.harness,
+        "key":row.position.key,"name":title,"harness":row.harness,
         "kind":row.kind,"presentation_kind":row.presentation_kind,
         "native_ids":row.native_ids,"parent":row.parent,"parent_source":row.parent_source,
         "repo":row.repo,"branch":row.branch,"model":row.model,"effort":row.effort,

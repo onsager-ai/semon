@@ -818,9 +818,15 @@ pub(crate) fn session_causal_trace_with_gate(
         return reply;
     }
     let read = || -> Result<Value, u16> {
-        let identity = crate::session_catalog_history_identity(options, source_key, &key)
-            .map_err(|_| 503u16)?
-            .ok_or(404u16)?;
+        let identity = crate::catalog::catalog_identity(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            false,
+        )
+        .map_err(|_| 503u16)?
+        .ok_or(404u16)?;
         // One bounded status capture for every peer, using the Catalog owner's
         // source/facts/PID/runtime qualification. These are observations only.
         let runtime_generation = crate::native_evidence::query_runtime_generation(options).ok();

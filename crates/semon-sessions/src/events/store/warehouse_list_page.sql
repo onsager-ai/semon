@@ -7,7 +7,7 @@
   ORDER BY last DESC,id LIMIT ?10
 )
 SELECT id,owner,harness,last,title,model,repo,branch,NULL AS total,
-       prompt_pos,owner_path,owner_ledger,native_id,agent_path,is_child,start,lineage,guardian,effort FROM page
+       prompt_pos,owner_path,owner_ledger,native_id,agent_path,is_child,start,lineage,guardian,effort,native_title FROM page
 UNION ALL
-SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,count(*),NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL FROM filtered
+SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,count(*),NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL FROM filtered
 ORDER BY last DESC,id

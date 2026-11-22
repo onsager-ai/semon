@@ -581,11 +581,15 @@ fn session_home_details_with_selection(
         turns,
     } = selection;
     let read = || -> io::Result<Value> {
-        let identity = crate::session_catalog_history_identity(options, source_key, &key)
-            .map_err(failed)?
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "Recorded session unavailable")
-            })?;
+        let identity = crate::catalog::catalog_identity(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            false,
+        )
+        .map_err(failed)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Recorded session unavailable"))?;
         let mut db = Connection::open_with_flags(
             EventCache::path(&options.cache),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -787,8 +791,14 @@ fn session_home_details_with_selection(
                 Ok(())
             },
         )?;
-        let after =
-            crate::session_catalog_history_identity(options, source_key, &key).map_err(failed)?;
+        let after = crate::catalog::catalog_identity(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            false,
+        )
+        .map_err(failed)?;
         if after
             .as_ref()
             .is_none_or(|after| after.generation != generation)

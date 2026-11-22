@@ -378,6 +378,7 @@ pub(super) struct Row {
     pub(super) harness: String,
     pub(super) title: String,
     prompt_title: Option<PromptTitle>,
+    native_title: bool,
     pub(super) model: String,
     effort: Option<String>,
     repo: Option<String>,
@@ -1397,6 +1398,7 @@ fn read_row(
         harness: record.get(2).map_err(index)?,
         title: record.get(4).map_err(index)?,
         prompt_title: None,
+        native_title: record.get(19).map_err(index)?,
         model: record.get(5).map_err(index)?,
         effort: record.get(18).map_err(index)?,
         repo: record.get(6).map_err(index)?,
@@ -1428,9 +1430,11 @@ fn read_row(
         _ => None,
     };
     if guardian {
+        row.native_title = true;
         row.title = "Approval review".into();
     }
     if row.harness == "codex" && record.get::<_, bool>(14).map_err(index)? {
+        row.native_title = true;
         let task: Option<String> = record.get(13).map_err(index)?;
         let prompt: Option<i64> = record.get(9).map_err(index)?;
         if let Some(offset) = prompt.filter(|_| native_titles) {

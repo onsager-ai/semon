@@ -1076,15 +1076,6 @@ fn next_check(started: Instant, built_at: Option<Instant>) -> Instant {
 }
 
 impl MachineView {
-    /// A view over the agent homes, `/proc` and cache that `options` name,
-    /// refreshed before each read until [`MachineView::set_refresh`], and
-    /// checked in the background by [`RefreshPool::shared`] until
-    /// [`MachineView::set_pool`]. Nothing is read until the first request.
-    #[cfg(test)]
-    pub(crate) fn new(options: Options) -> Arc<Self> {
-        Self::from_evidence(NativeEvidence::new(options))
-    }
-
     pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
         Self::from_evidence(NativeEvidence::for_source_key(key, options))
     }
@@ -2016,10 +2007,15 @@ mod tests {
             )
         }
 
+        fn open_index(&self) -> EventCache {
+            crate::storage::sqlite::open_index(&self.options, &crate::storage::Namespace::local())
+                .unwrap()
+        }
+
         /// A view with a refresh pool of its own, so that tests running
         /// side by side don't share workers unless they mean to.
         fn viewer(&self) -> Arc<MachineView> {
-            let view = MachineView::new(self.options.clone());
+            let view = MachineView::for_source_key("", self.options.clone());
             view.set_pool(RefreshPool::new(2));
             view
         }
@@ -2813,7 +2809,7 @@ mod tests {
         );
         model::observe_catalog(
             &fixture.options,
-            &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
+            &mut fixture.open_index(),
             &mut false,
             &mut model::Texts::default(),
             model::now_ms(),
@@ -3250,7 +3246,7 @@ mod tests {
         } else {
             let reply = crate::session_transcript_range(
                 viewer.options(),
-                "fixture",
+                "local",
                 "sid=lane&limit=32",
                 None,
             );
@@ -3766,7 +3762,7 @@ mod tests {
     fn native_image_entries(core: &MachineView, sid: &str) -> (String, Vec<Value>) {
         model::observe_catalog(
             core.options(),
-            &mut EventCache::open_scoped(&core.options().cache).unwrap(),
+            &mut core.evidence.open_index().unwrap(),
             &mut false,
             &mut model::Texts::default(),
             model::now_ms(),
@@ -4134,14 +4130,14 @@ mod tests {
         );
         let selected = body_of(&crate::session_catalog_page(
             &fixture.options,
-            "fixture",
+            "local",
             "sid=counted",
         ));
         assert_eq!(selected["items"][0]["details"], *details);
         let annotations = crate::session_annotations(
             &fixture.options,
-            "fixture",
-            "sid=counted&kind=errors&limit=100&scope=retained_history",
+            "local",
+            "sid=counted&kind=errors&limit=100",
         );
         assert_eq!(annotations.status, 200);
         assert_eq!(body_of(&annotations)["total"], details["errors"]);
@@ -4191,8 +4187,8 @@ mod tests {
         ]);
         let view = fixture.viewer();
         publish_native(&view);
-        let read = |query: &str| crate::session_annotations(&fixture.options, "fixture", query);
-        let reply = read("sid=signals&kind=signals&limit=100&scope=retained_history");
+        let read = |query: &str| crate::session_annotations(&fixture.options, "local", query);
+        let reply = read("sid=signals&kind=signals&limit=100");
         assert_eq!(reply.status, 200);
         let body = body_of(&reply);
         assert_eq!(body["total"], 1);
@@ -4201,8 +4197,8 @@ mod tests {
         let address = percent_encode(&expected.to_string());
         let page = crate::session_transcript_range(
             &fixture.options,
-            "fixture",
-            &format!("sid=signals&scope=retained_history&address={address}"),
+            "local",
+            &format!("sid=signals&address={address}"),
             None,
         );
         assert_eq!(page.status, 200);
@@ -4215,14 +4211,14 @@ mod tests {
         );
         let generation = body["generation"].as_str().unwrap();
         let cached = read(&format!(
-            "sid=signals&kind=signals&limit=100&generation={generation}&scope=retained_history"
+            "sid=signals&kind=signals&limit=100&generation={generation}"
         ));
         assert_eq!(cached.status, 200);
         assert_eq!(body_of(&cached), body);
         for query in [
-            "sid=signals&kind=unknown&scope=retained_history",
-            "sid=signals&kind=signals&limit=0&scope=retained_history",
-            "sid=signals&kind=signals&after=1&scope=retained_history",
+            "sid=signals&kind=unknown",
+            "sid=signals&kind=signals&limit=0",
+            "sid=signals&kind=signals&after=1",
         ] {
             assert_eq!(read(query).status, 400);
         }
@@ -4235,8 +4231,8 @@ mod tests {
         publish_native(&view);
         let reply = crate::session_annotations(
             &fixture.options,
-            "fixture",
-            "sid=faults&kind=errors&limit=100&scope=retained_history",
+            "local",
+            "sid=faults&kind=errors&limit=100",
         );
         assert_eq!(reply.status, 200);
         let annotations = body_of(&reply);
@@ -4252,10 +4248,10 @@ mod tests {
             .map(|row| row["address"].clone())
             .collect();
         let mut failed = Vec::new();
-        let mut query = "sid=faults&scope=retained_history&limit=32".to_owned();
+        let mut query = "sid=faults&limit=32".to_owned();
         let mut pages = 0;
         loop {
-            let reply = crate::session_transcript_range(&fixture.options, "fixture", &query, None);
+            let reply = crate::session_transcript_range(&fixture.options, "local", &query, None);
             assert_eq!(reply.status, 200);
             let page = body_of(&reply);
             pages += 1;
@@ -4272,10 +4268,7 @@ mod tests {
             let Some(cursor) = page["earlier_cursor"].as_str() else {
                 break;
             };
-            query = format!(
-                "sid=faults&scope=retained_history&limit=32&cursor={}",
-                percent_encode(cursor)
-            );
+            query = format!("sid=faults&limit=32&cursor={}", percent_encode(cursor));
         }
         failed.reverse();
         assert_eq!(addresses, failed);
@@ -4285,8 +4278,8 @@ mod tests {
             let address = percent_encode(&expected.to_string());
             let reply = crate::session_transcript_range(
                 &fixture.options,
-                "fixture",
-                &format!("sid=faults&scope=retained_history&address={address}"),
+                "local",
+                &format!("sid=faults&address={address}"),
                 None,
             );
             assert_eq!(reply.status, 200);
@@ -4310,27 +4303,23 @@ mod tests {
         let view = fixture.viewer();
         publish_native(&view);
         for query in [
-            "kind=errors&scope=retained_history",
+            "kind=errors",
             "sid=faults&kind=",
-            "sid=faults&kind=unknown&scope=retained_history",
-            "sid=faults&kind=errors&after=3&scope=retained_history",
-            "sid=%zz&kind=errors&scope=retained_history",
-            "sid=faults&kind=errors&generation=%zz&scope=retained_history",
-            "sid=faults&kind=errors&limit=101&scope=retained_history",
+            "sid=faults&kind=unknown",
+            "sid=faults&kind=errors&after=3",
+            "sid=%zz&kind=errors",
+            "sid=faults&kind=errors&generation=%zz",
+            "sid=faults&kind=errors&limit=101",
         ] {
-            let reply = crate::session_annotations(&fixture.options, "fixture", query);
+            let reply = crate::session_annotations(&fixture.options, "local", query);
             assert_eq!((reply.status, reply.etag), (400, None), "{query}");
         }
-        let first = crate::session_annotations(
-            &fixture.options,
-            "fixture",
-            "sid=faults&kind=errors&scope=retained_history",
-        );
+        let first = crate::session_annotations(&fixture.options, "local", "sid=faults&kind=errors");
         assert_eq!(first.status, 200);
         let generation = body_of(&first)["generation"].as_str().unwrap().to_owned();
         let missing = crate::session_annotations(
             &fixture.options,
-            "fixture",
+            "local",
             &format!("sid=nobody&kind=errors&generation={generation}"),
         );
         assert_eq!(missing.status, 404);
@@ -4345,8 +4334,8 @@ mod tests {
         let read = || {
             let reply = crate::session_annotations(
                 &fixture.options,
-                "fixture",
-                "sid=faults&kind=errors&limit=100&scope=retained_history",
+                "local",
+                "sid=faults&kind=errors&limit=100",
             );
             assert_eq!(reply.status, 200);
             body_of(&reply)
@@ -4371,16 +4360,20 @@ mod tests {
         assert_eq!(moved["total"], 6);
         let rows = moved["entries"].as_array().unwrap();
         assert_eq!(rows.len(), 6);
+        let address = percent_encode(&rows[5]["address"].to_string());
         let latest = crate::session_transcript_range(
             &fixture.options,
-            "fixture",
-            "sid=faults&scope=retained_history&limit=1",
+            "local",
+            &format!("sid=faults&address={address}"),
             None,
         );
         assert_eq!(latest.status, 200);
-        assert_eq!(
-            rows[5]["address"],
-            body_of(&latest)["entries"][0]["address"]
+        assert!(
+            body_of(&latest)["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["address"] == rows[5]["address"] && entry["ok"] == false })
         );
         assert_eq!(
             native_selected(&view, "faults")["session"]["details"]["errors"],
@@ -4388,10 +4381,8 @@ mod tests {
         );
         let stale = crate::session_annotations(
             &fixture.options,
-            "fixture",
-            &format!(
-                "sid=faults&kind=errors&limit=100&generation={generation}&scope=retained_history"
-            ),
+            "local",
+            &format!("sid=faults&kind=errors&limit=100&generation={generation}"),
         );
         assert_eq!(stale.status, 409);
     }
@@ -4403,12 +4394,12 @@ mod tests {
         let view = fixture.viewer();
         publish_native(&view);
         let read = |query: &str| {
-            let reply = crate::session_annotations(&fixture.options, "fixture", query);
+            let reply = crate::session_annotations(&fixture.options, "local", query);
             assert_eq!(reply.status, 200);
             body_of(&reply)
         };
-        let whole = read("sid=faults&kind=errors&limit=100&scope=retained_history");
-        let capped = read("sid=faults&kind=errors&limit=2&scope=retained_history");
+        let whole = read("sid=faults&kind=errors&limit=100");
+        let capped = read("sid=faults&kind=errors&limit=2");
         assert_eq!(capped["total"], 5);
         assert_eq!(
             capped["entries"].as_array().unwrap(),
@@ -4416,7 +4407,7 @@ mod tests {
         );
         assert_eq!(capped["first"], 0);
         let tail = read(&format!(
-            "sid=faults&kind=errors&limit=100&after=2&generation={}&scope=retained_history",
+            "sid=faults&kind=errors&limit=100&after=2&generation={}",
             capped["generation"].as_str().unwrap()
         ));
         assert_eq!(tail["total"], 5);
@@ -4425,11 +4416,11 @@ mod tests {
             &whole["entries"].as_array().unwrap()[2..]
         );
         assert_eq!(tail["first"], 2);
-        let exact = read("sid=faults&kind=errors&limit=5&scope=retained_history");
+        let exact = read("sid=faults&kind=errors&limit=5");
         assert_eq!(exact["entries"], whole["entries"]);
         assert_eq!(exact["first"], 0);
         let end = read(&format!(
-            "sid=faults&kind=errors&after=5&generation={}&scope=retained_history",
+            "sid=faults&kind=errors&after=5&generation={}",
             capped["generation"].as_str().unwrap()
         ));
         assert_eq!(end["total"], 5);
@@ -4618,7 +4609,7 @@ mod tests {
             if let Some(ref value) = cursor {
                 query.push_str(&format!("&cursor={value}"));
             }
-            let reply = crate::session_transcript_range(&fixture.options, "fixture", &query, None);
+            let reply = crate::session_transcript_range(&fixture.options, "local", &query, None);
             let page = body_of(&reply);
             assert_eq!(reply.status, 200, "{page}");
             assert_eq!(page["projection"], 7);
@@ -4828,7 +4819,7 @@ mod tests {
         let address = percent_encode(&tool["address"].to_string());
         let reply = crate::session_entry_field(
             &fixture.options,
-            "fixture",
+            "local",
             &format!("sid=xss&address={address}&part=output"),
             None,
         );
@@ -4842,7 +4833,7 @@ mod tests {
         assert_eq!(
             crate::session_entry_field(
                 &fixture.options,
-                "fixture",
+                "local",
                 "sid=xss&after=0&limit=101&part=output",
                 None
             )
@@ -4918,7 +4909,7 @@ mod tests {
         let view = fixture.viewer();
         publish_native(&view);
         let reply =
-            crate::session_transcript_range(&fixture.options, "fixture", "sid=large&limit=1", None);
+            crate::session_transcript_range(&fixture.options, "local", "sid=large&limit=1", None);
         assert_eq!(reply.status, 200);
         let page = body_of(&reply);
         assert_eq!(page["entries"].as_array().unwrap().len(), 1);
@@ -7226,7 +7217,7 @@ mod tests {
 
     /// A view over `fixture` in `refresh`, checked by `pool`'s workers.
     fn pooled(fixture: &Fixture, refresh: Refresh, pool: &Arc<RefreshPool>) -> Arc<MachineView> {
-        let view = MachineView::new(fixture.options.clone());
+        let view = MachineView::for_source_key("", fixture.options.clone());
         view.set_pool(pool.clone());
         view.set_refresh(refresh);
         view
@@ -7410,11 +7401,11 @@ mod tests {
     #[test]
     fn qualified_catalog_interest_avoids_cold_work_and_observes_invalidation() {
         let fixture = lane_fixture();
-        let publisher = MachineView::new(fixture.options.clone());
+        let publisher = MachineView::for_source_key("", fixture.options.clone());
         publish_native(&publisher);
         publisher.close();
         let generation = || {
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             assert_eq!(page.status, 200);
             let body: Value = serde_json::from_slice(&page.body).unwrap();
             body["generation"].clone()
@@ -7454,7 +7445,7 @@ mod tests {
             let view = pooled(&fixture, mode, &pool);
             view.note_catalog_read().unwrap();
             let generation = || {
-                let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
                 let body: Value = serde_json::from_slice(&reply.body).ok()?;
                 (reply.status == 200 && body["completeness"]["state"] == "complete")
                     .then(|| body["generation"].clone())
@@ -7469,7 +7460,7 @@ mod tests {
             });
             let reply = crate::session_transcript_range(
                 &fixture.options,
-                "fixture",
+                "local",
                 "sid=lane&limit=32",
                 None,
             );
@@ -7499,7 +7490,7 @@ mod tests {
                     let id = format!("unrelated-{n:04}");
                     fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated prompt"}})]);
                 }
-                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let mut cache = fixture.open_index();
                 model::observe_catalog(
                     &fixture.options,
                     &mut cache,
@@ -7519,7 +7510,7 @@ mod tests {
                     );
                 }
                 let mut work = Work {
-                    events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                    events: Some(fixture.open_index()),
                     catalog_snapshot: Some(snapshot),
                     ..Default::default()
                 };
@@ -7534,7 +7525,7 @@ mod tests {
                     2,
                     "unrelated={unrelated}"
                 );
-                let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
                 let page: Value = serde_json::from_slice(&reply.body).unwrap();
                 assert_eq!(page["completeness"]["state"], "complete");
                 if change == "sidecar" {
@@ -7590,7 +7581,7 @@ mod tests {
             .unwrap()
         {}
         assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get) - before, 1);
-        let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+        let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
         let page: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(page["completeness"]["state"], "complete");
         assert!(work.catalog_snapshot.is_some());
@@ -7604,7 +7595,9 @@ mod tests {
         let view = fixture.viewer();
         let options = fixture.options.clone();
         *lock(&view.hooks.building) = Some(Arc::new(move || {
-            let mut other = EventCache::open_scoped(&options.cache).unwrap();
+            let mut other =
+                crate::storage::sqlite::open_index(&options, &crate::storage::Namespace::local())
+                    .unwrap();
             model::observe_catalog(
                 &options,
                 &mut other,
@@ -7629,7 +7622,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let mut other = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let mut other = fixture.open_index();
         model::observe_catalog(
             &fixture.options,
             &mut other,
@@ -7666,7 +7659,7 @@ mod tests {
                 let id = format!("unrelated-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -7678,7 +7671,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fs::write(&child, record("child", Some("new-parent"))).unwrap();
             let mut work = Work {
-                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                events: Some(fixture.open_index()),
                 catalog_snapshot: Some(snapshot),
                 ..Default::default()
             };
@@ -7697,7 +7690,7 @@ mod tests {
                 rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let parent: String = catalog.query_row("SELECT parent_key FROM session_catalog WHERE session_key='child' AND lifecycle='current'", [], |row| row.get(0)).unwrap();
             assert_eq!(parent, "new-parent");
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             assert_eq!(
                 serde_json::from_slice::<Value>(&page.body).unwrap()["completeness"]["state"],
                 "complete"
@@ -7730,7 +7723,7 @@ mod tests {
                 model::now_ms(),
             )
             .unwrap();
-            let mut competing = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut competing = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut competing,
@@ -7756,7 +7749,7 @@ mod tests {
                 let id = format!("existing-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"existing prompt"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -7768,7 +7761,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fixture.claude("new-isolated", &[json!({"type":"user","sessionId":"new-isolated","uuid":"new-isolated","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-02T00:00:00Z","message":{"role":"user","content":"new prompt"}})]);
             let mut work = Work {
-                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                events: Some(fixture.open_index()),
                 catalog_snapshot: Some(snapshot),
                 ..Default::default()
             };
@@ -7783,7 +7776,7 @@ mod tests {
                 reads <= 1,
                 "unrelated={unrelated}: adding one isolated source loaded {reads} event indexes"
             );
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
             let catalog =
@@ -7816,7 +7809,7 @@ mod tests {
                 let id = format!("isolated-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"initial prompt"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -7828,7 +7821,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             say(&fixture, "isolated-0000", 1, "one changed source");
             let mut work = Work {
-                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                events: Some(fixture.open_index()),
                 catalog_snapshot: Some(snapshot),
                 ..Default::default()
             };
@@ -7843,7 +7836,7 @@ mod tests {
                 1,
                 "unrelated={unrelated}: changed-source publication loads only its own event rows"
             );
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
             assert_retired_routes_absent(&view);
@@ -7860,7 +7853,7 @@ mod tests {
         let pool = RefreshPool::new(1);
         let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
         let generation = || {
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let body: Value = serde_json::from_slice(&reply.body).ok()?;
             (reply.status == 200 && body["completeness"]["state"] == "complete")
                 .then(|| body["generation"].clone())
@@ -7884,7 +7877,7 @@ mod tests {
         );
         let reply = crate::session_transcript_range(
             &fixture.options,
-            "fixture",
+            "local",
             "sid=rewrite&limit=32",
             None,
         );
@@ -7933,7 +7926,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
             .unwrap();
         assert_eq!(indexed, 64);
-        let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+        let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
         assert_eq!(page.status, 200);
         assert_eq!(body_of(&page)["completeness"]["state"], "partial");
         assert_eq!(lock(&view.live.state).slot, Slot::Idle);
@@ -7944,7 +7937,7 @@ mod tests {
         assert_eq!(native_api(&view, "/api/sessions", "limit=60").status, 200);
         assert!(lock(&view.live.state).active());
         eventually("the resumed cold observation completes", || {
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             (page.status == 200
                 && body_of(&page)["completeness"]["state"] == "complete"
                 && pool.running() == 0)
@@ -7982,16 +7975,21 @@ mod tests {
             // requeueing a continuation that the worker failed to schedule.
             lock(&view.live.state).idle_after = Duration::from_secs(3600);
             let options = fixture.options.clone();
+            let completeness = if unrelated == 0 {
+                "complete"
+            } else {
+                "partial"
+            };
             let start = Instant::now();
             let (published, first_page) = mpsc::channel::<u64>();
             let (release, released) = mpsc::channel::<()>();
             let released = Mutex::new(released);
             let pool_for_hook = pool.clone();
             *lock(&view.hooks.building) = Some(Arc::new(move || {
-                let page = crate::session_catalog_page(&options, "fixture", "limit=60");
+                let page = crate::session_catalog_page(&options, "local", "limit=60");
                 assert_eq!(page.status, 200);
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
-                assert_eq!(body["completeness"]["state"], "partial");
+                assert_eq!(body["completeness"]["state"], completeness);
                 let items = body["items"].as_array().unwrap();
                 assert_eq!(items.len(), 60);
                 assert!(
@@ -8034,17 +8032,17 @@ mod tests {
                 .recv_timeout(COLD_CATALOG_HANG_AFTER)
                 .expect("cold Catalog hang: foreground page waited on held history");
             assert_eq!(page.status, 200);
-            assert_eq!(body_of(&page)["completeness"]["state"], "partial");
+            assert_eq!(body_of(&page)["completeness"]["state"], completeness);
             assert_eq!(pool.running(), 1);
             let identity =
-                crate::session_catalog_identity(&fixture.options, "fixture", "selected-00000")
+                crate::session_catalog_identity(&fixture.options, "local", "selected-00000")
                     .unwrap()
                     .unwrap();
             assert_eq!(
                 identity.owner_qualification,
-                crate::CatalogOwnerQualification::Provisional
+                crate::CatalogOwnerQualification::Qualified
             );
-            assert!(identity.native_id.is_none());
+            assert_eq!(identity.native_id.as_deref(), Some("selected-00000"));
             assert!(
                 crate::source_projection_ready(
                     &fixture.options,
@@ -8059,9 +8057,9 @@ mod tests {
             let focused = Instant::now();
             let (answered, query) = mpsc::channel();
             thread::spawn(move || {
-                let answer = crate::Query::with_machines(vec![("fixture".into(), options)])
+                let answer = crate::Query::with_machines(vec![("local".into(), options)])
                     .call_selected(
-                        "fixture",
+                        "local",
                         "selected-00000",
                         "read_transcript",
                         &json!({"id":"selected-00000","limit":1}),
@@ -8077,7 +8075,7 @@ mod tests {
             assert!(answer.to_string().contains("selected first page"));
             assert_eq!(pool.running(), 1);
             eprintln!(
-                "progressive-focused-query unrelated={unrelated} elapsed_us={} response_bytes={} background_running=1 completeness=partial owner_qualification=provisional",
+                "progressive-focused-query unrelated={unrelated} elapsed_us={} response_bytes={} background_running=1 completeness=partial owner_qualification=qualified",
                 focused.elapsed().as_micros(),
                 answer.to_string().len()
             );
@@ -8108,7 +8106,7 @@ mod tests {
                 if indexed > observed {
                     observed = indexed;
                 }
-                let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
                 let completeness = body["completeness"]["state"].as_str().unwrap_or("invalid");
                 if page.status == 200 && completeness == "complete" && pool.running() == 0 {
@@ -8131,11 +8129,11 @@ mod tests {
                 background.elapsed().as_micros(),
                 pool.running()
             );
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let body: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(body["completeness"]["state"], "complete");
             assert!(
-                crate::session_catalog_identity(&fixture.options, "fixture", "selected-00000")
+                crate::session_catalog_identity(&fixture.options, "local", "selected-00000")
                     .unwrap()
                     .is_some()
             );

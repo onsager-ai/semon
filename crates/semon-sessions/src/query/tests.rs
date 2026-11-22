@@ -43,28 +43,31 @@ fn sealed_codex_fixture(turns: usize, padding: usize) -> (Home, PathBuf) {
         json!({"id":"sealed-pages","cwd":"/work/proj","originator":"codex_exec","thread_source":"user"}),
     )];
     for index in 0..turns {
+        // Warehouse windows sort by native timestamp before file position.
+        // Keep each turn together so a small window proves nearby chunks.
+        let timestamp = format!("2026-09-24T05:{:02}:{:02}.000Z", index / 60, index % 60);
         records.push(codex_line(
-            ts(5, 1),
+            timestamp.clone(),
             "response_item",
             json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Readable record {index} {}", "synthetic ".repeat(padding))}]}),
         ));
         records.push(codex_line(
-            ts(5, 1),
+            timestamp.clone(),
             "response_item",
             json!({"type":"reasoning","summary":[{"type":"summary_text","text":format!("Readable record thinking {index} {}", "synthetic ".repeat(padding))}]}),
         ));
         records.push(codex_line(
-            ts(5, 1),
+            timestamp.clone(),
             "response_item",
             json!({"type":"function_call","call_id":format!("call-{index}"),"name":"exec_command","arguments":"{\"cmd\":\"echo synthetic\"}"}),
         ));
         records.push(codex_line(
-            ts(5, 1),
+            timestamp.clone(),
             "response_item",
             json!({"type":"function_call_output","call_id":format!("call-{index}"),"output":format!("Readable record output {index} {}", "synthetic ".repeat(padding))}),
         ));
         records.push(codex_line(
-            ts(5, 2),
+            timestamp,
             "event_msg",
             json!({"type":"context_compacted"}),
         ));

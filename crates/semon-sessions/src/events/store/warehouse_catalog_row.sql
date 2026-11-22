@@ -24,7 +24,10 @@
     owner_file.path AS owner_path,owner_file.ledger AS owner_ledger,owner.native_id,owner.agent_path,
     ((owner.parent_id IS NOT NULL OR coalesce(json_extract(source_meta.metadata,'$.subagent'),0))
       AND NOT coalesce(json_extract(source_meta.metadata,'$.guardian_review'),0)) AS is_child,
-    c.start,owner.lineage,coalesce(json_extract(source_meta.metadata,'$.guardian_review'),0) AS guardian,effort.effort
+    c.start,owner.lineage,coalesce(json_extract(source_meta.metadata,'$.guardian_review'),0) AS guardian,effort.effort,
+    (t.title IS NOT NULL OR (k.harness='codex' AND (
+      nullif(owner.nickname,'') IS NOT NULL OR nullif(owner.agent_path,'') IS NOT NULL
+    ))) AS native_title
   FROM eligible_keys k CROSS JOIN lineage_member m ON m.source=k.owner
   JOIN components c ON c.component=m.component AND c.qualified=c.total
   JOIN members latest ON latest.component=c.component AND latest.rank=1
