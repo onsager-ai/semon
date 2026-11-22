@@ -143,6 +143,7 @@ impl<'a> Lines<'a> {
     }
     const KEEP: usize = 16;
 
+    #[cfg(any(test, feature = "postgres"))]
     pub(crate) fn native_event_id(&self, path: &Path, offset: u64) -> Option<String> {
         let record = self
             .recent

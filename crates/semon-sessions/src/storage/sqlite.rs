@@ -148,6 +148,7 @@ pub(crate) fn open_index(
     Ok(cache)
 }
 
+#[cfg(test)]
 pub(crate) fn selected_connection(
     options: &crate::Options,
     source_key: &str,

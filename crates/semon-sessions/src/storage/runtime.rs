@@ -184,6 +184,7 @@ impl RuntimeStore {
 
     /// SQLite's selected snapshot remains owned by the renderer, including its
     /// lazy byte proofs. PostgreSQL selected windows use the typed port above.
+    #[cfg(test)]
     pub(crate) fn selected_connection(
         &self,
         key: &str,

@@ -219,6 +219,7 @@ pub(crate) fn catalog_selection(
 
 /// Bind selected metadata and its consumer's indexed recipes to one SQLite
 /// snapshot. The ordinary source-root and native-selection checks still apply.
+#[cfg(test)]
 pub(crate) fn catalog_selection_in_snapshot(
     options: &Options,
     source_key: &str,

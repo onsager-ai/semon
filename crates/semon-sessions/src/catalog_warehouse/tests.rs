@@ -300,8 +300,7 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
         )
         .unwrap();
         let expected =
-            super::super::read_page(&fixture.options, &fixture.namespace, &request(query), None)
-                .unwrap();
+            super::super::read_page(&fixture.options, &fixture.namespace, &request(query)).unwrap();
         assert_eq!(expected.status, 200, "{query}");
         let body: serde_json::Value = serde_json::from_slice(&expected.body).unwrap();
         let oracle: Vec<_> = body["items"]

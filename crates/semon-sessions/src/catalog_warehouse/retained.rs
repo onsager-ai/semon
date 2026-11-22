@@ -938,6 +938,7 @@ pub(super) fn read_frozen(
         metadata: None,
         retained_metadata: metadata.filter(|_| cursor.is_none()),
         member_count,
+        #[cfg(test)]
         legacy_completion: None,
         records,
         reply_records,
@@ -1436,6 +1437,7 @@ fn certified_launch_calls(
 type CertifiedRecordRead<'a> =
     dyn FnMut(&SessionSourceRef, u64) -> Result<serde_json::Value, ReadError> + 'a;
 
+#[cfg(test)]
 fn read_retained_peer(
     source: &Source<'_>,
     trace: &str,

@@ -37,6 +37,7 @@ pub(crate) enum NativeFieldKind {
     CodexResult,
     CodexResultObject,
 }
+#[cfg(any(test, feature = "postgres"))]
 impl NativeFieldKind {
     pub(crate) fn name(self) -> &'static str {
         match self {

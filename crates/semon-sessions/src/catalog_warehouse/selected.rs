@@ -280,6 +280,7 @@ fn prompt_anchor(
 
 const PROMPT_AT: &str = "SELECT kind FROM fact_prompt WHERE source=?1 AND pos=?2 AND block=?3 ORDER BY occurrence LIMIT 1";
 
+#[cfg(test)]
 impl Record {
     pub(super) fn text(&self) -> Option<String> {
         let kind = self.kind.as_deref()?;
@@ -314,6 +315,7 @@ pub(super) struct Component {
     pub(super) metadata: Option<super::Row>,
     pub(super) retained_metadata: Option<serde_json::Value>,
     pub(super) member_count: usize,
+    #[cfg(test)]
     pub(super) legacy_completion: Option<RelayReceipt>,
     pub(super) records: Vec<Record>,
     pub(super) reply_records: BTreeMap<(String, u64), serde_json::Value>,
@@ -1338,6 +1340,7 @@ pub(super) fn tool_results(
 }
 
 /// Native provenance supplied by a selected transcript or activity step.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(super) enum Evidence<'a> {
     Event(&'a str),
@@ -1476,6 +1479,7 @@ fn activity_evidence(
     }))
 }
 
+#[cfg(test)]
 const EVIDENCE: &str = include_str!("evidence.sql");
 
 #[derive(Clone, Copy)]
@@ -1488,6 +1492,7 @@ pub(super) struct HomeFields<'a> {
 enum Target<'a> {
     Page(usize, Direction),
     Address(&'a Address, Option<&'a str>, Option<&'a str>),
+    #[cfg(test)]
     Evidence(Evidence<'a>),
     Turns(&'a [&'a str], Option<HomeFields<'a>>),
     Annotations(AnnotationRequest<'a>),
@@ -1508,7 +1513,9 @@ impl Target<'_> {
         match *self {
             Self::Page(n @ 1..=100, _) => Ok(n + 1),
             Self::Page(..) => Err(index("Selected pages require a limit of 1–100")),
-            Self::Address(..) | Self::Evidence(_) | Self::Activity(_) => Ok(1),
+            Self::Address(..) | Self::Activity(_) => Ok(1),
+            #[cfg(test)]
+            Self::Evidence(_) => Ok(1),
             Self::Turns(..) => Ok(33),
             Self::Annotations(_) => Ok(0),
             Self::ToolResults(_) => Ok(101),
@@ -1660,6 +1667,7 @@ fn read_current(
     let mut annotation_members = BTreeMap::new();
     let mut member_count = 0;
     let mut references = Vec::new();
+    #[cfg(test)]
     let mut evidence_matches = 0;
     let mut prior_provider = Vec::new();
     let mut confirmed = 0;
@@ -1667,6 +1675,7 @@ fn read_current(
     {
         let mut members = db.prepare_cached(MEMBERS).map_err(index)?;
         let mut detail = db.prepare_cached(direction.statement()).map_err(index)?;
+        #[cfg(test)]
         let mut evidence = db.prepare_cached(EVIDENCE).map_err(index)?;
         let mut activity_query = db
             .prepare_cached(include_str!("activity_evidence.sql"))
@@ -1873,6 +1882,7 @@ fn read_current(
                         }
                         continue;
                     }
+                    #[cfg(test)]
                     Target::Evidence(wanted) => {
                         if evidence_matches < 2 {
                             let predecessors = continuation_bounds(
@@ -1992,6 +2002,7 @@ fn read_current(
     if matches!(target, Target::ToolResults(_)) && candidates.len() == capacity {
         return Err(index("Selected tool result budget exhausted"));
     }
+    #[cfg(test)]
     if evidence_matches > 1 {
         candidates.clear();
     }
@@ -2151,13 +2162,16 @@ fn read_current(
     {
         first.into_mut().push(receipt);
     }
+    #[cfg(test)]
     let mut legacy_completion = None;
     let mut incoming = BTreeMap::new();
     for (child, plan) in legacy_plans {
         let resolved = resolve(plan, child)?;
+        #[cfg(test)]
         if child == owner {
             legacy_completion = resolved.completion;
-        } else {
+        }
+        if child != owner {
             incoming.extend(resolved.incoming);
         }
     }
@@ -2388,6 +2402,7 @@ fn read_current(
         metadata,
         retained_metadata: None,
         member_count,
+        #[cfg(test)]
         legacy_completion,
         records,
         reply_records,

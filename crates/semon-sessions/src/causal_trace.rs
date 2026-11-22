@@ -505,6 +505,7 @@ fn selected_family(
 
 /// Relationships for the issued native range only. This shares the producer's
 /// causal projection; it never constructs a graph or reads native bodies.
+#[cfg(test)]
 pub(crate) fn range_context(
     tx: &Transaction<'_>,
     key: &str,

@@ -1,11 +1,17 @@
 //! Selected immutable slot/range reads, independent of the global event model.
+#[cfg(any(test, feature = "postgres"))]
+use crate::catalog::CatalogSessionIdentity;
+#[cfg(test)]
 use crate::{
-    CatalogIdentityError, Options, SessionSourceReader, SessionSourceRef,
-    catalog::{self, CatalogSessionIdentity},
+    CatalogIdentityError,
+    viewer::{decoded, query_value},
+};
+use crate::{
+    Options, SessionSourceReader, SessionSourceRef, catalog,
     events::EventCache,
     model::summary::CatalogSource,
     slot_projection::{SavedSlot, VERSION},
-    viewer::{ViewerReply, decoded, query_value},
+    viewer::ViewerReply,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
@@ -16,10 +22,15 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
 const MAX_LIMIT: usize = 100;
+#[cfg(any(test, feature = "postgres"))]
 const PAGE_SOURCE_BYTES: usize = 1024 * 1024;
+#[cfg(any(test, feature = "postgres"))]
 const PAGE_SOURCE_REQUESTS: usize = 256;
+#[cfg(any(test, feature = "postgres"))]
 const RECORD_BYTES: usize = 128 * 1024;
+#[cfg(any(test, feature = "postgres"))]
 const READ_CHUNK: usize = 4096;
 
 #[cfg(test)]
@@ -29,6 +40,7 @@ thread_local! {
     pub(crate) static LAST_LOCAL_FAILURE: std::cell::Cell<Option<crate::source_carrier::FailureStage>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn reply(status: u16, value: Value) -> ViewerReply {
     ViewerReply {
         status,
@@ -38,6 +50,7 @@ fn reply(status: u16, value: Value) -> ViewerReply {
         extra_headers: Vec::new(),
     }
 }
+#[cfg(any(test, feature = "postgres"))]
 fn unavailable() -> ViewerReply {
     catalog::error(
         503,
@@ -483,6 +496,7 @@ pub(crate) fn observation(
     Ok(projection.filter(|(_, version, total)| *version == VERSION && (0..=9_007_199_254_740_991).contains(total)).map(|(generation, _, total)| json!({"generation":entry_generation(&generation),"total":total})))
 }
 
+#[cfg(any(test, feature = "postgres"))]
 struct Selection {
     proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     identity: CatalogSessionIdentity,
@@ -498,6 +512,7 @@ struct Selection {
     context: Value,
 }
 
+#[cfg(any(test, feature = "postgres"))]
 #[derive(Clone, Copy)]
 pub(crate) enum SelectedPart {
     Transcript,
@@ -506,6 +521,7 @@ pub(crate) enum SelectedPart {
     Attachment(usize),
 }
 
+#[cfg(test)]
 pub(crate) fn read(
     options: &Options,
     source_key: &str,
@@ -950,11 +966,15 @@ pub(crate) fn render_postgres_part(
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races
 // from rejected native bytes without exposing paths or provider errors.
+#[cfg(any(test, feature = "postgres"))]
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ProjectionFence {
+    #[cfg(test)]
     CatalogPublication,
+    #[cfg(test)]
     ProjectionGeneration,
+    #[cfg(test)]
     ErrorsGeneration,
     LocalSourceRevision(
         crate::source_carrier::RevisionReason,
@@ -965,6 +985,7 @@ enum ProjectionFence {
     SourceRange,
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn stale(reason: ProjectionFence) -> ViewerReply {
     if matches!(reason, ProjectionFence::SourceBudget) {
         let mut reply = catalog::error(
@@ -1009,8 +1030,10 @@ impl std::error::Error for MissingLocalSource {}
 
 #[derive(Debug)]
 struct LocalRevisionChanged(
+    #[cfg_attr(not(any(test, feature = "postgres")), allow(dead_code))]
     crate::source_carrier::RevisionReason,
     bool,
+    #[cfg_attr(not(any(test, feature = "postgres")), allow(dead_code))]
     crate::source_carrier::FailureStage,
     Option<io::Error>,
 );
@@ -1025,6 +1048,7 @@ impl std::error::Error for LocalRevisionChanged {
     }
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn source_read_fence(error: &io::Error) -> ProjectionFence {
     #[cfg(test)]
     LAST_LOCAL_FAILURE.with(|stage| {
@@ -1048,6 +1072,7 @@ fn source_read_fence(error: &io::Error) -> ProjectionFence {
         .unwrap_or(ProjectionFence::SourceGeneration)
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn field_failure_reply(error: &io::Error) -> ViewerReply {
     if matches!(source_read_fence(error), ProjectionFence::SourceBudget) {
         return stale(ProjectionFence::SourceBudget);
@@ -1511,6 +1536,7 @@ pub(crate) fn native_entry_id(
     format!("{:x}", Sha256::digest(identity.as_bytes()))
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn reference_in_selection(
     options: &Options,
     selection: &Selection,
@@ -1526,6 +1552,7 @@ fn reference_in_selection(
     })
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn render(
     options: &Options,
     selection: Selection,
@@ -2113,6 +2140,7 @@ pub(crate) fn session_entry_field_with_gate(
     session_transcript_range_with_gate(options, source_key, query, reader, mode, before_read)
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn render_field(
     options: &Options,
     selection: Selection,
