@@ -476,7 +476,7 @@ fn current_peer_covers(
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, usize>(4)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })
             .optional()?
@@ -487,7 +487,7 @@ fn current_peer_covers(
         if observed.path.to_str() != Some(path.as_str())
             || owner != peer.owner
             || native_id != peer.native_id
-            || count != peer.members.len()
+            || usize::try_from(count).ok() != Some(peer.members.len())
             || !prefix_covers(observed, current.offset, current.prefix, current.tail)
         {
             return Ok(false);
