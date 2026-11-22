@@ -846,23 +846,6 @@ pub(super) fn record_at(
     .map(|component| component.and_then(|component| component.records.into_iter().next()))
 }
 
-/// Select an exact native record only while its original component still qualifies.
-pub(super) fn addressed_window(
-    source: &Source<'_>,
-    key: &str,
-    address: &Address,
-    binding: &str,
-) -> Result<Option<Component>, ReadError> {
-    read(
-        source.options,
-        source,
-        CatalogReadScope::Current,
-        key,
-        Target::Address(address, Some(binding), None),
-        None,
-    )
-}
-
 pub(super) fn addressed_preview(
     source: &Source<'_>,
     key: &str,
