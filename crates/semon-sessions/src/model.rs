@@ -7593,6 +7593,7 @@ fn build_sources_inner(
         _ => Vec::new(),
     };
     measurements.record("source_locks", started, _source_locks.len());
+    let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
     let query_runtime = measured!(
         "runtime_fingerprint",
         1,
@@ -7618,7 +7619,6 @@ fn build_sources_inner(
                 .into_scoped()
         }
     );
-    let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
     let mut timings = Vec::with_capacity(18);
     macro_rules! timed {
         ($name:literal, $body:expr) => {{
@@ -8187,16 +8187,37 @@ fn build_sources_inner(
             }
         }
     }
-    if catalog.is_some()
-        && measured!(
+    #[cfg(any(test, feature = "test-hooks"))]
+    crate::test_hooks::run_cache(&options.cache, "runtime_before_recheck");
+    if let Some(rows) = &catalog {
+        let current = measured!(
             "runtime_recheck",
             1,
             crate::native_evidence::query_runtime_generation(options)?
-        ) != query_runtime
-    {
-        return Err(io::Error::other(
-            "Native Query runtime observations changed",
-        ));
+        );
+        if current != query_runtime {
+            let scoped = options.facts.is_none() && builder.cache.is_scoped();
+            let mut changed = !scoped;
+            if scoped {
+                let fresh = crate::native_evidence::RuntimeObservations::for_publication_measured(
+                    options,
+                    &current,
+                    &mut measurements,
+                );
+                for row in rows {
+                    if fresh.scope(row)? != runtime_observations.scope(row)? {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            if changed {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Native Query runtime observations changed",
+                ));
+            }
+        }
     }
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "runtime_checked");
@@ -8232,11 +8253,18 @@ fn build_sources_inner(
     match target {
         BuildTarget::Sources => {
             let sender_turns = builder.complete_sender_turns()?;
-            let relationships = relation_stage::Context::capture(
+            let mut relationships = relation_stage::Context::capture(
                 &builder,
                 published_facts.as_ref(),
                 sender_turns.as_deref().unwrap_or(&turns),
             );
+            if options.facts.is_none() && builder.cache.is_scoped() {
+                for endpoint in relationships.endpoints.values_mut() {
+                    endpoint.row.query = Some(serde_json::json!({
+                        "runtime": runtime_observations.scope(&endpoint.row)?,
+                    }));
+                }
+            }
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;
             let mut message_dependencies = Some(Vec::new());

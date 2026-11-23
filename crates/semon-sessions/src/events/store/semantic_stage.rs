@@ -1359,6 +1359,36 @@ fn relation_scope(
     Ok(scope)
 }
 
+fn local_runtime_changed(
+    tx: &Transaction<'_>,
+    options: &crate::Options,
+    runtime: &str,
+) -> Result<bool, StoreError> {
+    let observations = crate::native_evidence::RuntimeObservations::for_publication_measured(
+        options,
+        runtime,
+        &mut crate::native_timing::Measurements::default(),
+    );
+    let mut query = tx.prepare("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_endpoints").map_err(failure)?;
+    let mut rows = query.query([]).map_err(failure)?;
+    while let Some(row) = rows.next().map_err(failure)? {
+        let endpoint: Endpoint = bounded(row.get(0).map_err(failure)?, &mut 0).map_err(failure)?;
+        let current = observations
+            .scope(&endpoint.row)
+            .map_err(|error| StoreError::Failed(error.to_string()))?;
+        if endpoint
+            .row
+            .query
+            .as_ref()
+            .and_then(|query| query["runtime"].as_str())
+            != Some(current.as_str())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl SqliteStore {
     #[cfg(test)]
     pub(super) fn semantic_begin(
@@ -1366,14 +1396,15 @@ impl SqliteStore {
         paths: &[String],
         runtime: &str,
     ) -> Result<Outcome, StoreError> {
-        self.semantic_begin_with_journal(paths, runtime, false)
+        self.semantic_begin_with_runtime(paths, runtime, false, None)
     }
 
-    pub(super) fn semantic_begin_with_journal(
+    pub(super) fn semantic_begin_with_runtime(
         &mut self,
         paths: &[String],
         runtime: &str,
         journaled_runtime: bool,
+        local: Option<&crate::Options>,
     ) -> Result<Outcome, StoreError> {
         if paths.len() > 64 {
             return Err(StoreError::Data(
@@ -1412,17 +1443,17 @@ impl SqliteStore {
                 })
                 .map_err(failure)?;
             let journaled: bool = journaled_runtime && tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_push_driven' AND value='1')", [], |r| r.get(0)).map_err(failure)?;
-            // Journaled Facts/Raw writes invalidate the actual staged native
-            // and PID dependencies, including owners not yet published. The
-            // next batch still checks every consumed source witness. Unrelated
-            // machine activity must not discard this component's progress.
-            // Local/unobserved runtime and negative custody keep their original
-            // conservative epoch fence.
+            // Journaled Facts/Raw changes already invalidate actual witnesses.
+            // Local runtime changes only invalidate the owners they affect.
             if !recipe_current(&tx).map_err(failure)? {
                 return Err(StoreError::Failed("unsupported semantic recipe".into()));
             }
             if old != runtime
-                && (!journaled || withdrawal_authority(&tx).map_err(failure)?.is_some())
+                && (withdrawal_authority(&tx).map_err(failure)?.is_some()
+                    || match local {
+                        Some(options) => local_runtime_changed(&tx, options, runtime)?,
+                        None => !journaled,
+                    })
             {
                 reset(&tx, runtime).map_err(failure)?;
             } else if old != runtime {

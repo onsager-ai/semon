@@ -7574,6 +7574,116 @@ mod tests {
         view.close();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlapping_viewer_and_materialize_producers_preserve_newer_metadata() {
+        fn cpu_ns() -> i64 {
+            let mut time = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+                0
+            );
+            time.tv_sec * 1_000_000_000 + time.tv_nsec
+        }
+        let measure = |fixture: &Fixture| {
+            let start = cpu_ns();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            drop(
+                crate::analytics::initialize_with_catalog(&fixture.options, || {
+                    Instant::now() >= deadline
+                })
+                .unwrap(),
+            );
+            cpu_ns() - start
+        };
+        let seed = || {
+            let fixture = lane_fixture();
+            let id = "00000000-0000-4000-8000-000000000002";
+            fixture.codex(id, &[]);
+            fixture.write(
+                "codex/session_index.jsonl",
+                &format!("{}\n", json!({"id":id,"thread_name":"old name"})),
+            );
+            fixture.write(".claude.json", r#"{"projects":{"/fixture":{"lastSessionId":"lane","lastStartTime":1,"lastCost":1.0}}}"#);
+            crate::refresh_native_catalog(&fixture.options, || false).unwrap();
+            say(&fixture, "lane", 1, "new native record");
+            fixture
+        };
+        let write_newer = |fixture: &Fixture| {
+            fixture.write(".claude.json", r#"{"projects":{"/fixture":{"lastSessionId":"lane","lastStartTime":1,"lastCost":23.0}}}"#);
+            fixture.write(
+                "codex/session_index.jsonl",
+                "{\"id\":\"00000000-0000-4000-8000-000000000002\",\"thread_name\":\"new name\"}\n",
+            );
+        };
+        let single = seed();
+        write_newer(&single);
+        let single_ns = measure(&single);
+
+        let fixture = seed();
+        let view = MachineView::for_source_key("local", fixture.options.clone());
+        let (ready, reached) = std::sync::mpsc::sync_channel(1);
+        let (resume, paused) = std::sync::mpsc::sync_channel(1);
+        let paused = Mutex::new(Some(paused));
+        let _hook = crate::test_hooks::register(&fixture.options.cache, move |point| {
+            if point == "runtime_before_recheck"
+                && thread::current().name() == Some("catalog-overlap-viewer")
+                && let Some(paused) = lock(&paused).take()
+            {
+                ready.send(()).unwrap();
+                paused.recv_timeout(Duration::from_secs(40)).unwrap();
+            }
+        });
+        let viewer = thread::Builder::new()
+            .name("catalog-overlap-viewer".into())
+            .spawn(move || {
+                let start = cpu_ns();
+                let mut work = lock(&view.evidence.storage.work);
+                let mut complete = false;
+                for _ in 0..128 {
+                    match view.refresh_catalog_locked(&mut work, model::now_ms()) {
+                        Ok(true) => {
+                            complete = true;
+                            break;
+                        }
+                        Ok(false) => {}
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("Viewer producer failed: {error}"),
+                    }
+                }
+                assert!(complete, "Viewer producer did not complete");
+                cpu_ns() - start
+            })
+            .unwrap();
+        reached.recv_timeout(Duration::from_secs(40)).unwrap();
+        write_newer(&fixture);
+        let materialize_ns = measure(&fixture);
+        resume.send(()).unwrap();
+        let viewer_ns = viewer.join().unwrap();
+        let db = rusqlite::Connection::open(crate::analytics_index_path(&fixture.options.cache))
+            .unwrap();
+        let cost: f64 = db
+            .query_row(
+                "SELECT cost FROM reported_runs WHERE session_id='lane' AND start=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost, 23.0);
+        let names = crate::events::store::catalog_names_json(&db)
+            .unwrap()
+            .unwrap();
+        let names: Value = serde_json::from_str(&names).unwrap();
+        assert_eq!(names["00000000-0000-4000-8000-000000000002"], "new name");
+        println!(
+            "catalog producer fixture CPU: single_ns={single_ns} overlap_ns={} materialize_ns={materialize_ns} viewer_ns={viewer_ns}",
+            materialize_ns + viewer_ns
+        );
+    }
+
     #[test]
     fn catalog_demand_refreshes_sources_without_showing_a_compatibility_model() {
         for (mode, scan_window) in [

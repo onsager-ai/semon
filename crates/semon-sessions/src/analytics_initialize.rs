@@ -84,7 +84,7 @@ impl Error {
                 "Another process is writing local analytics. Wait for it to finish, or stop the Semon analytics writer you started, then retry."
             }
             ErrorKind::CatalogUnavailable => {
-                "No native Catalog has been published for this Event Index. Start `semon sessions --serve` with the same cache and native homes, then retry after the Catalog is available."
+                "The native Catalog producer did not publish a Catalog. Check the configured native homes and Event Index, then retry `semon analytics materialize`."
             }
             ErrorKind::UnsupportedState | ErrorKind::InconsistentState => {
                 "Local analytics state is unsupported or inconsistent; existing data was preserved. See the analytics export/reset recovery guidance (docs/design/asi-store.md#generations-publication-and-versions) before retrying. Unsupported or ambiguous state needs the matching older binary for custody export first. Do not delete the state directory."
@@ -119,22 +119,42 @@ pub fn initialize(
     expected: Option<&Binding>,
     cancelled: impl Fn() -> bool,
 ) -> Result<Initialized, Error> {
-    initialize_inner(index, expected, cancelled, false)
+    initialize_inner(
+        index,
+        expected,
+        cancelled,
+        None::<fn() -> Result<(), Error>>,
+    )
 }
 
-/// Set up the analytics store against an existing native Catalog publication.
-pub fn initialize_from_catalog(
-    index: &Path,
+/// Run the native producer under analytics ownership, then bind its committed Index.
+pub fn initialize_with_catalog(
+    options: &crate::Options,
     cancelled: impl Fn() -> bool,
 ) -> Result<Initialized, Error> {
-    initialize_inner(index, None, cancelled, true)
+    let index = crate::analytics_index_path(&options.cache);
+    initialize_inner(
+        &index,
+        None,
+        &cancelled,
+        Some(|| {
+            crate::refresh_native_catalog(options, &cancelled).map_err(|error| {
+                let kind = if error.kind() == std::io::ErrorKind::Interrupted {
+                    ErrorKind::Cancelled
+                } else {
+                    ErrorKind::CatalogUnavailable
+                };
+                Error::new(kind, Stage::Index)
+            })
+        }),
+    )
 }
 
 fn initialize_inner(
     index: &Path,
     expected: Option<&Binding>,
     cancelled: impl Fn() -> bool,
-    require_catalog: bool,
+    refresh_catalog: Option<impl FnOnce() -> Result<(), Error>>,
 ) -> Result<Initialized, Error> {
     let state = index
         .parent()
@@ -142,7 +162,7 @@ fn initialize_inner(
         .ok_or_else(|| Error::new(ErrorKind::InconsistentState, Stage::Preflight))?;
     let root = state.join("analytics-store");
     check_cancelled(&cancelled, Stage::Preflight)?;
-    qualify(index, state, expected, require_catalog)?;
+    qualify(index, state, expected, false)?;
     let mut directory = fs::DirBuilder::new();
     directory.recursive(true);
     #[cfg(unix)]
@@ -156,6 +176,11 @@ fn initialize_inner(
     let owner =
         Owner::acquire_qualified(&root).map_err(|error| Error::store(error, Stage::Ownership))?;
     check_cancelled(&cancelled, Stage::Ownership)?;
+    let require_catalog = refresh_catalog.is_some();
+    if let Some(refresh_catalog) = refresh_catalog {
+        qualify(index, state, expected, false)?;
+        refresh_catalog()?;
+    }
     let (identity, incarnation) = qualify(index, state, expected, require_catalog)?;
     let created = identity.is_none() || incarnation.is_none() || !root.join("analytics").exists();
     // Install identity first: a crash before cold index creation leaves an

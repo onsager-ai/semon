@@ -17,7 +17,11 @@ fn materialize(home: &fixture::Fixture) -> Output {
 
 fn materialize_with(home: &fixture::Fixture, arguments: &[&str]) -> Output {
     home.command(env!("CARGO_BIN_EXE_semon"))
-        .args(["analytics", "materialize", "--cache"])
+        .args(["analytics", "materialize", "--all", "--proc-root"])
+        .arg(home.root.join("empty-proc"))
+        .arg("--claude-json")
+        .arg(home.claude.join(".claude.json"))
+        .arg("--cache")
         .arg(home.root.join("state/index.json"))
         .args(arguments)
         .output()
@@ -236,7 +240,7 @@ fn materialize_preserves_an_observer_commit_during_its_snapshot() {
     // Force a new inventory so the comparison covers every live fact and
     // dimension, even though changes to display metadata need no analytics rows.
     fs::rename(&store, home.root.join("baseline-store")).unwrap();
-    let initialized = analytics::initialize_from_catalog(&index, || false).unwrap();
+    let initialized = analytics::initialize(&index, None, || false).unwrap();
     let mut config = AnalyticsWriterConfig::new(initialized.binding.namespace, &index, &store);
     config.interval = std::time::Duration::ZERO;
     let published = Arc::new(AtomicBool::new(false));
@@ -273,36 +277,76 @@ fn materialize_preserves_an_observer_commit_during_its_snapshot() {
     assert_eq!(live_rows(&store), before);
 }
 
+#[cfg(unix)]
 #[test]
-fn materialize_refuses_a_missing_catalog_before_creating_state() {
+fn materialize_watch_publishes_a_new_native_session() {
+    use std::time::{Duration, Instant};
+
+    struct Watch(std::process::Child);
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
     let home = fixture::Fixture::new();
-    let output = materialize(&home);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("No native Catalog has been published")
+    let store = home.root.join("state/analytics-store");
+    let mut watch = Watch(
+        home.command(env!("CARGO_BIN_EXE_semon"))
+            .args(["analytics", "materialize", "--watch", "--cache"])
+            .arg(home.root.join("state/index.json"))
+            .arg("--proc-root")
+            .arg(home.root.join("empty-proc"))
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
     );
-    assert!(!home.root.join("state").exists());
+    let mut wait_for_sessions = |count| {
+        let limit = Instant::now() + Duration::from_secs(45);
+        loop {
+            assert!(
+                watch.0.try_wait().unwrap().is_none(),
+                "watch exited during publication"
+            );
+            if let Some(manifest) = semon_asi::read_manifest(&store).unwrap()
+                && semon_asi::read_live_map(&store, &manifest).unwrap().len() == count
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < limit,
+                "watch never published {count} sessions"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait_for_sessions(2);
+    let id = "00000000-0000-4000-8000-000000000003";
+    let records = [
+        serde_json::json!({"type":"user","uuid":"watch-user","sessionId":id,"timestamp":"2026-10-03T08:00:00Z","message":{"role":"user","content":"Watch fixture"}}),
+        serde_json::json!({"type":"assistant","uuid":"watch-reply","sessionId":id,"timestamp":"2026-10-03T08:00:01Z","message":{"id":"watch-message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Fixture reply"}],"usage":{"input_tokens":10,"output_tokens":5}}}),
+    ];
+    home.write(
+        &format!("configured-claude/projects/fixture/{id}.jsonl"),
+        format!("{}\n{}\n", records[0], records[1]).as_bytes(),
+    );
+    wait_for_sessions(3);
+    assert!(
+        live_session_rows(&store)
+            .keys()
+            .any(|uid| uid.ends_with(id))
+    );
 }
 
 #[test]
 fn materialize_publishes_once_and_reuses_its_namespace() {
     let home = fixture::Fixture::new();
-    let options = home.publish_catalog();
-    let index = semon_sessions::analytics_index_path(&options.cache);
-    let index_before = fs::read(&index).unwrap();
-    write_live_metadata(
-        &options.claude_json,
-        &options.codex_home,
-        "unpublished name",
-        17.0,
-    );
     let first = materialize(&home);
     assert!(
         first.status.success(),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    assert_eq!(fs::read(&index).unwrap(), index_before);
     let state = home.root.join("state");
     let namespace = semon_sessions::read_analytics_namespace(&state)
         .unwrap()
@@ -497,9 +541,7 @@ fn materialize_refuses_an_unsupported_index_without_changing_its_bytes() {
 #[test]
 fn materialize_reports_a_busy_writer_without_publishing() {
     let home = fixture::Fixture::new();
-    home.publish_catalog();
     let index = home.root.join("state/index.sqlite3");
-    let index_bytes = fs::read(&index).unwrap();
     let lock_path = home.root.join("state/analytics-store/analytics.lock");
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     let lock = fs::File::create(&lock_path).unwrap();
@@ -518,7 +560,7 @@ fn materialize_reports_a_busy_writer_without_publishing() {
         fs::read_dir(lock_path.parent().unwrap()).unwrap().count(),
         1
     );
-    assert_eq!(fs::read(index).unwrap(), index_bytes);
+    assert!(!index.exists());
     assert!(!home.root.join("state/analytics-namespace").exists());
     lock.unlock().unwrap();
 }

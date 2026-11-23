@@ -1020,12 +1020,8 @@ impl NativeEvidence {
         paths: &[String],
         runtime: &str,
     ) -> io::Result<crate::events::Outcome> {
-        // The store checks journal authority in the stage transaction.
-        if self.options.facts.is_some() {
-            cache.begin_semantic_stage_with_journal(paths, runtime, true)
-        } else {
-            cache.begin_semantic_stage(paths, runtime)
-        }
+        let local = self.options.facts.is_none().then_some(&self.options);
+        cache.begin_semantic_stage_with_runtime(paths, runtime, local.is_none(), local)
     }
 
     fn semantic_write_conflict(
@@ -4306,6 +4302,68 @@ mod catalog_owner_tests {
         fs::create_dir_all(hostname.parent().unwrap()).unwrap();
         fs::write(hostname, "initial-host\n").unwrap();
         (root, options, input)
+    }
+
+    #[test]
+    fn local_semantic_stage_finishes_during_unrelated_runtime_churn() {
+        use rusqlite::OptionalExtension;
+
+        let (root, options, input) = audit_fixture();
+        let evidence = NativeEvidence::for_source_key("local", options.clone());
+        let mut work = lock(&evidence.storage.work);
+        evidence.prepare_events(&mut work, model::now_ms()).unwrap();
+        let path = input.full_path(&options);
+        let paths = [path.to_string_lossy().into_owned()];
+        let runtime = query_runtime_generation(&options).unwrap();
+        assert_eq!(
+            evidence
+                .begin_catalog_stage(work.events.as_mut().unwrap(), &paths, &runtime)
+                .unwrap(),
+            crate::events::Outcome::Written,
+        );
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let epoch = || {
+            db.query_row("SELECT epoch FROM catalog_semantic_stage", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()
+            .unwrap()
+        };
+        let initial = epoch().unwrap();
+        let pid = options.claude_home.join("sessions/42.json");
+        fs::create_dir_all(pid.parent().unwrap()).unwrap();
+        let process = options.proc_root.join("42/stat");
+        fs::create_dir_all(process.parent().unwrap()).unwrap();
+        let mut completed = false;
+        for step in 1..=128 {
+            fs::write(
+                &pid,
+                format!(r#"{{"sessionId":"unrelated-{step}","procStart":{step}}}"#),
+            )
+            .unwrap();
+            fs::write(&process, format!("42 (claude) {}{step}\n", "0 ".repeat(19))).unwrap();
+            let done = evidence
+                .refresh_catalog(&mut work, model::now_ms())
+                .unwrap();
+            if let Some(active) = epoch() {
+                assert_eq!(
+                    active, initial,
+                    "unrelated runtime invalidated stage progress"
+                );
+            }
+            if done {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "Catalog never completed under runtime churn");
+        assert!(epoch().is_none());
+        let count: i64 = db.query_row("SELECT count(*) FROM session_catalog_sources WHERE native_id='audit' AND lifecycle='current'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        drop(db);
+        drop(work);
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn drain_catalog(evidence: &NativeEvidence, builds: &std::cell::Cell<u64>) {

@@ -95,6 +95,9 @@ jobs:
           cargo test --locked -p semon-sessions activity_cold_ -- --test-threads=1 --nocapture
           cargo test --locked -p semon-sessions activity_root_and_child_ -- --test-threads=1 --nocapture
 
+      - name: Measure overlapping live Catalog producers
+        run: cargo test --locked -p semon-sessions overlapping_viewer_and_materialize_producers_preserve_newer_metadata -- --nocapture
+
       - name: Standalone session bootstrap HTTP regressions
         run: cargo test --locked -p semon-sessions http_session_bootstrap_is_consumed_before_routing -- --nocapture
 

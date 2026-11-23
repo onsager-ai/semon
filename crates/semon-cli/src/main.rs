@@ -180,7 +180,7 @@ enum AsiFormat {
 
 /// Explicit local origin analytics publication over one native Event Index.
 struct MaterializeArgs {
-    cache: PathBuf,
+    home: HomeArgs,
     watch: bool,
     input_budget: semon_sessions::InputBudget,
 }
@@ -409,7 +409,7 @@ fn parse_analytics_args(mut arguments: impl Iterator<Item = String>) -> Result<C
 fn parse_materialize_args(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<MaterializeArgs, String> {
-    let mut cache = semon_sessions::Options::default().cache;
+    let mut home = HomeArgs::default();
     let mut watch = false;
     let mut input_budget = semon_sessions::InputBudget::default();
     while let Some(argument) = arguments.next() {
@@ -418,15 +418,11 @@ fn parse_materialize_args(
                 .next()
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
+        if home.take(&argument, &mut value)? {
+            continue;
+        }
         match argument.as_str() {
             "--watch" => watch = true,
-            "--cache" => cache = value()?.into(),
-            "--machine" => {
-                return Err(
-                    "analytics materialize requires one local Event Index; --machine is not supported"
-                        .into(),
-                );
-            }
             "--batch-sessions" | "--batch-steps" => {
                 let limit = value()?
                     .parse::<usize>()
@@ -452,8 +448,15 @@ fn parse_materialize_args(
             }
         }
     }
+    home.check()?;
+    if !home.machines.is_empty() {
+        return Err(
+            "analytics materialize requires one local Event Index; --machine is not supported"
+                .into(),
+        );
+    }
     Ok(MaterializeArgs {
-        cache,
+        home,
         watch,
         input_budget,
     })
@@ -1458,15 +1461,27 @@ fn publish_materialization(
 
 /// Materialize the local Analytics Store from committed native evidence.
 fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
-    let index_path = semon_sessions::analytics_index_path(&args.cache);
+    let options = semon_sessions::Options {
+        since: args.home.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
+        ..args.home.options
+    };
+    let index_path = semon_sessions::analytics_index_path(&options.cache);
     let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
         format!(
             "analytics materialize requires an Event Index path with a parent: {}",
             index_path.display()
         )
     })?;
-    let initialized = semon_sessions::analytics::initialize_from_catalog(&index_path, || false)
-        .map_err(|error| error.to_string())?;
+    let stop = semon_push::Stop::new();
+    if args.watch {
+        interrupt::stop_on_signal(&stop);
+    }
+    let initialized =
+        semon_sessions::analytics::initialize_with_catalog(&options, || stop.is_stopped());
+    if args.watch && initialized.is_err() {
+        interrupt::raise_received();
+    }
+    let initialized = initialized.map_err(|error| error.to_string())?;
     println!("{}", initialized.disposition.message());
     let namespace = initialized.binding.namespace;
     let owner = initialized.owner;
@@ -1483,10 +1498,6 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
     }
     let writer = owner.start(config)?;
 
-    let stop = semon_push::Stop::new();
-    if args.watch {
-        interrupt::stop_on_signal(&stop);
-    }
     let result = (|| {
         publish_materialization(&writer, &stop)?;
         println!(
@@ -1494,6 +1505,8 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
             store_root.display()
         );
         while args.watch && !stop.sleep(std::time::Duration::from_secs(2)) {
+            semon_sessions::refresh_native_catalog(&options, || stop.is_stopped())
+                .map_err(|error| format!("Catalog refresh failed: {error}"))?;
             publish_materialization(&writer, &stop)?;
         }
         Ok(())
@@ -2409,8 +2422,8 @@ fn query_usage() -> String {
 }
 
 fn analytics_usage() -> String {
-    "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--cache PATH]\n\
-     Materializes analytics from the committed local Catalog and Event Index.\n\
+    "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [home options as for sessions]\n\
+     Runs the local native Catalog producer and publishes analytics from its committed Index.\n\
      Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
      One-shot finishes inherited replay, then drains immediately through a fresh endpoint; later changes belong to the next request.\n\
      --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait.\n\
@@ -2443,8 +2456,8 @@ fn usage() -> String {
          Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
          The agent read surface over native session evidence. `semon query` alone lists each tool's arguments.\n\
          \n\
-         Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--cache PATH]\n\
-         Materializes local-only analytics from the committed native Catalog and Event Index. Nothing starts this writer by default.\n\
+         Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
+         Runs the local native Catalog producer and publishes analytics from the committed Index. Nothing starts this writer by default.\n\
          Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
          \n\
          Usage: semon analytics coverage [--cache PATH] [--json]\n\
@@ -2484,6 +2497,70 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_materialize_publishes_while_unrelated_processes_change() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let claude = root.path().join("claude");
+        let project = claude.join("projects/test");
+        let pids = claude.join("sessions");
+        let proc_root = root.path().join("proc");
+        let process = proc_root.join("42/stat");
+        std::fs::create_dir_all(process.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&pids).unwrap();
+        std::fs::write(project.join("fixture.jsonl"), concat!(
+            "{\"type\":\"user\",\"uuid\":\"prompt\",\"sessionId\":\"fixture\",\"timestamp\":\"2026-10-03T08:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"Fixture request\"}}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"reply\",\"sessionId\":\"fixture\",\"timestamp\":\"2026-10-03T08:00:01Z\",\"message\":{\"id\":\"reply\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[{\"type\":\"text\",\"text\":\"Fixture reply\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n",
+        )).unwrap();
+        let options = semon_sessions::Options {
+            claude_home: claude,
+            claude_json: root.path().join("claude.json"),
+            codex_home: root.path().join("codex"),
+            copilot_home: root.path().join("copilot"),
+            proc_root,
+            cache: root.path().join("state/index.json"),
+            ..Default::default()
+        };
+        let index = semon_sessions::analytics_index_path(&options.cache);
+        let store = semon_sessions::analytics_store_root(&index).unwrap();
+        let changes = Arc::new(AtomicUsize::new(0));
+        let churn = Arc::clone(&changes);
+        let _hook = semon_sessions::test_hooks::register(&options.cache, move |point| {
+            if point == "runtime_before_recheck" {
+                let step = churn.fetch_add(1, Ordering::Relaxed) + 1;
+                assert!(step <= 128, "Catalog stalled during runtime churn");
+                std::fs::write(
+                    pids.join("42.json"),
+                    format!(r#"{{"sessionId":"unrelated-{step}","procStart":{step}}}"#),
+                )
+                .unwrap();
+                std::fs::write(&process, format!("42 (claude) {}{step}\n", "0 ".repeat(19)))
+                    .unwrap();
+            }
+        });
+        assert!(!index.exists());
+        run_materialize(MaterializeArgs {
+            home: HomeArgs {
+                options,
+                ..Default::default()
+            },
+            watch: false,
+            input_budget: semon_sessions::InputBudget::default(),
+        })
+        .unwrap();
+        assert!(changes.load(Ordering::Relaxed) > 0);
+        let manifest = semon_asi::read_manifest(&store).unwrap().unwrap();
+        assert_eq!(
+            semon_asi::read_live_map(&store, &manifest).unwrap().len(),
+            1
+        );
+    }
 
     #[test]
     fn durable_add_parser_requires_explicit_row_and_values_source() {

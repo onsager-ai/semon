@@ -57,15 +57,23 @@ pub fn refresh_native_catalog(options: &Options, cancelled: impl Fn() -> bool) -
                 "Catalog refresh cancelled",
             ));
         }
-        if evidence.refresh_catalog(&mut work, model::now_ms())? {
+        let complete = match evidence.refresh_catalog(&mut work, model::now_ms()) {
+            Ok(complete) => complete,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(25));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if complete {
             let cache = work
                 .events
                 .as_ref()
                 .ok_or_else(|| io::Error::other("Catalog producer has no index"))?;
             if !cache.qualified_catalog()? || !cache.pending_catalog_sources(1)?.is_empty() {
-                return Err(io::Error::other(
-                    "Catalog refresh completed without a publication",
-                ));
+                // Another producer or a native writer can add work after
+                // this step completes. Observe its committed state again.
+                continue;
             }
             return Ok(());
         }

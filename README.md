@@ -47,10 +47,10 @@ semon query search 'timeout'
 ```
 
 Use `semon query view FULL_ASI_UID` with a `body_uid` returned by search to inspect
-a hit. `semon query schema` describes the analytics tables. Materialization reads the local Catalog and Event Index. Keep the Viewer running
-and let its Catalog finish preparing before publishing a full snapshot. Materialize
-publishes one snapshot and exits. For ongoing publication, run `semon analytics materialize
---watch` in another process; Viewer and MCP do not start that writer automatically.
+a hit. `semon query schema` describes the analytics tables. Materialize runs the
+same local Catalog producer as the Viewer, publishes one analytics snapshot
+from the committed Event Index, and exits. Use `semon analytics materialize
+--watch` to refresh the Catalog and publish new analytics continuously.
 These commands keep data local. The [centralized default contract](docs/design/asi-centralized.md)
 uses `push`/`receive` for durable redacted-log custody across one owner's machines;
 receiver ASI materialization/SQL/search and integrated startup remain implementation
@@ -299,21 +299,21 @@ semon query get_session SESSION_ID --all                 # every log file
 ## Local analytics materialization
 
 `semon analytics materialize` is the explicit, local-only entry point for
-analytics publication. Start `semon sessions --serve` to populate and refresh
-the Catalog, then run materialize with the same `--cache` if you set one. It reads
-committed Catalog and Event Index evidence and writes Parquet under
-`<index parent>/analytics-store`. Viewer, MCP, push and receive never enable
-analytics publication implicitly. The analytics initializer records a random namespace plus an
+analytics publication. It starts the same native Catalog producer as the Viewer
+on a cold or existing cache. After that producer commits, the analytics writer
+reads the Event Index and writes Parquet under `<index parent>/analytics-store`.
+Viewer, MCP, push and receive leave analytics publication to the operator. The
+analytics initializer records a random namespace plus an
 independent origin incarnation together in the private JSON
 `<index parent>/analytics-namespace`. Later calls reuse all three identities;
 initialization alone leaves publication pending and writes no empty snapshot.
 Deleting that state directory creates a new namespace and new session IDs;
 there is no automatic reconciliation or rename/transfer workflow yet. Typed
 local paths can be present in the Parquet, so governed export remains a
-separate operation. Writer ownership precedes namespace creation. A missing
-Catalog, a busy writer, or a corrupt or unsupported index causes a refusal.
-Materialize can read committed rows while Catalog backfill continues. Those
-rows become eligible for analytics as the Catalog producer publishes them.
+separate operation. Analytics writer ownership precedes Catalog refresh and
+namespace creation. A busy writer or a corrupt or unsupported index causes a
+refusal. The Catalog refresh covers all native history regardless of `--since`
+or `--all`.
 `--batch-sessions N` limits sessions or journal entries per chunk (default 64),
 and `--batch-steps N` limits admitted steps (default 8192). Both limits must be
 positive integers no greater than `min(usize::MAX, i64::MAX)` for the build
@@ -332,7 +332,7 @@ chain. Its retries can add failures to the overall wait; they neither spend nor
 reset the publication budget. Terminal refusal, NoWriter, owning-waiter
 cancellation and shutdown drop the chain. The next chain starts at zero.
 Each request waits for all required chunks and final compaction. `--watch` exits
-on publication failure and cancels its wait on SIGINT/SIGTERM before
+on Catalog refresh or analytics publication failure and cancels its wait on SIGINT/SIGTERM before
 joining the writer and re-raising the signal.
 
 ```sh

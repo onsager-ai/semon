@@ -1088,8 +1088,9 @@ pub(crate) trait IndexStore: Send {
         paths: &[String],
         runtime: &str,
         journaled_runtime: bool,
+        local: Option<&crate::Options>,
     ) -> Result<Outcome, StoreError> {
-        let _ = (paths, runtime, journaled_runtime);
+        let _ = (paths, runtime, journaled_runtime, local);
         Err(StoreError::Data("semantic staging unavailable".into()))
     }
     fn semantic_batch(
@@ -1990,24 +1991,26 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_semantic_stage(
         &mut self,
         paths: &[String],
         runtime: &str,
     ) -> io::Result<Outcome> {
-        self.begin_semantic_stage_with_journal(paths, runtime, false)
+        self.begin_semantic_stage_with_runtime(paths, runtime, false, None)
     }
 
-    pub(crate) fn begin_semantic_stage_with_journal(
+    pub(crate) fn begin_semantic_stage_with_runtime(
         &mut self,
         paths: &[String],
         runtime: &str,
         journaled_runtime: bool,
+        local: Option<&crate::Options>,
     ) -> io::Result<Outcome> {
         self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .begin_semantic_stage(paths, runtime, journaled_runtime)
+            .begin_semantic_stage(paths, runtime, journaled_runtime, local)
             .map_err(|error| io::Error::other(error.to_string()))
     }
 

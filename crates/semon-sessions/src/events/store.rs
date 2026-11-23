@@ -2329,8 +2329,9 @@ impl IndexStore for SqliteStore {
         paths: &[String],
         runtime: &str,
         journaled_runtime: bool,
+        local: Option<&crate::Options>,
     ) -> Result<Outcome, StoreError> {
-        self.semantic_begin_with_journal(paths, runtime, journaled_runtime)
+        self.semantic_begin_with_runtime(paths, runtime, journaled_runtime, local)
     }
     fn semantic_batch(
         &mut self,

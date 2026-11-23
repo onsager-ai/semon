@@ -105,9 +105,9 @@ observing the new physical witness as pending.
 ## Integration after the storage stack merges
 
 `semon analytics materialize` is the explicit local lifecycle entry point for
-this plan. It starts `semon-sessions::analytics_writer` against a read-only
-SQLite index with a committed Catalog publication. The native Catalog/activity
-producer owns its bounded rules repairs. Nothing starts the writer by default: Viewer, MCP,
+this plan. It runs the local native Catalog/activity producer, which owns
+bounded rules repairs. Then it starts `semon-sessions::analytics_writer` against
+the committed read-only SQLite index. Nothing starts the writer by default: Viewer, MCP,
 push and receive remain disabled as hosts. The Viewer drives the same native
 Catalog producer, including rules repairs, but does not start the analytics
 writer or a replacement publication. Materialize first calls the explicit
@@ -116,9 +116,9 @@ namespace and independent origin incarnation together in the current versioned J
 `<index parent>/analytics-namespace`. Later calls reuse both; the native index owns
 its separate index incarnation. Deleting that state directory starts a new namespace with new session IDs;
 there is no automatic reconciliation. Rename or transfer is a later explicit
-operator workflow. The CLI's `--watch` reads later Index commits until stopped
-and exits visibly on publication failure. It acquires the store lock before
-namespace creation. Namespace
+operator workflow. The CLI's `--watch` refreshes the native Catalog before
+each later publication and exits visibly on refresh or publication failure. It
+acquires the store lock before the first refresh and namespace creation. Namespace
 validity and missing-file/store ambiguity are checked read-only before store
 opening and crash recovery, so namespace refusal preserves all crash leftovers.
 Existing index validation is read-only and precedes analytics state creation, so

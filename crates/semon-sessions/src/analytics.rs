@@ -6,7 +6,7 @@
 mod initialize;
 pub use initialize::{
     Binding, Disposition, Error, ErrorKind, Initialized, Stage, initialize,
-    initialize_from_catalog, read_binding,
+    initialize_with_catalog, read_binding,
 };
 
 use std::{

@@ -111,9 +111,9 @@ job; rebuilds still require available authorized sources and custody proof.
 
 ## Callers and enrollment
 
-- `analytics materialize` initializes analytics against an existing Catalog,
-  then reads committed Index snapshots for bounded publication and compaction.
-  In watch mode it drains later commits while the native producer owns refresh.
+- `analytics materialize` runs the local native Catalog producer, initializes
+  analytics, then reads committed Index snapshots for bounded publication and
+  compaction. Watch requests a fresh native Catalog cycle before each drain.
 - Analytics/body `connect` calls initialize before pairing begins. The replacement
   point is `connect::producer_admission(kinds, analytics_state_dir)` (#651, on
   `main`). That seam needs only a read-only function returning exactly those three
