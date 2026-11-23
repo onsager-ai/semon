@@ -2500,6 +2500,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn materialize_publishes_when_a_process_exits_after_runtime_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let claude_home = root.path().join("claude");
+        let projects = claude_home.join("projects/-work-proj");
+        let pids = claude_home.join("sessions");
+        let proc_root = root.path().join("proc");
+        let process = proc_root.join("42/stat");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(&pids).unwrap();
+        std::fs::create_dir_all(process.parent().unwrap()).unwrap();
+        std::fs::write(
+            projects.join("fixture.jsonl"),
+            concat!(
+                "{\"type\":\"user\",\"uuid\":\"user\",\"sessionId\":\"fixture\",\"timestamp\":\"2026-09-24T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"Synthetic request\"}}\n",
+                "{\"type\":\"assistant\",\"uuid\":\"reply\",\"sessionId\":\"fixture\",\"timestamp\":\"2026-09-24T00:01:00Z\",\"message\":{\"id\":\"reply\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[{\"type\":\"text\",\"text\":\"Synthetic reply\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            pids.join("42.json"),
+            r#"{"sessionId":"fixture","procStart":777}"#,
+        )
+        .unwrap();
+        std::fs::write(&process, format!("42 (claude) {}777\n", "0 ".repeat(19))).unwrap();
+        let options = semon_sessions::Options {
+            claude_home,
+            claude_json: root.path().join(".claude.json"),
+            codex_home: root.path().join("codex"),
+            copilot_home: root.path().join("copilot"),
+            proc_root,
+            cache: root.path().join("state/index.json"),
+            annotations: root.path().join("annotations.jsonl"),
+            all: true,
+            ..Default::default()
+        };
+        let index = semon_sessions::analytics_index_path(&options.cache);
+        let store = semon_sessions::analytics_store_root(&index).unwrap();
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_exit = exited.clone();
+        let _hook = semon_sessions::test_hooks::register(&options.cache, move |point| {
+            if point == "runtime_captured"
+                && !observed_exit.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                std::fs::remove_file(&process).unwrap();
+            }
+        });
+        run_materialize(MaterializeArgs {
+            home: HomeArgs {
+                options,
+                ..Default::default()
+            },
+            watch: false,
+            input_budget: semon_sessions::InputBudget {
+                max_sessions: 16,
+                max_steps: 4096,
+            },
+        })
+        .unwrap();
+        assert!(exited.load(std::sync::atomic::Ordering::Relaxed));
+        let manifest = semon_asi::read_manifest(&store).unwrap().unwrap();
+        assert_eq!(
+            semon_asi::read_live_map(&store, &manifest).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
     fn durable_add_parser_requires_explicit_row_and_values_source() {
         for args in [
             vec!["add"],

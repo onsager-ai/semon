@@ -1254,6 +1254,8 @@ struct CachedFile {
 /// to an [`IndexStore`] file by file when one could be opened.
 #[derive(Default)]
 pub(crate) struct EventCache {
+    /// Shared by every batch of an explicit local Catalog refresh.
+    pub(crate) local_refresh_runtime: Option<Arc<crate::facts::LocalRuntime>>,
     files: BTreeMap<String, CachedFile>,
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
@@ -1313,6 +1315,27 @@ pub(crate) struct ReportedFileStamp {
     modified_ns: u128,
 }
 
+impl ReportedFileStamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(not(unix))]
+            dev: 0,
+            #[cfg(unix)]
+            ino: metadata.ino(),
+            #[cfg(not(unix))]
+            ino: 0,
+            size: metadata.len(),
+            modified_ns: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |time| time.as_nanos()),
+        }
+    }
+}
+
 /// Only the named fields deserialize. Other account and project values are
 /// consumed as ignored JSON and never enter the session model or facts.
 #[derive(Deserialize)]
@@ -1365,6 +1388,23 @@ pub(crate) fn current_reported_runs(path: &Path) -> Vec<crate::facts::ReportedRu
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Snapshot and stamp of the same open state file. The capture clock is added
+/// only when ingesting it, so it cannot change a runtime fingerprint.
+pub(crate) fn capture_reported_runs(
+    path: &Path,
+) -> Option<(ReportedFileStamp, Vec<crate::facts::ReportedRunSnapshot>)> {
+    let file = crate::open_input(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    let stamp = ReportedFileStamp::of(&metadata);
+    let root: ClaudeJson = serde_json::from_reader(file).ok()?;
+    let runs = root
+        .projects
+        .into_values()
+        .filter_map(|project| project.snapshot(0))
+        .collect();
+    Some((stamp, runs))
 }
 
 /// Says once per process that the index runs in memory, and why.
@@ -2646,41 +2686,42 @@ impl EventCache {
         let Ok(metadata) = fs::metadata(path) else {
             return;
         };
-        let modified_ns = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |time| time.as_nanos());
-        #[cfg(unix)]
-        let (dev, ino) = (metadata.dev(), metadata.ino());
-        #[cfg(not(unix))]
-        let (dev, ino) = (0, 0);
-        let stamp = ReportedFileStamp {
-            dev,
-            ino,
-            size: metadata.len(),
-            modified_ns,
-        };
-        if self.claude_json_stamp.as_ref() == Some(&stamp) {
-            if self.runs_unsaved {
-                let runs: Vec<_> = self.reported_runs().cloned().collect();
-                self.save_runs(&runs, &stamp);
-            }
+        let stamp = ReportedFileStamp::of(&metadata);
+        if self.reported_runs_current(&stamp) {
             return;
         }
-        let Ok(file) = crate::open_input(path) else {
+        let Some((stamp, runs)) = capture_reported_runs(path) else {
             return;
         };
-        let Ok(root) = serde_json::from_reader::<_, ClaudeJson>(file) else {
-            return;
-        };
-        self.claude_json_stamp = Some(stamp.clone());
+        self.ingest_reported_runs(&stamp, &runs, capture_at);
         *dirty = true;
+    }
+
+    fn reported_runs_current(&mut self, stamp: &ReportedFileStamp) -> bool {
+        if self.claude_json_stamp.as_ref() != Some(stamp) {
+            return false;
+        }
+        if self.runs_unsaved {
+            let runs: Vec<_> = self.reported_runs().cloned().collect();
+            self.save_runs(&runs, stamp);
+        }
+        true
+    }
+
+    pub(crate) fn ingest_reported_runs(
+        &mut self,
+        stamp: &ReportedFileStamp,
+        runs: &[crate::facts::ReportedRunSnapshot],
+        capture_at: i64,
+    ) {
+        if self.reported_runs_current(stamp) {
+            return;
+        }
+        self.claude_json_stamp = Some(stamp.clone());
         let mut read = Vec::new();
-        for project in root.projects.into_values() {
-            let Some(snapshot) = project.snapshot(capture_at) else {
-                continue;
-            };
+        for snapshot in runs {
+            let mut snapshot = snapshot.clone();
+            snapshot.capture_at = capture_at;
             let session_id = snapshot.last_session_id.clone();
             let start = snapshot.last_start_time;
             read.push(snapshot.clone());
@@ -2689,7 +2730,7 @@ impl EventCache {
                 .or_default()
                 .insert(start, snapshot);
         }
-        self.save_runs(&read, &stamp);
+        self.save_runs(&read, stamp);
     }
 
     /// Writes reported runs through to the store, and takes back every run

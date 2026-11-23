@@ -107,18 +107,49 @@ impl RuntimeObservations {
                 }
                 Some(facts)
             });
+        let pids = facts.as_ref().map_or_else(Vec::new, |facts| {
+            crate::model::pid_files(
+                options,
+                &crate::facts::MachineFacts::Recorded(Box::new(facts.clone())),
+            )
+        });
         measurements.record("runtime_ctor_facts", started, 1);
+        Self::from_facts(options, local, facts, pids, sqlite, measurements)
+    }
+
+    pub(crate) fn from_local_capture(
+        options: &Options,
+        runtime: &crate::facts::LocalRuntime,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Self {
+        let mut observations = Self::from_facts(
+            options,
+            true,
+            Some(runtime.facts.clone()),
+            runtime.pids.clone(),
+            true,
+            measurements,
+        );
+        observations.fallback = Some(runtime.generation.clone());
+        observations
+    }
+
+    fn from_facts(
+        options: &Options,
+        local: bool,
+        facts: Option<crate::Facts>,
+        captured_pids: Vec<crate::model::PidFile>,
+        sqlite: bool,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Self {
         let started = measurements.start();
         let mut pids = BTreeMap::<String, Vec<_>>::new();
         let mut names = BTreeMap::new();
         let mut runs = BTreeMap::<String, Vec<_>>::new();
+        for pid in captured_pids {
+            pids.entry(pid.session.clone()).or_default().push(pid);
+        }
         if let Some(facts) = &facts {
-            for pid in crate::model::pid_files(
-                options,
-                &crate::facts::MachineFacts::Recorded(Box::new(facts.clone())),
-            ) {
-                pids.entry(pid.session.clone()).or_default().push(pid);
-            }
             for (index, name) in facts.native_names.iter().enumerate() {
                 names.insert((name.harness.clone(), name.native_id.clone()), index);
             }
@@ -212,7 +243,7 @@ impl RuntimeObservations {
         let mut cwds = BTreeSet::new();
         let Some(connection) = self.connection.as_ref() else {
             // Without durable source metadata, publication can only bind the
-            // aggregate observation captured and rechecked by its producer.
+            // aggregate observation held by its producer.
             return self
                 .fallback
                 .clone()

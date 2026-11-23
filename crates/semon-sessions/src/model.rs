@@ -892,7 +892,7 @@ impl SourceFile {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct PidFile {
     pub(crate) pid: u32,
     pub(crate) session: String,
@@ -985,6 +985,9 @@ fn stamp_of(path: &Path) -> Stamp {
 }
 
 pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFile> {
+    if let Some(runtime) = machine.local_capture() {
+        return runtime.pids.clone();
+    }
     let mut result = Vec::new();
     let Ok(entries) = fs::read_dir(options.claude_home.join("sessions")) else {
         return result;
@@ -7042,8 +7045,10 @@ pub(crate) fn prepare_semantic_index_sources(
         .map(|path| crate::source_change::SourceLock::acquire(options, path, false))
         .collect::<io::Result<Vec<_>>>()?;
     let base_generation = cache.session_catalog_generation();
-    let facts = MachineFacts::of(options);
-    let runtime = crate::native_evidence::query_runtime_generation(options)?;
+    let facts = cache.local_refresh_runtime.as_ref().map_or_else(
+        || MachineFacts::of(options),
+        |runtime| MachineFacts::Captured(Arc::clone(runtime)),
+    );
     let mut withdrawals = Vec::new();
     if let Some(facts_path) = &options.facts
         && inputs.iter().any(|input| {
@@ -7051,6 +7056,7 @@ pub(crate) fn prepare_semantic_index_sources(
                 && !facts.codex_rollout_is_current(options, &input.full_path(options))
         })
     {
+        let runtime = crate::native_evidence::query_runtime_generation(options)?;
         let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
         let facts_identity =
             crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
@@ -7165,8 +7171,8 @@ pub(crate) fn prepare_semantic_index_sources(
             ));
         }
     }
-    if !withdrawals.is_empty()
-        && crate::native_evidence::query_runtime_generation(options)? != runtime
+    if let Some(withdrawal) = withdrawals.first()
+        && crate::native_evidence::query_runtime_generation(options)? != withdrawal.runtime
     {
         return Err(io::Error::other("native source admission runtime changed"));
     }
@@ -7593,30 +7599,33 @@ fn build_sources_inner(
         _ => Vec::new(),
     };
     measurements.record("source_locks", started, _source_locks.len());
+    let local_runtime = cache.local_refresh_runtime.clone();
     let query_runtime = measured!(
         "runtime_fingerprint",
         1,
-        crate::native_evidence::query_runtime_generation(options)?
+        match &local_runtime {
+            Some(runtime) => runtime.generation.clone(),
+            None => crate::native_evidence::query_runtime_generation(options)?,
+        }
     );
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
-            if cache.projection_only() {
-                crate::native_evidence::RuntimeObservations::projection_publication_measured(
-                    options,
-                    &query_runtime,
-                    &mut measurements,
-                )
-            } else {
-                crate::native_evidence::RuntimeObservations::for_publication_measured(
-                    options,
-                    &query_runtime,
-                    &mut measurements,
-                )
-            }
+        if let Some(runtime) = &local_runtime {
+            crate::native_evidence::RuntimeObservations::from_local_capture(
+                options,
+                runtime,
+                &mut measurements,
+            )
+            .into_scoped()
         } else if cache.projection_only() {
             crate::native_evidence::RuntimeObservations::projection_publication_measured(
+                options,
+                &query_runtime,
+                &mut measurements,
+            )
+        } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+            crate::native_evidence::RuntimeObservations::for_publication_measured(
                 options,
                 &query_runtime,
                 &mut measurements,
@@ -7645,7 +7654,14 @@ fn build_sources_inner(
         }};
     }
 
-    let facts = measured!("machine_facts", 1, MachineFacts::of(options));
+    let facts = measured!(
+        "machine_facts",
+        1,
+        local_runtime.as_ref().map_or_else(
+            || MachineFacts::of(options),
+            |runtime| MachineFacts::Captured(Arc::clone(runtime)),
+        )
+    );
     let window_start = scan_cutoff(options, now);
     let staged_relationships = match &selection {
         BuildSelection::Staged { relationships, .. } => Some(*relationships),
@@ -7753,7 +7769,7 @@ fn build_sources_inner(
         home = facts.home();
         groups = lineages(&files);
     });
-    if cache.is_scoped() && matches!(&facts, MachineFacts::Local) {
+    if cache.is_scoped() && !matches!(&facts, MachineFacts::Recorded(_)) {
         let ids: BTreeSet<_> = files
             .iter()
             .flat_map(|file| {
@@ -7769,7 +7785,7 @@ fn build_sources_inner(
     }
     let started = measurements.start();
     let reported_runs: Vec<ReportedRunSnapshot> = match &facts {
-        MachineFacts::Local => cache.reported_runs().cloned().collect(),
+        MachineFacts::Local | MachineFacts::Captured(_) => cache.reported_runs().cloned().collect(),
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
     measurements.record("reported_runs_collect", started, reported_runs.len());
@@ -8197,7 +8213,10 @@ fn build_sources_inner(
             }
         }
     }
+    // Materialization builds from its request capture. Live changes after
+    // that capture do not invalidate the source and sidecar proofs below.
     if catalog.is_some()
+        && local_runtime.is_none()
         && measured!(
             "runtime_recheck",
             1,

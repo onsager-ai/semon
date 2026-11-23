@@ -928,11 +928,18 @@ pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
-    _runtime: &str,
+    local_runtime: Option<&crate::facts::LocalRuntime>,
 ) -> io::Result<Option<String>> {
     let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let observations = crate::native_evidence::RuntimeObservations::new(options);
+    let observations = match local_runtime {
+        Some(runtime) => crate::native_evidence::RuntimeObservations::from_local_capture(
+            options,
+            runtime,
+            &mut crate::native_timing::Measurements::default(),
+        ),
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    };
     let machine = crate::facts::MachineFacts::of(options);
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -5879,13 +5886,16 @@ pub(crate) fn catalog_names_json(db: &Connection) -> rusqlite::Result<Option<Str
 pub(crate) fn publish_catalog_names(
     options: &crate::Options,
     namespace: &crate::storage::Namespace,
+    local_runtime: Option<&crate::facts::LocalRuntime>,
 ) -> io::Result<()> {
     let _facts_fence = options
         .facts
         .as_ref()
         .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
         .transpose()?;
-    let names = if let Some(path) = options.facts.as_ref() {
+    let names = if let Some(runtime) = local_runtime {
+        runtime.facts.native_names.clone()
+    } else if let Some(path) = options.facts.as_ref() {
         let Ok(authority) = crate::facts::source_authority::CurrentSources::open(path) else {
             // Offline or unavailable Facts cannot publish a new name observation.
             return Ok(());
