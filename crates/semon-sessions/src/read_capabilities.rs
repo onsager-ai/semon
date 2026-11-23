@@ -20,6 +20,15 @@ pub fn session_catalog_capabilities(
     source_key: &str,
     endpoints: SessionReadEndpoints,
 ) -> ViewerReply {
+    capabilities(source_key, endpoints, false, 7)
+}
+
+pub(crate) fn capabilities(
+    source_key: &str,
+    endpoints: SessionReadEndpoints,
+    source_candidates: bool,
+    projection: u32,
+) -> ViewerReply {
     if source_key.is_empty() || source_key.len() > 4096 {
         return crate::catalog::error(
             400,
@@ -31,10 +40,11 @@ pub fn session_catalog_capabilities(
     ViewerReply {
         status:200,
         content_type:"application/json; charset=utf-8",
-        body:json!({"api":1,"read_contract":"catalog-v1","source_key":source_key,
+        body:json!({"api":1,"read_contract":"catalog-v1","source_key":source_key,"projection":projection,
             "native_resolution":endpoints.native_resolution,"selected_identity":endpoints.selected_identity,"selected_transcript":endpoints.selected_transcript,
             "selected_entry":endpoints.selected_entry,"pagination":true,"relationship_context":endpoints.selected_transcript,
-            "large_native_records":false,"attachment":endpoints.selected_entry,"global_union":false,"full_text_search":false,
+            "native_transcript":endpoints.selected_transcript && projection == 7,"source_candidates":source_candidates,
+            "large_native_records":endpoints.selected_entry,"attachment":endpoints.selected_entry,"global_union":false,"full_text_search":false,
             "metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc"}).to_string().into_bytes(),
         etag:None,
         extra_headers: Vec::new(),

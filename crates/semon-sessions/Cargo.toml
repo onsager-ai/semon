@@ -12,7 +12,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 getrandom.workspace = true
 libc.workspace = true
 reqwest.workspace = true
-rusqlite = { workspace = true, features = ["cache", "hooks", "limits"] }
+rusqlite = { workspace = true, features = ["cache", "functions", "hooks", "limits"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["compress"] }
@@ -32,7 +32,6 @@ test-ui-account-server = []
 test-hooks = []
 
 [dev-dependencies]
-rusqlite = { workspace = true, features = ["functions"] }
 arrow = { version = "=58.4.1", default-features = false }
 parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }
 

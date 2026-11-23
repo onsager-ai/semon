@@ -1,4 +1,6 @@
-export type CatalogReadScope = 'current' | 'retained_history';
+import type { CatalogReadScope } from '../lib/sessionRoute';
+
+export type { CatalogReadScope } from '../lib/sessionRoute';
 export type CatalogNativeSelection = 'cached' | 'stale' | 'incomplete' | 'unavailable' | 'retired';
 export type CatalogFreshness = 'cached' | 'stale' | 'incomplete' | 'unavailable';
 export interface CatalogSourceReference {

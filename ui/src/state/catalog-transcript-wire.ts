@@ -1,4 +1,5 @@
 import { array, boolean, dictionary, number, object, text } from '../domain/validate';
+import { parseNativeEntryAddress, type NativeEntryAddress } from '../lib/sessionRoute';
 import {
   parseRecordedRelationship,
   parseRecordedTurn,
@@ -78,8 +79,12 @@ function ordinal(value: unknown): number {
 }
 function entry(value: unknown): CatalogTranscriptEntry {
   const row = object(value),
-    entryId = text(row.entry_id),
-    slot = ordinal(row.slot),
+    slot = ordinal(row.slot);
+  const parsed = entryDetails(row);
+  return { ...parsed, slot, entry: { ...parsed.entry, slot } };
+}
+function entryDetails(row: Record<string, unknown>): Omit<CatalogTranscriptEntry, 'slot'> {
+  const entryId = text(row.entry_id),
     parsed = parseEntry(row);
   const provenance = row.provenance === null && parsed.k === 'end' ? null : object(row.provenance);
   if (!provenance && (row.field !== undefined || row.clipped === true))
@@ -135,10 +140,8 @@ function entry(value: unknown): CatalogTranscriptEntry {
     freshness = { state };
   }
   parsed.key = entryId;
-  parsed.slot = slot;
   return {
     entry_id: entryId,
-    slot,
     observed_at: row.observed_at == null ? null : number(row.observed_at),
     entry: parsed,
     clipped: row.clipped === undefined ? undefined : boolean(row.clipped),
@@ -187,12 +190,31 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     next !== (end < total ? end : null) ||
     entries.some((item, i) => item.slot !== first + i) ||
     new Set(entries.map((item) => item.entry_id)).size !== entries.length ||
-    (context.state !== 'incomplete' && context.state !== 'complete') ||
-    !Array.isArray(context.handoffs) ||
-    context.handoffs.length > 200 ||
     (state !== 'cached' && state !== 'stale' && state !== 'incomplete' && state !== 'unavailable')
   )
     throw new Error('Invalid catalog transcript page');
+  return {
+    api: 1,
+    identity,
+    session,
+    projection: { version: 6, generation, errorsGeneration, total },
+    range: { first, end, next },
+    entries,
+    freshness: { state },
+    relationship_context: parseRelationshipContext(context, identity, entries),
+  };
+}
+function parseRelationshipContext(
+  context: Record<string, unknown>,
+  identity: CatalogSessionIdentity,
+  entries: readonly Pick<CatalogTranscriptEntry, 'entry'>[],
+): CatalogTranscriptPage['relationship_context'] {
+  if (
+    (context.state !== 'incomplete' && context.state !== 'complete') ||
+    !Array.isArray(context.handoffs) ||
+    context.handoffs.length > 200
+  )
+    throw Error('Invalid ranged relationship context');
   const relationships = array(context.handoffs, parseRecordedRelationship);
   const turns = array(context.turns ?? [], (value) => {
       const row = object(value);
@@ -222,51 +244,135 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
   )
     throw Error('Invalid ranged relationship scope');
   return {
-    api: 1,
+    state: context.state,
+    turn_ids: array(context.turn_ids, text),
+    turns,
+    handoffs: relationships,
+    sessions: dictionary(context.sessions ?? {}, (value) => {
+      const row = object(value);
+      const activity = row.activity == null ? undefined : object(row.activity);
+      if (activity && text(activity.tool).length > 256)
+        throw Error('Invalid recorded child activity');
+      return {
+        name: text(row.name),
+        harness: text(row.harness),
+        model: text(row.model),
+        kind: row.kind == null ? undefined : text(row.kind),
+        state: row.state == null ? undefined : text(row.state),
+        start: row.start == null ? undefined : number(row.start),
+        last: row.last == null ? undefined : number(row.last),
+        calls: row.calls == null ? undefined : ordinal(row.calls),
+        usd: row.usd == null ? undefined : number(row.usd),
+        activity: activity
+          ? { tool: text(activity.tool), since: ordinal(activity.since) }
+          : undefined,
+        live_observation:
+          row.live_observation == null
+            ? undefined
+            : row.live_observation === 0
+              ? false
+              : row.live_observation === 1
+                ? true
+                : boolean(row.live_observation),
+      };
+    }),
+    previews: dictionary(context.previews ?? {}, (value) => {
+      const generation = text(value);
+      if (!/^[a-f0-9]{64}$/.test(generation)) throw Error('Invalid context generation');
+      return generation;
+    }),
+  };
+}
+
+export type CatalogNativeTranscriptEntry = Omit<CatalogTranscriptEntry, 'slot'> & {
+  address: NativeEntryAddress;
+};
+export type CatalogDisplayedEntry =
+  | (CatalogTranscriptEntry & { address?: undefined })
+  | (CatalogNativeTranscriptEntry & { slot?: undefined });
+
+export interface CatalogNativeTranscriptPage {
+  identity: CatalogSessionIdentity;
+  binding: string;
+  errorsGeneration: string;
+  position: 'latest' | 'earlier' | 'address';
+  earlierCursor: string | null;
+  entries: CatalogNativeTranscriptEntry[];
+  relationship_context: CatalogTranscriptPage['relationship_context'];
+  session: CatalogSession | null;
+  selected: { harness: string; nativeId: string; title: string | null; model: string | null };
+}
+export function parseCatalogNativeEntry(
+  value: unknown,
+  binding: string,
+): CatalogNativeTranscriptEntry {
+  const row = object(value),
+    address = parseNativeEntryAddress(row.address);
+  const item = entryDetails(row);
+  if (
+    row.slot !== undefined ||
+    address.binding !== binding ||
+    address.entry_id !== item.entry_id ||
+    !item.provenance ||
+    address.record.path !== item.provenance.source.path ||
+    address.block !== item.provenance.block ||
+    address.record.offset > item.provenance.source.offset
+  )
+    throw new Error('Invalid addressed transcript entry');
+  return { ...item, address };
+}
+export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeTranscriptPage {
+  const row = object(value),
+    identity = parseCatalogIdentity(row.identity),
+    selected = object(row.selected);
+  const { title, model } = selected;
+  const binding = text(row.binding),
+    errorsGeneration = text(row.errors_generation),
+    earlierCursor = row.earlier_cursor === null ? null : text(row.earlier_cursor);
+  if (
+    row.api !== 1 ||
+    row.projection !== 7 ||
+    !/^[a-f0-9]{64}$/.test(binding) ||
+    !/^[a-f0-9]{64}$/.test(errorsGeneration) ||
+    row.source_key !== identity.source_key ||
+    row.catalog_key !== identity.catalog_key ||
+    row.read_scope !== identity.read_scope ||
+    selected.harness !== identity.harness ||
+    !Array.isArray(row.entries) ||
+    row.entries.length > 4096 ||
+    (earlierCursor !== null && (!earlierCursor || earlierCursor.length > 65536)) ||
+    (row.position !== 'latest' && row.position !== 'earlier' && row.position !== 'address')
+  )
+    throw new Error('Invalid committed transcript window');
+  const entries = array(row.entries, (value) => parseCatalogNativeEntry(value, binding));
+  if (new Set(entries.map((entry) => entry.entry_id)).size !== entries.length)
+    throw new Error('Duplicate committed transcript entry');
+  const references = new Map(identity.source_refs.map(({ source }) => [source.path, source]));
+  if (
+    entries.some(({ provenance }) => {
+      const source = provenance!.source;
+      return JSON.stringify(references.get(source.path)) !== JSON.stringify(source);
+    })
+  )
+    throw new Error('Committed transcript provenance is outside the selected component');
+  return {
     identity,
-    session,
-    projection: { version: 6, generation, errorsGeneration, total },
-    range: { first, end, next },
+    binding,
+    errorsGeneration,
+    relationship_context: parseRelationshipContext(
+      object(row.relationship_context),
+      identity,
+      entries,
+    ),
+    session: row.session === null ? null : parseCatalogSession(row.session),
+    position: row.position,
+    earlierCursor,
     entries,
-    freshness: { state },
-    relationship_context: {
-      state: context.state,
-      turn_ids: array(context.turn_ids, text),
-      turns,
-      handoffs: relationships,
-      sessions: dictionary(context.sessions ?? {}, (value) => {
-        const row = object(value);
-        const activity = row.activity == null ? undefined : object(row.activity);
-        if (activity && text(activity.tool).length > 256)
-          throw Error('Invalid recorded child activity');
-        return {
-          name: text(row.name),
-          harness: text(row.harness),
-          model: text(row.model),
-          kind: row.kind == null ? undefined : text(row.kind),
-          state: row.state == null ? undefined : text(row.state),
-          start: row.start == null ? undefined : number(row.start),
-          last: row.last == null ? undefined : number(row.last),
-          calls: row.calls == null ? undefined : ordinal(row.calls),
-          usd: row.usd == null ? undefined : number(row.usd),
-          activity: activity
-            ? { tool: text(activity.tool), since: ordinal(activity.since) }
-            : undefined,
-          live_observation:
-            row.live_observation == null
-              ? undefined
-              : row.live_observation === 0
-                ? false
-                : row.live_observation === 1
-                  ? true
-                  : boolean(row.live_observation),
-        };
-      }),
-      previews: dictionary(context.previews ?? {}, (value) => {
-        const generation = text(value);
-        if (!/^[a-f0-9]{64}$/.test(generation)) throw Error('Invalid context generation');
-        return generation;
-      }),
+    selected: {
+      harness: identity.harness,
+      nativeId: text(selected.native_id),
+      title: title === null ? null : text(title),
+      model: model === null ? null : text(model),
     },
   };
 }

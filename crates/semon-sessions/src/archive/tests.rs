@@ -1247,3 +1247,48 @@ fn a_failed_prefix_decoder_open_does_not_reserve_capacity() {
     assert!(admit(&archive, &log, 128));
     assert_eq!(prefix_resources(&archive), (0, 0));
 }
+
+#[test]
+fn seekable_copy_charges_only_covering_chunks_and_loses_custody_after_pruning() {
+    use crate::{SessionSourceRef, source_chunks::SIZE};
+
+    let (_scratch, archive) = archive();
+    let _clock = Clock::at(10);
+    let bytes = lines(5 * SIZE, 42);
+    let path = Path::new("/fixture/native.jsonl");
+    let offset = 4 * SIZE + 17;
+    let source = SessionSourceRef {
+        root: "claude".into(),
+        path: "projects/fixture/native.jsonl".into(),
+        native_id: "native".into(),
+        offset: offset as u64,
+        prefix_sha256: Sha256::digest(&bytes[..offset]).into(),
+        tail_sha256: Sha256::digest(&bytes[offset - 4096..offset]).into(),
+    };
+    let chain = archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut bytes.as_slice(),
+            NATIVE_REDACTOR,
+        )
+        .unwrap()
+        .unwrap();
+    seekable::prepare(&archive, path, &source).unwrap();
+    let mut budget = 3 * SIZE;
+    let mut copy = seekable::CopyRead::open(&archive, path, &source, None, &mut budget).unwrap();
+    assert_eq!(budget, SIZE);
+    assert_eq!(copy.generation(), chain.chain_id);
+    assert_eq!(copy.range(7, 20, &mut budget).unwrap(), bytes[7..27]);
+    assert_eq!(budget, 0);
+    assert_eq!(copy.range(8, 20, &mut budget).unwrap(), bytes[8..28]);
+    assert_eq!(
+        copy.range(SIZE as u64, 1, &mut budget).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(archive.prune_at(Some(0), 11).unwrap(), 1);
+    assert!(copy.range(7, 20, &mut budget).is_err());
+    assert!(
+        matches!(seekable::CopyRead::open(&archive, path, &source, None, &mut budget),
+        Err(error) if error.kind() == io::ErrorKind::NotFound)
+    );
+}

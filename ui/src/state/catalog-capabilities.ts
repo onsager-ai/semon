@@ -4,6 +4,7 @@ export interface CatalogCapabilities {
   read_contract: 'catalog-v1';
   source_key: string;
   selected_transcript: boolean;
+  native_transcript?: boolean;
   selected_identity: boolean;
   selected_entry: boolean;
   source_candidates: boolean;
@@ -47,6 +48,7 @@ export function parseCatalogCapabilities(value: unknown): CatalogCapabilities {
     read_contract: 'catalog-v1',
     source_key: sourceKey,
     selected_transcript: boolean(row.selected_transcript),
+    native_transcript: row.native_transcript === undefined ? false : boolean(row.native_transcript),
     selected_identity: boolean(row.selected_identity),
     selected_entry: boolean(row.selected_entry),
     source_candidates: row.source_candidates === undefined ? false : boolean(row.source_candidates),

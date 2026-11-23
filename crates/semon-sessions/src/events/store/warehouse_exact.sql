@@ -32,8 +32,9 @@ WITH RECURSIVE probes(native_id) AS (
   CROSS JOIN lineage_member m ON m.component=original.component
   LEFT JOIN warehouse_current current ON current.source=m.source
   LEFT JOIN json_each(?2) paths ON paths.value=current.path
-  LEFT JOIN warehouse_source s ON s.source=m.source AND s.origin=?3 AND s.carrier=paths.value
-  LEFT JOIN files f ON f.path=paths.value AND f.resume_at=json_extract(s.ledger,'$.offset')
+  LEFT JOIN warehouse_source s ON s.source=m.source AND s.origin=?3 AND s.carrier=current.path
+    AND (?2 IS NULL OR paths.value IS NOT NULL)
+  LEFT JOIN files f ON f.path=s.carrier AND f.resume_at=json_extract(s.ledger,'$.offset')
   GROUP BY e.owner
 )
 SELECT m.owner,d.harness,d.native_id FROM members m

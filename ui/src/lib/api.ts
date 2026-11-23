@@ -7,6 +7,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly history?: { done: number; total: number; retryMs: number } | 'recovery_failed',
+    readonly code?: string,
   ) {
     super(message);
   }
@@ -36,17 +37,18 @@ export async function requestJson(
   }
   if (unchanged && response.status === 304) return null;
   if (!response.ok) {
-    if (
-      response.status === 503 &&
-      response.headers.get('Content-Type')?.startsWith('application/json')
-    ) {
+    if (response.headers.get('Content-Type')?.startsWith('application/json')) {
       const payload: unknown = await response.json().catch(() => null);
       if (payload && typeof payload === 'object' && 'error' in payload) {
         const error = payload.error;
         if (error && typeof error === 'object' && 'code' in error) {
-          if (error.code === 'history_recovery_failed')
+          if (response.status === 503 && error.code === 'history_recovery_failed')
             throw new ApiError('History recovery failed', 503, 'recovery_failed');
-          if (error.code === 'history_rebuilding' && 'progress' in error) {
+          if (
+            response.status === 503 &&
+            error.code === 'history_rebuilding' &&
+            'progress' in error
+          ) {
             const progress = error.progress;
             if (
               progress &&
@@ -67,6 +69,13 @@ export async function requestJson(
                 retryMs: Math.min(8000, Math.max(1000, seconds * 1000)),
               });
             }
+          }
+          if (typeof error.code === 'string') {
+            const message =
+              'message' in error && typeof error.message === 'string'
+                ? error.message
+                : response.status + ' ' + response.statusText;
+            throw new ApiError(message, response.status, undefined, error.code);
           }
         }
       }

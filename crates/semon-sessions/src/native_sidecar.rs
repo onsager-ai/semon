@@ -551,8 +551,10 @@ mod tests {
             });
         }
         let home = Home::new(Some(metadata()));
+        let mut cache =
+            crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+                .unwrap();
         arm(home.meta.clone(), 3);
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,

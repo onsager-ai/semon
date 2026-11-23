@@ -39,8 +39,11 @@ pub fn session_catalog_resolve_native(
     native_id: &str,
     scope: CatalogReadScope,
 ) -> Result<CatalogNativeResolution, CatalogIdentityError> {
-    crate::storage::runtime::RuntimeStore::for_source(options, source_key)
-        .resolve_native(source_key, harness, native_id, scope)
+    let store = crate::storage::runtime::RuntimeStore::for_source(options, source_key);
+    if store.is_postgres() {
+        return store.resolve_native(source_key, harness, native_id, scope);
+    }
+    crate::catalog::warehouse::host_resolve_native(options, source_key, harness, native_id, scope)
 }
 
 pub(crate) fn sqlite_resolve_native(
@@ -187,17 +190,6 @@ fn resolve(
         _ => result.state = CatalogNativeResolutionState::Ambiguous,
     }
     tx.commit()
-}
-
-pub(crate) fn page_with_gate(
-    options: &Options,
-    key: &str,
-    query: &str,
-    before_read: impl FnOnce() -> Result<(), ViewerReply>,
-) -> ViewerReply {
-    page_with_reader(key, query, before_read, |harness, native, scope| {
-        session_catalog_resolve_native(options, key, harness, native, scope)
-    })
 }
 
 pub(crate) fn page_with_reader(

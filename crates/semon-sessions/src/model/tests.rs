@@ -1371,7 +1371,12 @@ fn assert_bounded_causal_previews(home: &Home, built: &QueryData, root: &Turn) {
         crate::viewer::percent_encode(&root.sid),
         crate::viewer::percent_encode(&root.id)
     );
-    let reply = crate::session_causal_trace(&home.options, "fixture", &query);
+    let reply = crate::causal_trace::session_causal_trace_with_gate(
+        &home.options,
+        "fixture",
+        &query,
+        || Ok(()),
+    );
     assert_eq!(
         reply.status,
         200,
@@ -1400,12 +1405,13 @@ fn assert_bounded_causal_previews(home: &Home, built: &QueryData, root: &Turn) {
                 crate::viewer::percent_encode(owner),
                 crate::viewer::percent_encode(&json!([native.id]).to_string())
             );
-            let reply = crate::session_home_details_with_mode(
+            let reply = crate::overview::session_home_details_inner(
                 &home.options,
                 "fixture",
                 &query,
                 None,
                 crate::SessionSourceReadMode::LocalThenProvider,
+                true,
             );
             assert_eq!(
                 reply.status,
@@ -2092,7 +2098,12 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
         crate::viewer::percent_encode(&root.id)
     );
     let read = || {
-        let reply = crate::session_causal_trace(&home.options, "fixture", &query);
+        let reply = crate::causal_trace::session_causal_trace_with_gate(
+            &home.options,
+            "fixture",
+            &query,
+            || Ok(()),
+        );
         assert_eq!(
             reply.status,
             200,
@@ -4669,11 +4680,13 @@ fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData) {
             .unwrap()
             .is_some()
         );
-        let reply = crate::session_transcript_range(
+        let reply = crate::transcript_range::session_transcript_range_with_gate(
             &home.options,
             "fixture",
             &format!("sid={owner}&after=0&limit=100"),
             None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            || Ok(()),
         );
         assert_eq!(
             reply.status, 200,
@@ -4716,12 +4729,13 @@ fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData) {
                 "sid={owner}&generation={generation}&scope=retained_history&events={}",
                 crate::viewer::percent_encode(&json!(ids).to_string())
             );
-            let details = crate::session_home_details_with_mode(
+            let details = crate::overview::session_home_details_inner(
                 &home.options,
                 "fixture",
                 &query,
                 None,
                 crate::SessionSourceReadMode::LocalThenProvider,
+                true,
             );
             assert_eq!(
                 details.status,
@@ -10181,11 +10195,13 @@ fn catalog_observation_preserves_native_query_projections() {
     assert_ne!(appended.0, original.0);
     home.build_query();
     assert_eq!(projection(), appended);
-    let reply = crate::session_transcript_range(
+    let reply = crate::transcript_range::session_transcript_range_with_gate(
         &home.options,
         "fixture",
         "sid=root&after=0&limit=100",
         None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        || Ok(()),
     );
     assert_eq!(reply.status, 200);
     assert!(String::from_utf8_lossy(&reply.body).contains("new source answer"));
@@ -10532,16 +10548,24 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         .find(|source| source.native_id == "cleared")
         .unwrap()
         .clone();
-    let before_identity = crate::session_catalog_history_identity(&home.options, "fixture", "root")
-        .unwrap()
-        .unwrap();
+    let before_identity = crate::catalog::catalog_identity(
+        &home.options,
+        "fixture",
+        "root",
+        crate::CatalogReadScope::RetainedHistory,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(before_identity.source_refs.len(), 2);
     let original = fs::read(&removed.path).unwrap();
-    let before_body = crate::session_transcript_range(
+    let before_body = crate::transcript_range::session_transcript_range_with_gate(
         &home.options,
         "fixture",
         "sid=root&scope=retained_history&after=0&limit=100",
         None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        || Ok(()),
     );
     assert_eq!(before_body.status, 200);
     let before_body: Value = serde_json::from_slice(&before_body.body).unwrap();
@@ -10572,9 +10596,15 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     let root = after.iter().find(|row| row.key == "root").unwrap();
     assert_eq!(root.lifecycle, super::summary::CatalogLifecycle::Current);
     assert_eq!(root.sources.len(), 1);
-    let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
-        .unwrap()
-        .unwrap();
+    let history = crate::catalog::catalog_identity(
+        &home.options,
+        "fixture",
+        "root",
+        crate::CatalogReadScope::RetainedHistory,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         history.source_refs.len(),
         2,
@@ -10629,12 +10659,13 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     };
     let read = || {
         crate::events::CACHE_READS.with(|reads| reads.set(0));
-        let reply = crate::session_transcript_range_with_mode(
+        let reply = crate::transcript_range::session_transcript_range_with_gate(
             &home.options,
             "fixture",
             "sid=root&scope=retained_history&after=0&limit=100",
             Some(&archive),
             crate::SessionSourceReadMode::LocalThenProvider,
+            || Ok(()),
         );
         assert_eq!(
             reply.status,
@@ -10660,18 +10691,25 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     assert_eq!(entry["provenance"], original_entry["provenance"]);
     assert!(archive.calls.load(Ordering::Relaxed) > 0);
     assert!(!removed.path.exists());
-    let current_identity = crate::session_catalog_identity(&home.options, "fixture", "root")
-        .unwrap()
-        .unwrap();
+    let current_identity = crate::catalog::catalog_identity(
+        &home.options,
+        "fixture",
+        "root",
+        crate::CatalogReadScope::Current,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(current_identity.source_refs.len(), 1);
     assert_eq!(current_identity.native_id.as_deref(), Some("root"));
     let calls = archive.calls.load(Ordering::Relaxed);
-    let current = crate::session_transcript_range_with_mode(
+    let current = crate::transcript_range::session_transcript_range_with_gate(
         &home.options,
         "fixture",
         "sid=root&scope=current&after=0&limit=100",
         Some(&archive),
         crate::SessionSourceReadMode::LocalThenProvider,
+        || Ok(()),
     );
     assert_eq!(current.status, 200);
     let current: Value = serde_json::from_slice(&current.body).unwrap();
@@ -10688,12 +10726,13 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     assert_eq!(archive.calls.load(Ordering::Relaxed), calls);
     let history_cursor = retained["projection"]["generation"].as_str().unwrap();
     assert_eq!(
-        crate::session_transcript_range_with_mode(
+        crate::transcript_range::session_transcript_range_with_gate(
             &home.options,
             "fixture",
             &format!("sid=root&scope=current&after=1&limit=1&generation={history_cursor}"),
             Some(&archive),
             crate::SessionSourceReadMode::LocalThenProvider,
+            || Ok(()),
         )
         .status,
         409,
@@ -10791,7 +10830,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
             .contains(&"root".into()),
         "an unchanged current observation must retain exact history metadata"
     );
-    let causal = crate::session_causal_trace(
+    let causal = crate::causal_trace::session_causal_trace_with_gate(
         &home.options,
         "fixture",
         &format!(
@@ -10807,6 +10846,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
                     .unwrap()
             )
         ),
+        || Ok(()),
     );
     assert_eq!(
         causal.status,
@@ -10824,13 +10864,14 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         .unwrap()["turn"]
         .as_str()
         .unwrap();
-    let anchor = crate::session_turn_anchor(
+    let anchor = crate::transcript_range::session_turn_anchor_with_gate(
         &home.options,
         "fixture",
         &format!(
             "sid=root&scope=retained_history&turn={}",
             crate::viewer::percent_encode(historical_turn)
         ),
+        || Ok(()),
     );
     assert_eq!(
         anchor.status,
@@ -10840,10 +10881,11 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     );
     let anchor: Value = serde_json::from_slice(&anchor.body).unwrap();
     assert!(anchor["slot"].is_u64(), "{anchor}");
-    let absent = crate::session_turn_anchor(
+    let absent = crate::transcript_range::session_turn_anchor_with_gate(
         &home.options,
         "fixture",
         "sid=root&scope=retained_history&turn=not-a-recorded-turn",
+        || Ok(()),
     );
     assert_eq!(absent.status, 200);
     let absent: Value = serde_json::from_slice(&absent.body).unwrap();
@@ -10957,13 +10999,25 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
         .unwrap();
     fs::remove_file(removed).unwrap();
     home.build_query();
-    let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
-        .unwrap()
-        .unwrap();
+    let history = crate::catalog::catalog_identity(
+        &home.options,
+        "fixture",
+        "root",
+        crate::CatalogReadScope::RetainedHistory,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(history.source_refs.len(), 2);
-    let current = crate::session_catalog_identity(&home.options, "fixture", "root")
-        .unwrap()
-        .unwrap();
+    let current = crate::catalog::catalog_identity(
+        &home.options,
+        "fixture",
+        "root",
+        crate::CatalogReadScope::Current,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(current.source_refs.len(), 1);
     assert!(
         crate::source_projection_ready(
@@ -10974,11 +11028,13 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
         .unwrap()
         .is_none()
     );
-    let reply = crate::session_transcript_range(
+    let reply = crate::transcript_range::session_transcript_range_with_gate(
         &home.options,
         "fixture",
         "sid=root&scope=retained_history&after=0&limit=100",
         None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        || Ok(()),
     );
     assert_eq!(reply.status, 200);
     let body: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -11304,6 +11360,8 @@ fn native_name_updates_do_not_change_transcripts_and_remain_source_qualified() {
 #[test]
 fn failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes() {
     let home = relay_home();
+    let namespace = crate::storage::Namespace::new("fixture").unwrap();
+    drop(crate::storage::sqlite::open_index(&home.options, &namespace).unwrap());
     home.build_query();
     fs::remove_dir_all(&home.options.claude_home).unwrap();
     let resolve = |query: &str| crate::session_bookmark(&home.options, "fixture", query);
@@ -11576,7 +11634,7 @@ fn first_acknowledged_owner(
     i64,
     summary::CatalogSource,
 ) {
-    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let evidence = crate::native_evidence::NativeEvidence::for_source_key("", home.options.clone());
     for _ in 0..128 {
         assert!(
             !evidence
@@ -12063,11 +12121,13 @@ fn cold_codex_family_qualifies_pending_copilot_native_collision() {
     for (harness, key) in [("codex", &codex_key), ("copilot", &copilot_key)] {
         let binding:String=db.query_row("SELECT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2 AND lifecycle='current'",rusqlite::params![harness,native],|row|row.get(0)).unwrap();
         assert_eq!(&binding, key);
-        let reply = crate::session_transcript_range(
+        let reply = crate::transcript_range::session_transcript_range_with_gate(
             &home.options,
             "fixture",
-            &format!("sid={key}&limit=10"),
+            &format!("sid={key}&after=0&limit=10"),
             None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            || Ok(()),
         );
         assert_eq!(
             reply.status, 200,
@@ -12087,7 +12147,8 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             &[codex_user(ts(0, 0), "Old native identity")],
         );
         let old_relative = format!("sessions/2026/09/24/rollout-{native}.jsonl");
-        let old_evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let old_evidence =
+            crate::native_evidence::NativeEvidence::for_source_key("", home.options.clone());
         let mut old_complete = false;
         for _ in 0..16 {
             if old_evidence
@@ -12270,9 +12331,15 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
                 preserved, marker,
                 "retained consumed-generation EventIndex proof changed"
             );
-            let history = crate::session_catalog_history_identity(&options, "fixture", native)
-                .unwrap()
-                .unwrap();
+            let history = crate::catalog::catalog_identity(
+                &options,
+                "local",
+                native,
+                crate::CatalogReadScope::RetainedHistory,
+                false,
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(history.harness, "codex");
             assert_eq!(history.source_refs.len(), 1);
             assert!(
@@ -12282,9 +12349,15 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
                     .any(|source| source.source == proof.source),
                 "historical recipes lost the retained native source proof"
             );
-            let current = crate::session_catalog_identity(&options, "fixture", native)
-                .unwrap()
-                .unwrap();
+            let current = crate::catalog::catalog_identity(
+                &options,
+                "local",
+                native,
+                crate::CatalogReadScope::Current,
+                false,
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(current.harness, "claude");
             assert_eq!(current.source_refs.len(), 1);
             assert!(
@@ -12308,11 +12381,13 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
                 old_row.sources[0].path,
                 home.options.codex_home.join(&old_relative)
             );
-            let transcript = crate::session_transcript_range(
+            let transcript = crate::transcript_range::session_transcript_range_with_gate(
                 &options,
-                "fixture",
+                "local",
                 &format!("sid={native}&scope=retained_history&after=0&limit=100"),
                 None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                || Ok(()),
             );
             assert_eq!(
                 transcript.status, 200,
@@ -12321,11 +12396,13 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             let transcript = String::from_utf8_lossy(&transcript.body);
             assert!(transcript.contains("Old native identity"));
             assert!(!transcript.contains("Current Claude identity"));
-            let list = crate::session_catalog_page(
+            let list = crate::catalog::read_page(
                 &options,
-                "fixture",
-                "scope=retained_history&harness=claude&limit=100",
-            );
+                &crate::storage::Namespace::new("local").unwrap(),
+                &crate::catalog::Request::parse("scope=retained_history&harness=claude&limit=100")
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(list.status, 200);
             let list: Value = serde_json::from_slice(&list.body).unwrap();
             let item = list["items"]
@@ -12393,7 +12470,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         .extend((0..130).map(|n| codex_reply(ts(19, 0), &format!("Original retained reply {n}"))));
     home.codex(native, json!({}), &original_records);
     let drain = |options: &Options| {
-        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
         for _ in 0..128 {
             if evidence
                 .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
@@ -12465,9 +12542,15 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     let mut options = home.options.clone();
     options.facts = Some(facts_path);
     drain(&options);
-    let current = crate::session_catalog_identity(&options, "fixture", native)
-        .unwrap()
-        .unwrap();
+    let current = crate::catalog::catalog_identity(
+        &options,
+        "local",
+        native,
+        crate::CatalogReadScope::Current,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(current.harness, "claude");
     assert!(
         current
@@ -12476,7 +12559,13 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
             .all(|source| source.source.root == "claude")
     );
     assert_eq!(
-        crate::session_catalog_history_identity(&options, "fixture", native),
+        crate::catalog::catalog_identity(
+            &options,
+            "local",
+            native,
+            crate::CatalogReadScope::RetainedHistory,
+            false
+        ),
         Err(crate::CatalogIdentityError::Unavailable)
     );
     let saved: String = db
@@ -12539,9 +12628,15 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         )],
     );
     drain(&options);
-    let republished = crate::session_catalog_identity(&options, "fixture", native)
-        .unwrap()
-        .unwrap();
+    let republished = crate::catalog::catalog_identity(
+        &options,
+        "local",
+        native,
+        crate::CatalogReadScope::Current,
+        false,
+    )
+    .unwrap()
+    .unwrap();
     assert_ne!(republished.generation, current.generation);
     assert_eq!(republished.harness, "claude");
     assert!(
@@ -12550,11 +12645,13 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
             .iter()
             .all(|source| source.source.root == "claude")
     );
-    let transcript = crate::session_transcript_range(
+    let transcript = crate::transcript_range::session_transcript_range_with_gate(
         &options,
-        "fixture",
+        "local",
         &format!("sid={native}&after=0&limit=100"),
         None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        || Ok(()),
     );
     assert_eq!(transcript.status, 200);
     let transcript = String::from_utf8_lossy(&transcript.body);
@@ -12616,7 +12713,13 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         .unwrap();
     assert_eq!(repeated, slots);
     assert_eq!(
-        crate::session_catalog_history_identity(&options, "fixture", native),
+        crate::catalog::catalog_identity(
+            &options,
+            "local",
+            native,
+            crate::CatalogReadScope::RetainedHistory,
+            false
+        ),
         Err(crate::CatalogIdentityError::Unavailable)
     );
 }

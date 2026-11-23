@@ -143,6 +143,7 @@ impl<'a> Lines<'a> {
     }
     const KEEP: usize = 16;
 
+    #[cfg(any(test, feature = "postgres"))]
     pub(crate) fn native_event_id(&self, path: &Path, offset: u64) -> Option<String> {
         let record = self
             .recent
@@ -1043,6 +1044,37 @@ pub(crate) fn selected_script(lines: &mut Lines, slot: &Slot) -> Option<(String,
 /// Large plain strings use scalar checkpoints instead of this record path.
 pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
     let file = slot.file.as_ref()?;
+    if let SlotKind::Yielded {
+        first,
+        polls,
+        cut,
+        done,
+        ..
+    } = &slot.kind
+    {
+        if let Some(output) = done
+            .as_ref()
+            .and_then(|reply| lines.get(&file.path, reply.o))
+            .and_then(|record| {
+                field(command_item(&record)?, "aggregated_output").map(str::to_owned)
+            })
+        {
+            return Some(selected_text_value(
+                &output,
+                Source::Collected,
+                false,
+                SELECTED_OUTPUT_MAX,
+            ));
+        }
+        let (output, truncated) =
+            chunks(lines, &file.path, *first, polls, *cut, SELECTED_OUTPUT_MAX);
+        return Some(selected_text_value(
+            &output,
+            Source::Model,
+            truncated,
+            SELECTED_OUTPUT_MAX,
+        ));
+    }
     let (text, source) = match &slot.kind {
         SlotKind::Tool {
             reply,
@@ -1081,6 +1113,42 @@ pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
         }
     }
     Some(selected)
+}
+
+/// Expand only text fields already interpreted by the selected native renderer.
+pub(crate) fn selected_chunk_text(
+    lines: &mut Lines,
+    slot: &Slot,
+) -> Option<(&'static str, String)> {
+    let file = slot.file.as_ref()?;
+    let text = match &slot.kind {
+        SlotKind::U => prompt_text(lines.get(&file.path, slot.offset)?.as_ref()),
+        SlotKind::H(id) if model::is_ask(id) => {
+            prompt_text(lines.get(&file.path, slot.offset)?.as_ref())
+        }
+        SlotKind::A => model::assistant_text(
+            lines.get(&file.path, slot.offset)?.as_ref(),
+            slot.block as usize,
+        ),
+        SlotKind::Think => think_text(
+            lines.get(&file.path, slot.offset)?.as_ref(),
+            slot.block as usize,
+        )
+        .map(|text| text.trim().to_owned()),
+        SlotKind::Tool {
+            reply,
+            item,
+            result_source,
+            ..
+        } => {
+            let (text, source) =
+                tool_output(lines, &file.path, reply.as_ref(), *item, *result_source)?;
+            let (text, cut) = split_cut(&text, source);
+            return cut.is_none().then_some(("out", text));
+        }
+        _ => None,
+    }?;
+    Some(("text", text))
 }
 
 const SELECTED_OUTPUT_MAX: usize = 64 * 1024;
@@ -1468,7 +1536,7 @@ fn tool_output(
     ))
 }
 
-fn think_text(record: &Value, block: usize) -> Option<String> {
+pub(crate) fn think_text(record: &Value, block: usize) -> Option<String> {
     if let Some(payload) = record.get("payload") {
         if field(record, "type") != Some("response_item")
             || field(payload, "type") != Some("reasoning")

@@ -1,4 +1,5 @@
 import { array, number, object, text } from '../domain/validate';
+import { parseNativeEntryAddress, type NativeEntryAddress } from '../lib/sessionRoute';
 
 export interface CatalogAnnotations {
   source: string;
@@ -7,7 +8,8 @@ export interface CatalogAnnotations {
   kind: 'errors' | 'signals';
   total: number;
   first: number;
-  entries: { slot: number }[];
+  scope: 'current' | 'retained_history';
+  entries: ({ slot: number } | { address: NativeEntryAddress })[];
 }
 const integer = (value: unknown) => {
   const result = number(value);
@@ -15,16 +17,19 @@ const integer = (value: unknown) => {
   return result;
 };
 export function parseCatalogAnnotations(value: unknown): CatalogAnnotations {
-  const row = object(value);
+  const row = object(value),
+    native = row.projection === 7;
   if (
     row.api !== 1 ||
-    row.scope !== 'retained_history' ||
+    (row.scope !== 'retained_history' && !(native && row.scope === 'current')) ||
     !['errors', 'signals'].includes(String(row.kind))
   )
     throw Error('Invalid annotation response');
   const entries = array(row.entries, (value) => {
     const entry = object(value);
-    return { slot: integer(entry.slot) };
+    return native
+      ? { address: parseNativeEntryAddress(entry.address) }
+      : { slot: integer(entry.slot) };
   });
   const first = integer(row.first),
     total = integer(row.total),
@@ -33,13 +38,17 @@ export function parseCatalogAnnotations(value: unknown): CatalogAnnotations {
     entries.length > 100 ||
     first + entries.length > total ||
     !/^[a-f0-9]{64}$/.test(generation) ||
-    entries.some((entry, index) => index > 0 && entry.slot <= entries[index - 1]!.slot)
+    entries.some((entry, index) => {
+      const previous = entries[index - 1];
+      return 'slot' in entry && previous && 'slot' in previous && entry.slot <= previous.slot;
+    })
   )
     throw Error('Annotation response exceeds its bound');
   return {
     source: text(row.source_key),
     key: text(row.catalog_key),
     generation,
+    scope: row.scope,
     kind: row.kind as 'errors' | 'signals',
     first,
     total,

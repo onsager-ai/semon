@@ -67,131 +67,7 @@ pub fn session_source_proof(
     root: &str,
     path: &str,
 ) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
-    let namespace = crate::storage::Namespace::new(source_key)
-        .map_err(|_| CatalogIdentityError::InvalidArguments)?;
-    use CatalogIdentityError::{InvalidArguments, Unavailable};
-    if !crate::is_input_path(root, path) || path.len() > 4096 {
-        return Err(InvalidArguments);
-    }
-    let home = match root {
-        "claude" => &options.claude_home,
-        "codex" => &options.codex_home,
-        "copilot" => &options.copilot_home,
-        _ => return Err(InvalidArguments),
-    };
-    // Recorded roots/native manifests must remain observable. Missing facts
-    // cannot be treated as permission to reuse a formerly selected rollout.
-    let current = options
-        .facts
-        .as_ref()
-        .map(|file| {
-            crate::facts::source_authority::CurrentSources::open(file).map_err(|_| Unavailable)
-        })
-        .transpose()?;
-    if current.as_ref().is_some_and(|source| {
-        !source.facts_known() || (root == "codex" && !source.selection_known())
-    }) {
-        return Err(Unavailable);
-    }
-    let absolute = home.join(path);
-    let absolute = absolute.to_str().ok_or(InvalidArguments)?;
-    let read = || -> Result<Option<SessionSourceProof>, Box<dyn std::error::Error>> {
-        let mut connection = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.busy_timeout(Duration::from_millis(100))?;
-        let transaction = connection.transaction()?;
-        crate::events::store::require_current(&transaction)?;
-        crate::storage::sqlite::qualify(&transaction, &namespace)?;
-        let encoded: Option<(String, Option<String>)> = transaction.query_row(
-            "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
-            [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional()?;
-        let Some((key, encoded)) = encoded else {
-            return Ok(None);
-        };
-        let encoded = encoded.ok_or_else(|| io::Error::other("source metadata bound"))?;
-        // Decode only the selected relationship metadata, never a native body.
-        if encoded.len() > 1024 * 1024 {
-            return Err(io::Error::other("source metadata bound").into());
-        }
-        let row: CatalogRow = serde_json::from_str(&encoded)?;
-        if row.key != key || row.harness != root || row.sources.len() > 64 {
-            return Err(io::Error::other("source mapping changed").into());
-        }
-        let source = row
-            .sources
-            .iter()
-            .find(|source| source.path.to_str() == Some(absolute))
-            .ok_or_else(|| io::Error::other("source mapping absent"))?;
-        type Revision = (
-            u64,
-            u64,
-            u64,
-            [u8; 16],
-            u64,
-            [u8; 32],
-            [u8; 32],
-            Option<[u8; 16]>,
-        );
-        let revision: Option<Revision> = transaction.query_row(
-            "SELECT dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns FROM files WHERE path=?1",
-            [absolute], |row| Ok((row.get::<_,i64>(0)? as u64,row.get::<_,i64>(1)? as u64,row.get::<_,i64>(2)? as u64,row.get(3)?,row.get::<_,i64>(4)? as u64,row.get(5)?,row.get(6)?,row.get(7)?)),
-        ).optional()?;
-        if revision
-            != Some((
-                source.dev,
-                source.ino,
-                source.size,
-                source.modified_ns.to_be_bytes(),
-                source.offset,
-                source.prefix_sha256,
-                source.tail_sha256,
-                source.changed_ns.map(i128::to_be_bytes),
-            ))
-        {
-            return Err(io::Error::other("source ledger changed").into());
-        }
-        let generation: String = transaction.query_row(
-            "SELECT value FROM meta WHERE key='catalog_generation'",
-            [],
-            |row| row.get(0),
-        )?;
-        transaction.commit()?;
-        // Reuse the catalog's current-root/native-selection validation. A
-        // publication race fails closed rather than mixing catalog generations.
-        let identity = session_catalog_identity(options, namespace.binding(), &key)?
-            .ok_or_else(|| io::Error::other("source catalog changed"))?;
-        let observed = identity
-            .source_refs
-            .iter()
-            .find(|observed| observed.source.root == root && observed.source.path == path)
-            .ok_or_else(|| io::Error::other("source scope changed"))?;
-        if identity.generation != generation
-            || !matches!(observed.state.as_str(), "cached" | "incomplete")
-            || observed.source.native_id != source.native_id
-            || observed.source.offset != source.offset
-            || observed.source.prefix_sha256 != source.prefix_sha256
-        {
-            return Err(io::Error::other("source observation changed").into());
-        }
-        if let Some(current) = &current {
-            current.validate()?;
-        }
-        Ok(Some(SessionSourceProof {
-            source: observed.source.clone(),
-            dev: source.dev,
-            ino: source.ino,
-            size: source.size,
-            modified_ns: source.modified_ns,
-            changed_ns: source.changed_ns,
-            freshness: CatalogFreshness {
-                state: observed.state.clone(),
-            },
-        }))
-    };
-    read().map_err(|_| Unavailable)
+    warehouse::host_source_proof(options, source_key, root, path)
 }
 
 /// Read intent is separate from native control/source-selection authority.
@@ -240,6 +116,7 @@ pub struct CatalogSessionIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogIdentityError {
     InvalidArguments,
+    RetainedUnverified,
     Unavailable,
     ScopeChanged,
 }
@@ -247,6 +124,7 @@ impl std::fmt::Display for CatalogIdentityError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::InvalidArguments => "Invalid scoped catalog identity arguments.",
+            Self::RetainedUnverified => "retained_identity_unverified: no verified original warehouse identity is available for this key.",
             Self::Unavailable => "The selected catalog observation is unavailable.",
             Self::ScopeChanged => "The configured native source authority changed.",
         })
@@ -263,12 +141,11 @@ pub fn session_catalog_identity(
     source_key: &str,
     canonical_catalog_key: &str,
 ) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
-    catalog_identity(
+    warehouse::host_identity(
         options,
         source_key,
-        canonical_catalog_key,
         CatalogReadScope::Current,
-        false,
+        canonical_catalog_key,
     )
 }
 
@@ -280,12 +157,11 @@ pub fn session_catalog_history_identity(
     source_key: &str,
     canonical_catalog_key: &str,
 ) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
-    catalog_identity(
+    warehouse::host_identity(
         options,
         source_key,
-        canonical_catalog_key,
         CatalogReadScope::RetainedHistory,
-        false,
+        canonical_catalog_key,
     )
 }
 
@@ -305,7 +181,7 @@ pub(crate) fn qualified_history_identity(
     )
 }
 
-fn catalog_identity(
+pub(crate) fn catalog_identity(
     options: &Options,
     source_key: &str,
     canonical_catalog_key: &str,
@@ -343,6 +219,7 @@ pub(crate) fn catalog_selection(
 
 /// Bind selected metadata and its consumer's indexed recipes to one SQLite
 /// snapshot. The ordinary source-root and native-selection checks still apply.
+#[cfg(test)]
 pub(crate) fn catalog_selection_in_snapshot(
     options: &Options,
     source_key: &str,
@@ -391,10 +268,9 @@ fn catalog_selection_read(
         Some(snapshot) => {
             let namespace =
                 crate::storage::Namespace::new(source_key).map_err(|_| InvalidArguments)?;
-            read_page_snapshot(options, &namespace, &request, snapshot, false, &mut None)
-                .map_err(|_| Unavailable)?
+            read_page_snapshot(options, &namespace, &request, snapshot).map_err(|_| Unavailable)?
         }
-        None => crate::storage::catalog_page(options, source_key, &request, None),
+        None => crate::storage::catalog_page(options, source_key, &request),
     };
     selection_from_reply(
         reply,
@@ -492,11 +368,12 @@ pub(crate) fn selection_from_reply(
 /// metadata is labelled cached; source disappearance and changed generations
 /// remain explicit. The query contract matches GET /api/sessions.
 pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> ViewerReply {
-    match Request::parse(query) {
-        Ok(request) => crate::index_rebuild::history_reply(options)
-            .unwrap_or_else(|| page(options, machine, request)),
-        Err(reply) => reply,
-    }
+    warehouse::http::list(
+        &[warehouse::host_source(options, machine)],
+        machine,
+        query,
+        false,
+    )
 }
 
 /// Validate focused catalog arguments before selecting source custody. This
@@ -504,7 +381,7 @@ pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> Vi
 /// It grants no authority; source scope, cursor generation and access still
 /// require validation by the host and `session_catalog_page`.
 pub fn validate_session_catalog_query(query: &str) -> Result<(), ViewerReply> {
-    Request::parse(query).map(|_| ())
+    warehouse::http::validate_list(query)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -976,39 +853,34 @@ pub(crate) fn relative_status(
     .unwrap_or_else(|_| unavailable())
 }
 
-pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
-    page_with_gate(options, machine, request, || Ok(()), None)
-}
-
-pub(crate) struct CatalogSearchAdmission {
-    pub(crate) query: String,
-    pub(crate) harness: Option<String>,
-    pub(crate) paths: Result<Vec<String>, ()>,
-}
-
-pub(crate) fn page_with_gate(
-    options: &Options,
-    machine: &str,
-    request: Request,
-    before_read: impl FnOnce() -> Result<(), ViewerReply>,
-    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
-) -> ViewerReply {
-    if let Err(reply) = before_read() {
-        return reply;
-    }
-    crate::storage::catalog_page(options, machine, &request, on_search)
-}
-
 /// Whether a normal first Catalog page can read the current persisted
-/// publication. Completeness is deliberately not required: source-scoped
-/// consumers can read a published partial Catalog while the producer continues.
-/// Missing, blank or unpublished stores return `false`; invalid, unsupported and
+/// warehouse. Source-scoped consumers can read committed partial coverage
+/// while the producer continues. Missing or blank stores return `false`; invalid, unsupported and
 /// I/O failures propagate. This check does not admit or start an observer.
 pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
-    crate::storage::runtime::RuntimeStore::sqlite(options, None).page_ready()
+    sqlite_readiness(options, |_| Ok(true))
 }
 
 pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
+    sqlite_readiness(options, |transaction| {
+        let (version, generation): (Option<String>, Option<String>) = transaction.query_row(
+            "SELECT (SELECT value FROM meta WHERE key='catalog_version'), (SELECT value FROM meta WHERE key='catalog_generation')",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(io::Error::other)?;
+        if generation.is_none() {
+            return Ok(false);
+        }
+        if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
+            return Err(io::Error::other("catalog version"));
+        }
+        Ok(true)
+    })
+}
+
+fn sqlite_readiness(
+    options: &Options,
+    ready: impl FnOnce(&Connection) -> io::Result<bool>,
+) -> io::Result<bool> {
     if crate::index_rebuild::status(&options.cache).is_some() {
         return Ok(false);
     }
@@ -1038,21 +910,7 @@ pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
     if !crate::events::store::current_or_fresh(&transaction)? {
         return Ok(false);
     }
-    let (version, generation): (Option<String>, Option<String>) = transaction
-        .query_row(
-            "SELECT (SELECT value FROM meta WHERE key='catalog_version'), (SELECT value FROM meta WHERE key='catalog_generation')",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(io::Error::other)?;
-    if generation.is_none() {
-        return Ok(false);
-    }
-    if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
-        return Err(io::Error::other("catalog version"));
-    }
-    transaction.commit().map_err(io::Error::other)?;
-    Ok(true)
+    ready(&transaction)
 }
 
 /// The SQLite snapshot behind the storage port's Catalog reader.
@@ -1060,7 +918,6 @@ pub(crate) fn read_page(
     options: &Options,
     namespace: &crate::storage::Namespace,
     request: &Request,
-    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
@@ -1068,23 +925,8 @@ pub(crate) fn read_page(
     )?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let transaction = connection.transaction()?;
-    let mut admission = None;
-    let reply = read_page_snapshot(
-        options,
-        namespace,
-        request,
-        &transaction,
-        on_search.is_some(),
-        &mut admission,
-    )?;
+    let reply = read_page_snapshot(options, namespace, request, &transaction)?;
     transaction.commit()?;
-    if reply.status == 200
-        && let (Some(on_search), Some(admission)) = (on_search, admission)
-    {
-        // Producer priority is advisory; a full queue cannot invalidate the
-        // Catalog page already read from a qualified publication.
-        let _ = on_search(admission);
-    }
     Ok(reply)
 }
 
@@ -1126,8 +968,6 @@ fn read_page_snapshot(
     namespace: &crate::storage::Namespace,
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
-    admit_search: bool,
-    admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     crate::events::store::require_current(transaction)?;
     crate::storage::sqlite::qualify(transaction, namespace)?;
@@ -1319,32 +1159,6 @@ fn read_page_snapshot(
         .unwrap_or_else(|| "complete".into());
     if !matches!(completeness.as_str(), "partial" | "complete") {
         return Err(io::Error::other("catalog completeness is invalid").into());
-    }
-    if admit_search
-        && completeness == "partial"
-        && let Some((query, harness)) = request.search_interest()
-    {
-        let draining: bool = transaction
-            .query_row(
-                "SELECT value='draining' FROM meta WHERE key='catalog_backfill_state'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if draining {
-            *admission = Some(CatalogSearchAdmission {
-                query: query.to_owned(),
-                harness: harness.map(str::to_owned),
-                paths: EventCache::catalog_search_sources(
-                    transaction,
-                    options,
-                    crate::events::CatalogSearchInterest { query, harness },
-                    crate::events::CATALOG_SEARCH_LIMIT,
-                )
-                .map_err(|_| ()),
-            });
-        }
     }
     let more = selected.len() > request.limit;
     if more {
@@ -2030,8 +1844,18 @@ mod tests {
             }
             self.publish_existing();
         }
+        fn open_index(&self) -> EventCache {
+            crate::storage::sqlite::open_index(&self.options, &crate::storage::Namespace::local())
+                .unwrap()
+        }
         fn publish_existing(&self) {
-            let evidence = crate::native_evidence::NativeEvidence::new(self.options.clone());
+            self.publish_for("local");
+        }
+        fn publish_for(&self, source_key: &str) {
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                source_key,
+                self.options.clone(),
+            );
             let mut work = crate::viewer::lock(&evidence.storage.work);
             while !evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
@@ -2039,6 +1863,31 @@ mod tests {
             {}
             drop(work);
             evidence.retire();
+        }
+        fn retain(&self, key: &str, path: &std::path::Path) {
+            let archive =
+                crate::archive::Archive::new(crate::archive::standalone_dir(&self.options.cache));
+            archive
+                .preserve(
+                    path.to_str().unwrap(),
+                    &mut fs::File::open(path).unwrap(),
+                    crate::archive::NATIVE_REDACTOR,
+                )
+                .unwrap();
+            fs::remove_file(path).unwrap();
+            self.publish_existing();
+            let identity = session_catalog_history_identity(&self.options, "local", key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(identity.source_refs.len(), 1);
+            crate::archive::seekable::prepare(&archive, path, &identity.source_refs[0].source)
+                .unwrap();
+        }
+        fn semantic_body(&self, query: &str) -> (u16, Value) {
+            let request = Request::parse(query).ok().unwrap();
+            let reply =
+                read_page(&self.options, &crate::storage::Namespace::local(), &request).unwrap();
+            (reply.status, serde_json::from_slice(&reply.body).unwrap())
         }
         fn body(&self, query: &str) -> (u16, Value) {
             // Projection assertions observe the exact publication under test.
@@ -2064,9 +1913,12 @@ mod tests {
         for index in 0..192 {
             fixture.source(&format!("unrelated-{index:04}"));
         }
-        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+            "local",
+            fixture.options.clone(),
+        );
         let mut work = crate::viewer::lock(&evidence.storage.work);
-        while !session_catalog_page_ready(&fixture.options).unwrap() {
+        while !sqlite_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap();
@@ -2138,9 +1990,12 @@ mod tests {
         for index in 0..256 {
             fixture.source(&format!("unrelated-{index:04}"));
         }
-        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+            "local",
+            fixture.options.clone(),
+        );
         let mut work = crate::viewer::lock(&evidence.storage.work);
-        while !session_catalog_page_ready(&fixture.options).unwrap() {
+        while !sqlite_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap();
@@ -2234,9 +2089,12 @@ mod tests {
         for index in 0..192 {
             fixture.source(&format!("unrelated-{index:04}"));
         }
-        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+            "local",
+            fixture.options.clone(),
+        );
         let mut work = crate::viewer::lock(&evidence.storage.work);
-        while !session_catalog_page_ready(&fixture.options).unwrap() {
+        while !sqlite_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap();
@@ -2382,7 +2240,10 @@ mod tests {
             let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
-            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let mut work = crate::viewer::lock(&evidence.storage.work);
             evidence
                 .prepare_events(&mut work, crate::model::now_ms())
@@ -2444,7 +2305,7 @@ mod tests {
             assert!(complete, "affected runtime publication did not recover");
             drop(work);
             evidence.retire();
-            let (status, page) = fixture.body("sid=affected&limit=1");
+            let (status, page) = fixture.semantic_body("sid=affected&limit=1");
             assert_eq!(status, 200, "{page}");
             assert_eq!(
                 page["items"][0]["facts_observation"]["state"], "cached",
@@ -2531,7 +2392,7 @@ mod tests {
 
             // Persist, release every Index, and reopen before unchanged repair.
             {
-                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let mut cache = fixture.open_index();
                 let index =
                     crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
                 assert_eq!(index.tokens("codex").input, count * 10);
@@ -2547,7 +2408,7 @@ mod tests {
             };
             let before = revision();
             for _ in 0..3 {
-                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let mut cache = fixture.open_index();
                 let index =
                     crate::events::scan_file(&path, "codex", &mut cache, &mut false).unwrap();
                 assert_eq!(index.tokens("codex").input, count * 10);
@@ -2558,7 +2419,10 @@ mod tests {
                 );
             }
 
-            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let mut work = crate::viewer::lock(&evidence.storage.work);
             let mut complete = false;
             for _ in 0..128 {
@@ -2577,7 +2441,7 @@ mod tests {
             assert!(!evidence.catalog_pending(&work));
             drop(work);
             evidence.retire();
-            let (status, page) = fixture.body("scope=retained_history&limit=60");
+            let (status, page) = fixture.semantic_body("scope=retained_history&limit=60");
             assert_eq!(status, 200, "{page}");
             assert_eq!(page["items"].as_array().unwrap().len(), 1);
             let root_bytes: i64 = db
@@ -2595,7 +2459,10 @@ mod tests {
             // identity work, and require that same epoch to reach publication.
             // This exercises the original witness_claim failure chain, beyond
             // a successful small single-batch Catalog request.
-            let staged = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let staged = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let mut work = crate::viewer::lock(&staged.storage.work);
             staged
                 .prepare_events(&mut work, crate::model::now_ms())
@@ -2675,7 +2542,7 @@ mod tests {
             }
             drop(work);
             staged.retire();
-            let (status, body) = fixture.body("scope=retained_history&limit=60");
+            let (status, body) = fixture.semantic_body("scope=retained_history&limit=60");
             assert_eq!(status, 200);
             let owner = body["items"]
                 .as_array()
@@ -2698,16 +2565,14 @@ mod tests {
     fn workspace_search_resumes_after_each_bounded_scan_frontier() {
         let a = Fixture::new();
         let b = Fixture::new();
-        a.publish(600);
-        let mut paths = std::collections::BTreeSet::new();
-        for key in ["session-00000", "session-00550", "session-00999"] {
-            paths.insert(b.codex_source(key, None, 1));
+        for id in 0..600 {
+            a.source(&format!("row-{id:05}"));
         }
-        let path = b.options.facts.as_ref().unwrap();
-        let mut facts = crate::read_facts(path).unwrap();
-        facts.codex_rollouts = Some(paths);
-        crate::write_facts(path, &facts).unwrap();
-        b.publish_existing();
+        for key in ["row-00000-needle", "row-00550-needle", "row-00999-needle"] {
+            b.source(key);
+        }
+        a.publish_for("a");
+        b.publish_for("b");
         let sources = [
             crate::OverviewSource {
                 key: "a".into(),
@@ -2722,7 +2587,7 @@ mod tests {
                 up: false,
             },
         ];
-        let base = "scope=retained_history&q=session&harness=codex&limit=2";
+        let base = "q=needle&harness=claude&limit=2";
         let mut query = base.to_owned();
         let mut found = Vec::new();
         let mut partial = false;
@@ -2759,7 +2624,7 @@ mod tests {
         );
         assert_eq!(
             found,
-            vec!["session-00000", "session-00550", "session-00999"]
+            vec!["row-00000-needle", "row-00550-needle", "row-00999-needle"]
         );
     }
 
@@ -2767,8 +2632,13 @@ mod tests {
     fn workspace_union_pages_duplicate_ids_and_timestamps_without_native_reads() {
         let a = Fixture::new();
         let b = Fixture::new();
-        a.publish(8);
-        b.publish(8);
+        for id in 0..8 {
+            let key = format!("session-{id:05}");
+            a.source(&key);
+            b.source(&key);
+        }
+        a.publish_for("a");
+        b.publish_for("b");
         let sources = vec![
             crate::OverviewSource {
                 key: "a".into(),
@@ -2783,7 +2653,7 @@ mod tests {
                 up: false,
             },
         ];
-        let mut query = "scope=retained_history&limit=3".to_owned();
+        let mut query = "limit=3".to_owned();
         let mut identities = Vec::new();
         let mut first_cursor = None;
         for _ in 0..20 {
@@ -2807,10 +2677,7 @@ mod tests {
                 break;
             };
             first_cursor.get_or_insert_with(|| cursor.to_owned());
-            query = format!(
-                "scope=retained_history&limit=3&cursor={}",
-                crate::viewer::percent_encode(cursor)
-            );
+            query = format!("limit=3&cursor={}", crate::viewer::percent_encode(cursor));
         }
         assert_eq!(identities.len(), 16);
         let mut expected = identities.clone();
@@ -2825,7 +2692,7 @@ mod tests {
         for (workspace, extra) in [
             ("workspace-b", ""),
             ("workspace-a", "&harness=codex"),
-            ("workspace-a", "&scope=current"),
+            ("workspace-a", "&scope=retained_history"),
         ] {
             let result = session_catalog_union(
                 &sources,
@@ -2836,18 +2703,14 @@ mod tests {
         }
         assert_eq!(
             session_catalog_union(&sources[..1], "workspace-a", &query).status,
-            409
+            400
         );
         let empty = session_catalog_union(&[], "empty", "scope=retained_history");
         assert_eq!(empty.status, 200);
         let empty: Value = serde_json::from_slice(&empty.body).unwrap();
         assert_eq!(empty["items"], json!([]));
         assert_eq!(empty["next_cursor"], Value::Null);
-        let single = session_catalog_union(
-            &sources[..1],
-            "workspace-a",
-            "scope=retained_history&limit=100",
-        );
+        let single = session_catalog_union(&sources[..1], "workspace-a", "limit=100");
         assert_eq!(single.status, 200);
         let single: Value = serde_json::from_slice(&single.body).unwrap();
         assert_eq!(single["items"].as_array().unwrap().len(), 8);
@@ -2864,20 +2727,25 @@ mod tests {
         );
         let searching: Value = serde_json::from_slice(&searching.body).unwrap();
         assert_eq!(searching["items"].as_array().unwrap().len(), 16);
-        // Raw body contents change behind an unchanged published Catalog. Lists
-        // still read metadata; selected detail/restore is not consulted.
+        // Source discovery rejects an unadmitted carrier revision without
+        // parsing its body or asking selected detail to restore it.
         fs::write(a.source("session-00000"), "not a native log").unwrap();
         let listed = session_catalog_union(&sources, "workspace-a", "limit=100");
         assert_eq!(listed.status, 200);
         let listed: Value = serde_json::from_slice(&listed.body).unwrap();
-        assert_eq!(listed["items"].as_array().unwrap().len(), 16);
+        assert_eq!(listed["items"].as_array().unwrap().len(), 15);
         let mut missing = sources[0].clone();
         missing.key = "missing".into();
         missing.options.cache = a.root.join("missing-index");
-        assert_eq!(
-            session_catalog_union(&[sources[0].clone(), missing], "workspace-a", "limit=3").status,
-            503
-        );
+        let partial =
+            session_catalog_union(&[sources[0].clone(), missing], "workspace-a", "limit=3");
+        assert_eq!(partial.status, 200);
+        let partial: Value = serde_json::from_slice(&partial.body).unwrap();
+        assert_eq!(partial["coverage"]["committed"], 7);
+        // The rewritten carrier in `a` and all eight carriers without an Index
+        // are pending. Coverage counts carriers within each source.
+        assert_eq!(partial["coverage"]["pending"], 9);
+        assert_eq!(partial["completeness"]["state"], "partial");
         let many: Vec<_> = (0..65).map(|_| sources[0].clone()).collect();
         assert_eq!(session_catalog_union(&many, "workspace-a", "").status, 503);
     }
@@ -2921,7 +2789,7 @@ mod tests {
                     .find(|row| row["key"] == item["key"])
                     .unwrap();
                 item["name"] = original["name"].clone();
-                item.as_object_mut().unwrap().remove("annotation");
+                item["annotation"] = original["annotation"].clone();
             }
         }
         assert_eq!(items, before["items"]);
@@ -3535,7 +3403,7 @@ mod tests {
             fixture.publish_existing();
             let range = crate::transcript_range::read(
                 &fixture.options,
-                "source",
+                "local",
                 "sid=parent&scope=retained_history&limit=100",
                 None,
                 crate::SessionSourceReadMode::ProviderOnly,
@@ -3565,7 +3433,7 @@ mod tests {
     fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generation() {
         let fixture = Fixture::new();
         fixture.publish(2);
-        let (status, list) = fixture.body("limit=2&scope=retained_history");
+        let (status, list) = fixture.semantic_body("limit=2&scope=retained_history");
         assert_eq!(status, 200);
         assert!(
             list["items"]
@@ -3574,7 +3442,7 @@ mod tests {
                 .iter()
                 .all(|row| row.get("details").is_none())
         );
-        let (status, selected) = fixture.body("sid=session-00000&scope=retained_history");
+        let (status, selected) = fixture.semantic_body("sid=session-00000&scope=retained_history");
         assert_eq!(status, 200);
         let details = &selected["items"][0]["details"];
         assert_eq!(details["turns"], 1);
@@ -3586,11 +3454,13 @@ mod tests {
         assert!(details["busy"].is_array());
         assert_eq!(details["content_generation"].as_str().unwrap().len(), 64);
         assert!(!details.to_string().contains("synthetic prompt"));
-        let transcript = crate::session_transcript_range(
+        let transcript = crate::transcript_range::session_transcript_range_with_gate(
             &fixture.options,
-            "source",
-            "sid=session-00000&scope=retained_history&limit=1",
+            "local",
+            "sid=session-00000&scope=retained_history&after=0&limit=1",
             None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            || Ok(()),
         );
         assert_eq!(transcript.status, 200);
         let transcript: Value = serde_json::from_slice(&transcript.body).unwrap();
@@ -3628,19 +3498,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            fixture.body("sid=session-00000&scope=retained_history").1["items"][0]["details"]["live_observation"],
+            fixture
+                .semantic_body("sid=session-00000&scope=retained_history")
+                .1["items"][0]["details"]["live_observation"],
             false,
             "retained metadata cannot claim current activity"
         );
         db.execute("UPDATE session_trace_headers SET source_generation='superseded' WHERE session_key='session-00000'", []).unwrap();
-        let (status, changed) = fixture.body("sid=session-00000&scope=retained_history");
+        let (status, changed) = fixture.semantic_body("sid=session-00000&scope=retained_history");
         assert_eq!(status, 200);
         assert!(
             changed["items"][0].get("details").is_none(),
             "changed native provenance must not supply recorded details"
         );
         assert_eq!(
-            fixture.body("sid=session-00001&scope=retained_history").1["items"][0]["details"]["turns"],
+            fixture
+                .semantic_body("sid=session-00001&scope=retained_history")
+                .1["items"][0]["details"]["turns"],
             1
         );
     }
@@ -3657,13 +3531,13 @@ mod tests {
         drop(file);
         fixture.publish(1);
         let source = crate::OverviewSource {
-            key: "source".into(),
+            key: "local".into(),
             label: "Machine".into(),
             options: fixture.options.clone(),
             up: true,
         };
         let output: Value = serde_json::from_slice(
-            &crate::session_overview_reply(&[source], "home", "", 1790812810000)
+            &crate::overview::slot_overview_reply(&[source], "home", "", 1790812810000)
                 .unwrap()
                 .body,
         )
@@ -3683,7 +3557,12 @@ mod tests {
             "sid=home&scope=retained_history&turn={}",
             row["event"]["turn"].as_str().unwrap()
         );
-        let trace = crate::session_causal_trace(&fixture.options, "source", &trace_query);
+        let trace = crate::causal_trace::session_causal_trace_with_gate(
+            &fixture.options,
+            "local",
+            &trace_query,
+            || Ok(()),
+        );
         assert_eq!(
             trace.status,
             200,
@@ -3700,10 +3579,11 @@ mod tests {
         );
         assert!(!String::from_utf8_lossy(&trace.body).contains("NATIVE_PRIVATE_"));
         assert_eq!(
-            crate::session_causal_trace(
+            crate::causal_trace::session_causal_trace_with_gate(
                 &fixture.options,
-                "source",
-                &trace_query.replace("retained_history", "current")
+                "local",
+                &trace_query.replace("retained_history", "current"),
+                || Ok(()),
             )
             .status,
             400
@@ -3717,12 +3597,13 @@ mod tests {
             row["session"]["content_generation"].as_str().unwrap(),
             crate::viewer::percent_encode(&json!([question_id]).to_string())
         );
-        let read = crate::session_home_details_with_mode(
+        let read = crate::overview::session_home_details_inner(
             &fixture.options,
-            "source",
+            "local",
             &query,
             None,
             crate::SessionSourceReadMode::ProviderOnly,
+            true,
         );
         assert_eq!(read.status, 200, "{}", String::from_utf8_lossy(&read.body));
         let details: Value = serde_json::from_slice(&read.body).unwrap();
@@ -3767,17 +3648,23 @@ mod tests {
         }
         let reader = Reader(fs::read(&path).unwrap());
         fs::remove_file(&path).unwrap();
-        let archived_trace = crate::session_causal_trace(&fixture.options, "source", &trace_query);
+        let archived_trace = crate::causal_trace::session_causal_trace_with_gate(
+            &fixture.options,
+            "local",
+            &trace_query,
+            || Ok(()),
+        );
         assert_eq!(archived_trace.status, 200);
         let archived_trace: Value = serde_json::from_slice(&archived_trace.body).unwrap();
         assert_eq!(archived_trace["turns"], trace_body["turns"]);
         assert_eq!(archived_trace["handoffs"], trace_body["handoffs"]);
-        let archived = crate::session_home_details_with_mode(
+        let archived = crate::overview::session_home_details_inner(
             &fixture.options,
-            "source",
+            "local",
             &query,
             Some(&reader),
             crate::SessionSourceReadMode::LocalThenProvider,
+            true,
         );
         assert_eq!(
             archived.status,
@@ -3847,10 +3734,10 @@ mod tests {
         assert!(
             crate::repair_session_overview(
                 &fixture.options,
-                "source",
+                "local",
                 "home",
                 Some(&reader),
-                crate::SessionSourceReadMode::LocalThenProvider
+                crate::SessionSourceReadMode::LocalThenProvider,
             )
             .unwrap()
         );
@@ -3859,7 +3746,12 @@ mod tests {
                 .unwrap()
                 .contains(&"home".into())
         );
-        let repaired_trace = crate::session_causal_trace(&fixture.options, "source", &trace_query);
+        let repaired_trace = crate::causal_trace::session_causal_trace_with_gate(
+            &fixture.options,
+            "local",
+            &trace_query,
+            || Ok(()),
+        );
         assert_eq!(
             repaired_trace.status,
             200,
@@ -3873,12 +3765,13 @@ mod tests {
             row["session"]["content_generation"].as_str().unwrap(),
             repaired["previews"]["home"].as_str().unwrap(),
         );
-        let recovered = crate::session_home_details_with_mode(
+        let recovered = crate::overview::session_home_details_inner(
             &fixture.options,
-            "source",
+            "local",
             &updated,
             Some(&reader),
             crate::SessionSourceReadMode::LocalThenProvider,
+            true,
         );
         assert_eq!(
             recovered.status,
@@ -3897,12 +3790,13 @@ mod tests {
         // ledger, so the Catalog identity read itself refuses it.
         db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.sources[0].prefix_sha256',json(?1)) WHERE session_key='home'", [json!(vec![9;32]).to_string()]).unwrap();
         assert_eq!(
-            crate::session_home_details_with_mode(
+            crate::overview::session_home_details_inner(
                 &fixture.options,
-                "source",
+                "local",
                 &updated,
                 Some(&reader),
-                crate::SessionSourceReadMode::ProviderOnly
+                crate::SessionSourceReadMode::ProviderOnly,
+                true,
             )
             .status,
             503
@@ -3964,7 +3858,7 @@ mod tests {
         assert!(
             crate::repair_session_overview(
                 &fixture.options,
-                "source",
+                "local",
                 "large-original",
                 Some(&reader),
                 crate::SessionSourceReadMode::ProviderOnly
@@ -3979,7 +3873,7 @@ mod tests {
             !path.exists(),
             "selected migration cannot restore native files"
         );
-        let (_, selected) = fixture.body("sid=large-original&scope=retained_history");
+        let (_, selected) = fixture.semantic_body("sid=large-original&scope=retained_history");
         assert_eq!(selected["items"][0]["details"]["turns"], 1);
     }
 
@@ -4002,7 +3896,7 @@ mod tests {
         assert!(
             crate::repair_session_overview(
                 &fixture.options,
-                "source",
+                "local",
                 "root",
                 None,
                 crate::SessionSourceReadMode::LocalThenProvider
@@ -4039,7 +3933,7 @@ mod tests {
         assert!(
             crate::repair_session_overview(
                 &fixture.options,
-                "source",
+                "local",
                 "run-079",
                 None,
                 crate::SessionSourceReadMode::LocalThenProvider
@@ -4066,13 +3960,42 @@ mod tests {
     #[test]
     fn exact_model_and_missing_repository_filters_bind_cursor_scope() {
         let fixture = Fixture::new();
-        fixture.publish(4);
-        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        db.execute("UPDATE session_catalog SET repo=NULL, metadata=json_set(metadata,'$.repo',NULL,'$.model','exact') WHERE session_key IN ('session-00000','session-00002')", []).unwrap();
-        db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.model','exact-other') WHERE session_key='session-00001'", []).unwrap();
+        use std::io::Write;
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.repos.insert("/synthetic/no-repo".into(), None);
+        crate::write_facts(facts_path, &facts).unwrap();
+        let mut originals = Vec::new();
+        for (key, model, cwd) in [
+            ("session-00000", "exact", "/synthetic/no-repo"),
+            ("session-00001", "exact-other", "/synthetic/no-repo"),
+            ("session-00002", "exact", "/synthetic/no-repo"),
+            ("session-00003", "exact", "/synthetic/project"),
+        ] {
+            let path = fixture.source(key);
+            let prompt = fs::read_to_string(&path)
+                .unwrap()
+                .replace("/synthetic/project", cwd);
+            fs::write(&path, prompt).unwrap();
+            writeln!(
+                fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                "{}",
+                json!({"type":"assistant","sessionId":key,"uuid":format!("reply-{key}"),
+                    "parentUuid":key,"timestamp":"2026-10-01T00:00:01Z",
+                    "message":{"id":format!("message-{key}"),"role":"assistant","model":model,
+                        "content":[{"type":"text","text":"Synthetic reply"}]}})
+            )
+            .unwrap();
+            originals.push(path);
+        }
+        fixture.publish_existing();
+        for path in originals {
+            fs::remove_file(path).unwrap();
+        }
+        fixture.publish_existing();
         let response = session_catalog_page(
             &fixture.options,
-            "source",
+            "local",
             "scope=retained_history&model=exact&no_repo=1&limit=1",
         );
         assert_eq!(response.status, 200);
@@ -4085,20 +4008,20 @@ mod tests {
             cursor_query(&value["next_cursor"])
         );
         let next: Value =
-            serde_json::from_slice(&session_catalog_page(&fixture.options, "source", &query).body)
+            serde_json::from_slice(&session_catalog_page(&fixture.options, "local", &query).body)
                 .unwrap();
         assert_eq!(next["items"][0]["key"], "session-00002");
         assert_eq!(
             session_catalog_page(
                 &fixture.options,
-                "source",
+                "local",
                 &query.replace("model=exact", "model=exact-other")
             )
             .status,
             400
         );
         assert_eq!(
-            session_catalog_page(&fixture.options, "source", "no_repo=1&repo=project").status,
+            session_catalog_page(&fixture.options, "local", "no_repo=1&repo=project").status,
             400
         );
     }
@@ -4112,14 +4035,15 @@ mod tests {
         }
         fs::write(&path, lines).unwrap();
         fixture.publish_existing();
-        fs::remove_file(path).unwrap();
+        fixture.retain("faults", &path);
         let query = "sid=faults&scope=retained_history&kind=errors&limit=100";
-        let response = crate::session_annotations(&fixture.options, "source", query);
+        let response = crate::session_annotations(&fixture.options, "local", query);
         assert_eq!(response.status, 200);
         let first: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(first["total"], 206);
         assert_eq!(first["entries"].as_array().unwrap().len(), 100);
-        assert_eq!(first["next_cursor"], 100);
+        assert_eq!(first["first"], 0);
+        assert_eq!(first["projection"], 7);
         assert!(
             !response
                 .body
@@ -4131,18 +4055,30 @@ mod tests {
             first["generation"].as_str().unwrap()
         );
         let second: Value = serde_json::from_slice(
-            &crate::session_annotations(&fixture.options, "source", &second_query).body,
+            &crate::session_annotations(&fixture.options, "local", &second_query).body,
         )
         .unwrap();
         assert_eq!(second["entries"].as_array().unwrap().len(), 100);
+        assert_eq!(second["first"], 100);
+        let offsets = |page: &Value| {
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["address"]["record"]["offset"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let first_offsets = offsets(&first);
+        let second_offsets = offsets(&second);
         assert!(
-            second["entries"][0]["slot"].as_u64().unwrap()
-                > first["entries"][99]["slot"].as_u64().unwrap()
+            first_offsets
+                .iter()
+                .all(|offset| !second_offsets.contains(offset))
         );
         assert_eq!(
             crate::session_annotations(
                 &fixture.options,
-                "source",
+                "local",
                 &(query.to_owned() + "&after=100")
             )
             .status,
@@ -4151,8 +4087,8 @@ mod tests {
         assert_eq!(
             crate::session_annotations(
                 &fixture.options,
-                "source",
-                &(query.to_owned() + "&generation=wrong")
+                "local",
+                &format!("{query}&generation={}", "0".repeat(64))
             )
             .status,
             409
@@ -4160,7 +4096,7 @@ mod tests {
         assert_eq!(
             crate::session_annotations(
                 &fixture.options,
-                "source",
+                "local",
                 &(query.to_owned() + "&kind=signals")
             )
             .status,
@@ -4168,79 +4104,48 @@ mod tests {
         );
     }
     #[test]
-    fn turn_bookmarks_use_indexed_retained_slots_without_native_body_reads() {
+    fn retained_turn_bookmark_selects_the_exact_rendered_entry() {
         let fixture = Fixture::new();
-        fixture.publish(1);
-        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let turn: String = db.query_row("SELECT json_extract(metadata,'$.turn') FROM session_slots WHERE session_key='session-00000' AND json_extract(metadata,'$.turn') IS NOT NULL ORDER BY slot LIMIT 1", [], |row| row.get(0)).unwrap();
-        let expected: i64 = db.query_row("SELECT slot FROM session_slots WHERE session_key='session-00000' AND json_extract(metadata,'$.turn')=?1 ORDER BY slot LIMIT 1", [&turn], |row| row.get(0)).unwrap();
-        let range = crate::session_transcript_range(
-            &fixture.options,
-            "source",
-            "sid=session-00000&scope=retained_history&after=0&limit=1",
-            None,
-        );
-        assert_eq!(range.status, 200);
-        let range: Value = serde_json::from_slice(&range.body).unwrap();
-        fs::remove_file(
-            fixture
-                .options
-                .claude_home
-                .join("projects/project/session-00000.jsonl"),
-        )
-        .unwrap();
-        let query = format!(
-            "sid=session-00000&turn={}&scope=retained_history",
-            crate::viewer::percent_encode(&turn)
-        );
-        let reply = crate::session_turn_anchor(&fixture.options, "source", &query);
+        let original = fixture.source("session-00000");
+        fixture.publish_existing();
+        fixture.retain("session-00000", &original);
+        let selection = "sid=session-00000&scope=retained_history";
+        let range =
+            |query: &str| crate::session_transcript_range(&fixture.options, "local", query, None);
+        let page = range(selection);
+        assert_eq!(page.status, 200);
+        let page: Value = serde_json::from_slice(&page.body).unwrap();
+        let prompt = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["k"] == "u")
+            .unwrap();
+        let turn = prompt["turn"].as_str().unwrap();
+        let query = format!("{selection}&turn={}", crate::viewer::percent_encode(turn));
+        let anchor = |query: &str| crate::session_turn_anchor(&fixture.options, "local", query);
+        let reply = anchor(&query);
         assert_eq!(reply.status, 200);
         let value: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(value["slot"], expected);
-        assert_eq!(value["source_key"], "source");
-        assert_eq!(value["generation"], range["projection"]["generation"]);
-        // A turn address is qualified by the same immutable projection as a
-        // range. Concurrent replacement rejects the old address before I/O.
-        db.execute(
-            "UPDATE session_slot_projections SET generation=?1 WHERE session_key='session-00000'",
-            ["e".repeat(64)],
-        )
-        .unwrap();
-        let stale_range = format!(
-            "sid=session-00000&scope=retained_history&after={expected}&limit=1&generation={}",
-            value["generation"].as_str().unwrap()
+        assert_eq!(value["address"], prompt["address"]);
+        assert_eq!(value["source_key"], "local");
+        assert_eq!(value["projection"], 7);
+        let address = crate::viewer::percent_encode(&value["address"].to_string());
+        let focused = range(&format!("{selection}&address={address}"));
+        assert_eq!(focused.status, 200);
+        let focused: Value = serde_json::from_slice(&focused.body).unwrap();
+        assert!(
+            focused["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["address"] == value["address"])
         );
-        assert_eq!(
-            crate::session_transcript_range(&fixture.options, "source", &stale_range, None).status,
-            409
-        );
-        assert_eq!(
-            crate::session_turn_anchor(
-                &fixture.options,
-                "source",
-                &(query.clone() + "&turn=other")
-            )
-            .status,
-            400
-        );
-        assert_eq!(
-            crate::session_turn_anchor(
-                &fixture.options,
-                "source",
-                &query.replace("retained_history", "current")
-            )
-            .status,
-            400
-        );
-        db.execute(
-            "UPDATE meta SET value='newer' WHERE key='slot_projection_catalog_generation'",
-            [],
-        )
-        .unwrap();
-        assert_eq!(
-            crate::session_turn_anchor(&fixture.options, "source", &query).status,
-            409
-        );
+        let mut stale = value["address"].clone();
+        stale["binding"] = json!("0".repeat(64));
+        let stale = crate::viewer::percent_encode(&stale.to_string());
+        assert_eq!(range(&format!("{selection}&address={stale}")).status, 409);
+        assert_eq!(anchor(&format!("{query}&turn=other")).status, 400);
     }
     #[test]
     fn exact_source_proof_requires_current_native_mapping_and_consumed_ledger() {
@@ -4581,76 +4486,48 @@ mod tests {
     #[test]
     fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
         let fixture = Fixture::new();
-        fixture.publish(2);
+        use std::io::Write;
+        let first = fixture.source("session-00000");
+        fixture.publish_for("stable-source");
         crate::events::CACHE_READS.with(|reads| reads.set(0));
-        let selected = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
-            .unwrap()
-            .unwrap();
+        let read = |key| session_catalog_identity(&fixture.options, "stable-source", key);
+        let selected = read("session-00000").unwrap().unwrap();
         assert_eq!(selected.source_key, "stable-source");
         assert_eq!(selected.native_id.as_deref(), Some("session-00000"));
         assert_eq!(selected.freshness.state, "cached");
         assert_eq!(selected.source_refs.len(), 1);
         assert_eq!(selected.machine_label.as_deref(), Some("synthetic-catalog"));
-        assert!(
-            session_catalog_identity(&fixture.options, "stable-source", "missing")
-                .unwrap()
-                .is_none()
-        );
+        assert!(read("missing").unwrap().is_none());
         assert_eq!(
-            session_catalog_identity(&fixture.options, "", "session-00000"),
-            Err(CatalogIdentityError::InvalidArguments)
+            session_catalog_identity(&fixture.options, "other-source", "session-00000"),
+            Err(CatalogIdentityError::Unavailable)
         );
-        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let read = |key: &str| -> Value {
-            let text: String = connection
-                .query_row(
-                    "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                    [key],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            serde_json::from_str(&text).unwrap()
-        };
-        // Model a published multi-native continuation using two valid scoped
-        // source ledgers. No arbitrary first native target may become authority.
-        let mut row = read("session-00000");
-        let second = read("session-00001");
-        row["sources"]
-            .as_array_mut()
-            .unwrap()
-            .extend(second["sources"].as_array().unwrap().iter().cloned());
-        row["native_ids"] = json!(["session-00000", "session-00001"]);
-        connection
-            .execute(
-                "UPDATE session_catalog SET metadata=?1 WHERE session_key='session-00000'",
-                [row.to_string()],
-            )
-            .unwrap();
-        let ambiguous =
-            session_catalog_identity(&fixture.options, "stable-source", "session-00000")
-                .unwrap()
-                .unwrap();
-        assert_eq!(ambiguous.native_id, None);
-        assert_eq!(ambiguous.native_ids, ["session-00000", "session-00001"]);
-        fs::remove_file(
-            fixture
-                .options
-                .claude_home
-                .join("projects/project/session-00000.jsonl"),
+        crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+
+        let second = fixture.source("session-00001");
+        let mut copied: Value = serde_json::from_str(&fs::read_to_string(&first).unwrap()).unwrap();
+        copied["sessionId"] = json!("session-00001");
+        fs::write(&second, format!("{copied}\n")).unwrap();
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&first).unwrap(),
+            "{}",
+            json!({"type":"continued-in","sessionId":"session-00000",
+                "continuedInSessionId":"session-00001","timestamp":"2026-10-01T00:00:01Z"})
         )
         .unwrap();
-        let missing = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
-            .unwrap()
-            .unwrap();
-        assert_eq!(missing.freshness.state, "incomplete");
-        assert_eq!(missing.source_refs[0].state, "unavailable");
-        assert_eq!(missing.facts_observation.state, "cached");
-        assert_eq!(missing.native_selection, None);
+        fixture.publish_for("stable-source");
+        crate::events::CACHE_READS.with(|reads| reads.set(0));
+        let ambiguous = read("session-00000").unwrap().unwrap();
+        assert_eq!(ambiguous.native_id, None);
+        assert_eq!(ambiguous.native_ids, ["session-00000", "session-00001"]);
+        fs::remove_file(first).unwrap();
+        assert!(read("session-00000").unwrap().is_none());
         let mut changed = fixture.options.clone();
         changed.claude_home = fixture.root.join("different-root");
-        assert_eq!(
-            session_catalog_identity(&changed, "stable-source", "session-00000"),
-            Err(CatalogIdentityError::ScopeChanged)
+        assert!(
+            session_catalog_identity(&changed, "stable-source", "session-00000")
+                .unwrap()
+                .is_none()
         );
         crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
     }
@@ -4665,7 +4542,15 @@ mod tests {
         fixture.publish(1);
         let facts_path = fixture.options.facts.as_ref().unwrap();
         let mut facts = crate::read_facts(facts_path).unwrap();
-        let read = || session_catalog_identity(&fixture.options, "stable-source", "codex-session");
+        let read = || {
+            catalog_identity(
+                &fixture.options,
+                "local",
+                "codex-session",
+                CatalogReadScope::Current,
+                false,
+            )
+        };
         // Legacy None means unknown selection, not current source authority.
         assert!(facts.codex_rollouts.is_none());
         assert_eq!(read().unwrap().unwrap().freshness.state, "incomplete");
@@ -4675,15 +4560,20 @@ mod tests {
         facts.codex_rollouts = Some(std::collections::BTreeSet::new());
         crate::write_facts(facts_path, &facts).unwrap();
         assert_eq!(read(), Err(CatalogIdentityError::ScopeChanged));
-        let history =
-            session_catalog_history_identity(&fixture.options, "stable-source", "codex-session")
-                .unwrap()
-                .unwrap();
+        let history = catalog_identity(
+            &fixture.options,
+            "local",
+            "codex-session",
+            CatalogReadScope::RetainedHistory,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(history.read_scope, CatalogReadScope::RetainedHistory);
         assert_eq!(history.native_selection.unwrap().state, "retired");
         assert_eq!(history.source_refs[0].source.native_id, "codex-session");
         assert_eq!(history.source_refs[0].state, "cached");
-        let (status, page) = fixture.body("scope=retained_history&sid=codex-session");
+        let (status, page) = fixture.semantic_body("scope=retained_history&sid=codex-session");
         assert_eq!(status, 200);
         assert_eq!(page["read_scope"], "retained_history");
         assert_eq!(page["items"][0]["native_selection"]["state"], "retired");
@@ -4695,15 +4585,20 @@ mod tests {
         assert_eq!(corrupt.facts_observation.state, "unavailable");
         assert_eq!(corrupt.native_selection.unwrap().state, "unavailable");
         assert_eq!(corrupt.source_refs[0].state, "cached");
-        let history =
-            session_catalog_history_identity(&fixture.options, "stable-source", "codex-session")
-                .unwrap()
-                .unwrap();
+        let history = catalog_identity(
+            &fixture.options,
+            "local",
+            "codex-session",
+            CatalogReadScope::RetainedHistory,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(history.freshness.state, "cached");
         assert_eq!(history.facts_observation.state, "unavailable");
         assert_eq!(history.native_selection.unwrap().state, "unavailable");
         assert_eq!(
-            fixture.body("sid=session-00000").1["items"][0]["freshness"]["state"],
+            fixture.semantic_body("sid=session-00000").1["items"][0]["freshness"]["state"],
             "unavailable"
         );
         fs::remove_file(facts_path).unwrap();
@@ -4727,7 +4622,15 @@ mod tests {
         facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
         crate::write_facts(facts_path, &facts).unwrap();
         fs::remove_file(path).unwrap();
-        let read = || session_catalog_identity(&fixture.options, "stable-source", "codex-session");
+        let read = || {
+            catalog_identity(
+                &fixture.options,
+                "local",
+                "codex-session",
+                CatalogReadScope::Current,
+                false,
+            )
+        };
         let missing = read().unwrap().unwrap();
         assert_eq!(missing.freshness.state, "unavailable");
         assert_eq!(missing.source_refs[0].state, "unavailable");
@@ -4748,6 +4651,16 @@ mod tests {
     fn cursors_bind_retained_read_intent_and_unknown_scope_is_rejected() {
         let fixture = Fixture::new();
         fixture.publish(3);
+        for key in ["session-00001", "session-00002"] {
+            fs::remove_file(
+                fixture
+                    .options
+                    .claude_home
+                    .join(format!("projects/project/{key}.jsonl")),
+            )
+            .unwrap();
+        }
+        fixture.publish_existing();
         let (status, first) = fixture.body("limit=1&scope=retained_history");
         assert_eq!(status, 200);
         let cursor = crate::viewer::percent_encode(first["next_cursor"].as_str().unwrap());
@@ -4759,14 +4672,14 @@ mod tests {
             200
         );
         assert!(Request::parse("scope=unknown").is_err());
-        let current = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+        let current = session_catalog_identity(&fixture.options, "local", "session-00000")
             .unwrap()
             .unwrap();
         assert_eq!(current.read_scope, CatalogReadScope::Current);
     }
 
     #[test]
-    fn selected_attachments_keep_large_image_bytes_out_of_browsing_and_validate_the_slot() {
+    fn selected_attachments_keep_large_image_bytes_out_of_browsing_and_validate_the_address() {
         let fixture = Fixture::new();
         let path = fixture.source("images");
         let mut image = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0".to_vec();
@@ -4789,11 +4702,12 @@ mod tests {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(file, "{}", json!({"type":"user","sessionId":"images","uuid":"native-image","parentUuid":"images","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":encoded}},{"type":"text","text":"Inspect this image"}]}})).unwrap();
         drop(file);
-        fixture.publish(0);
+        fixture.publish_existing();
+        fixture.retain("images", &path);
         let range = crate::session_transcript_range(
             &fixture.options,
-            "source",
-            "sid=images&scope=retained_history&after=0&limit=100",
+            "local",
+            "sid=images&scope=retained_history",
             None,
         );
         assert_eq!(range.status, 200);
@@ -4806,14 +4720,10 @@ mod tests {
             .find(|entry| entry["img"].is_array())
             .unwrap();
         assert_eq!(selected["img"][0]["size"], image.len());
-        assert!(page["observation"]["source_bytes"].as_u64().unwrap() <= 1024 * 1024);
-        let generation = page["projection"]["generation"].as_str().unwrap();
-        let query = format!(
-            "sid=images&scope=retained_history&after={}&limit=1&generation={generation}&part=attachment",
-            selected["slot"]
-        );
-        let read =
-            |query: &str| crate::session_entry_field(&fixture.options, "source", query, None);
+        assert!(range.body.len() < 64 * 1024);
+        let address = crate::viewer::percent_encode(&selected["address"].to_string());
+        let query = format!("sid=images&scope=retained_history&address={address}&part=attachment");
+        let read = |query: &str| crate::session_entry_field(&fixture.options, "local", query, None);
         assert_eq!(read(&format!("{query}&image=64")).status, 400);
         assert_eq!(read(&format!("{query}&image=1")).status, 404);
         assert_ne!(
@@ -4824,12 +4734,11 @@ mod tests {
             .status,
             200
         );
+        let mut stale = selected["address"].clone();
+        stale["binding"] = json!("0".repeat(64));
+        let stale = crate::viewer::percent_encode(&stale.to_string());
         assert_eq!(
-            read(&format!(
-                "{}&image=0",
-                query.replace(generation, &"0".repeat(64))
-            ))
-            .status,
+            read(&format!("{}&image=0", query.replace(&address, &stale))).status,
             409
         );
         let reply = read(&format!("{query}&image=0"));
@@ -4840,13 +4749,13 @@ mod tests {
     }
 
     #[test]
-    fn selected_script_uses_the_recorded_slot_and_rejects_unqualified_reads() {
+    fn selected_script_uses_the_exact_operation_address() {
         let fixture = Fixture::new();
         let relative = "sessions/2026/10/01/rollout-script-session.jsonl";
         let path = fixture.options.codex_home.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let script = format!("// private recorded script\n{}", "🦀".repeat(20000));
-        let output = format!("native failed result\n{}", "🦀".repeat(20000));
+        let output = format!("native failed result\n{}", "🦀".repeat(280_000));
         let records = [
             json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"script-session","cwd":"/synthetic/project"}}),
             json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"custom_tool_call","call_id":"script-call","name":"exec","input":script}}),
@@ -4865,65 +4774,83 @@ mod tests {
         let mut facts = crate::read_facts(facts_path).unwrap();
         facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
         crate::write_facts(facts_path, &facts).unwrap();
-        fixture.publish(0);
-        let query = "sid=script-session&scope=retained_history&after=0&limit=1";
-        let reply = crate::session_transcript_range(&fixture.options, "source", query, None);
-        assert_eq!(reply.status, 200);
+        fixture.publish_existing();
+        fixture.retain("script-session", &path);
+        let query = "sid=script-session&scope=retained_history";
+        let reply = crate::session_transcript_range(&fixture.options, "local", query, None);
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
         let page: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(page["session"]["details"]["calls"], 1);
-        assert_eq!(page["session"]["details"]["errors"], 1);
-        assert!(page["entries"][0].get("scriptText").is_none());
-        let generation = page["projection"]["generation"].as_str().unwrap();
-        let read =
-            |query: &str| crate::session_entry_field(&fixture.options, "source", query, None);
+        let original = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                entry["out"]
+                    .as_str()
+                    .is_some_and(|out| out.starts_with("native failed result"))
+            })
+            .unwrap();
+        assert!(original.get("scriptText").is_none());
+        assert_eq!(original["field"]["name"], "out");
+        let address = crate::viewer::percent_encode(&original["address"].to_string());
+        let mut stale = original["address"].clone();
+        stale["binding"] = json!("0".repeat(64));
+        let stale = crate::viewer::percent_encode(&stale.to_string());
+        let read = |query: &str| crate::session_entry_field(&fixture.options, "local", query, None);
         assert_eq!(read(&format!("{query}&part=script")).status, 400);
         assert_eq!(
-            read(&format!(
-                "{query}&part=script&generation={}",
-                "0".repeat(64)
-            ))
-            .status,
+            read(&format!("{query}&address={stale}&part=script")).status,
             409
         );
         assert_eq!(
-            read(&format!("{query}&part=arbitrary&generation={generation}")).status,
+            read(&format!("{query}&address={address}&part=arbitrary")).status,
             400
         );
-        let reply = read(&format!("{query}&part=script&generation={generation}"));
-        assert_eq!(reply.status, 200);
-        let expanded: Value = serde_json::from_slice(&reply.body).unwrap();
-        let entry = &expanded["entries"][0];
-        assert_eq!(entry["entry_id"], page["entries"][0]["entry_id"]);
-        assert_eq!(entry["provenance"], page["entries"][0]["provenance"]);
+        let expand = |part: &str| {
+            let reply = read(&format!("{query}&address={address}&part={part}"));
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(body["projection"], 7);
+            assert_eq!(body["entry"]["address"], original["address"]);
+            assert_eq!(body["entry"]["provenance"], original["provenance"]);
+            body["entry"].clone()
+        };
+        let entry = expand("script");
         let text = entry["scriptText"].as_str().unwrap();
         assert!(script.starts_with(text));
         assert!(text.len() <= 64 * 1024);
         assert_eq!(entry["scriptTruncated"], true);
-        assert!(expanded["observation"]["source_bytes"].as_u64().unwrap() <= 1024 * 1024);
-        assert_eq!(read(&format!("{query}&part=output")).status, 400);
-        assert_eq!(
-            read(&format!(
-                "{query}&part=output&generation={}",
-                "0".repeat(64)
-            ))
-            .status,
-            409
-        );
-        let reply = read(&format!("{query}&part=output&generation={generation}"));
-        assert_eq!(reply.status, 200);
-        let expanded: Value = serde_json::from_slice(&reply.body).unwrap();
-        let entry = &expanded["entries"][0];
-        assert_eq!(entry["entry_id"], page["entries"][0]["entry_id"]);
-        assert_eq!(entry["provenance"], page["entries"][0]["provenance"]);
+        let entry = expand("output");
         let text = entry["out"].as_str().unwrap();
         assert!(output.starts_with(text.trim_end_matches('…')));
         assert!(text.len() <= 64 * 1024 + 3);
         assert_eq!(entry["outputTruncated"], true);
-        assert!(expanded["observation"]["source_bytes"].as_u64().unwrap() <= 1024 * 1024);
+        let last = original["field"]["chunks"].as_u64().unwrap() - 1;
+        let reply = read(&format!("{query}&address={address}&field_chunk={last}"));
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        let text = body["entry"]["text"].as_str().unwrap();
+        assert!(!text.is_empty() && output.ends_with(text));
+        assert_eq!(body["entry"]["field"]["complete"], true);
     }
 
     #[test]
-    fn selected_output_expansion_keeps_native_blocks_under_source_generation() {
+    fn stored_slot_output_expansion_keeps_native_blocks_under_source_generation() {
         const FIXTURE: &str = include_str!(
             "../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
         );
@@ -4948,11 +4875,13 @@ mod tests {
         crate::write_facts(facts_path, &facts).unwrap();
         fixture.publish(0);
 
-        let page = crate::session_transcript_range(
+        let page = crate::transcript_range::session_transcript_range_with_gate(
             &fixture.options,
-            "source",
+            "local",
             "sid=parser-cases&scope=retained_history&after=0&limit=100",
             None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            || Ok(()),
         );
         assert_eq!(page.status, 200);
         let page: Value = serde_json::from_slice(&page.body).unwrap();
@@ -4993,8 +4922,16 @@ mod tests {
         let query = format!(
             "sid=parser-cases&scope=retained_history&after={slot}&limit=1&generation={generation}&part=output"
         );
-        let read =
-            |query: &str| crate::session_entry_field(&fixture.options, "source", query, None);
+        let read = |query: &str| {
+            crate::transcript_range::session_entry_field_with_gate(
+                &fixture.options,
+                "local",
+                query,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                || Ok(()),
+            )
+        };
         assert_eq!(
             read(&query.replace(&format!("&generation={generation}"), "")).status,
             400
@@ -5054,8 +4991,8 @@ mod tests {
         let read = |scope: &str| {
             let reply = crate::session_transcript_range(
                 &fixture.options,
-                "source",
-                &format!("sid=signal-session&scope={scope}&after=0&limit=100"),
+                "local",
+                &format!("sid=signal-session&scope={scope}&limit=32"),
                 None,
             );
             assert_eq!(reply.status, 200);
@@ -5086,37 +5023,28 @@ mod tests {
                 .iter()
                 .all(|entry| entry["provenance"]["offset"] == first[0]["provenance"]["offset"])
         );
-        assert_eq!(first, signals(&read("retained_history")));
-        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let stored: String = connection.query_row("SELECT generation FROM session_slot_projections WHERE session_key='signal-session'", [], |row| row.get(0)).unwrap();
-        assert_ne!(current["projection"]["generation"], stored);
+        let signal_ids = |entries: &[Value]| {
+            entries
+                .iter()
+                .map(|entry| entry["entry_id"].clone())
+                .collect::<Vec<_>>()
+        };
+        fixture.publish(20);
+        assert_eq!(first, signals(&read("current")));
+        fixture.retain("signal-session", &path);
+        let history = read("retained_history");
+        assert_eq!(signal_ids(&first), signal_ids(&signals(&history)));
+        assert_ne!(current["binding"], history["binding"]);
+        let address = crate::viewer::percent_encode(&first[0]["address"].to_string());
         assert_eq!(
             crate::session_transcript_range(
                 &fixture.options,
-                "source",
-                &format!("sid=signal-session&generation={stored}"),
-                None
+                "local",
+                &format!("sid=signal-session&scope=retained_history&address={address}"),
+                None,
             )
             .status,
-            409
-        );
-        fixture.publish(20);
-        assert_eq!(first, signals(&read("current")));
-        // Partial source retirement merges retained recipes by their original
-        // identity; distinct signals must not collapse during that merge.
-        fs::remove_file(path).unwrap();
-        fixture.publish(20);
-        let retained = signals(&read("retained_history"));
-        assert_eq!(retained.len(), 3);
-        assert_eq!(
-            first
-                .iter()
-                .map(|entry| &entry["entry_id"])
-                .collect::<Vec<_>>(),
-            retained
-                .iter()
-                .map(|entry| &entry["entry_id"])
-                .collect::<Vec<_>>()
+            409,
         );
     }
 
@@ -5135,7 +5063,8 @@ mod tests {
         let options = fixture.options.clone();
         crate::overview_repair::BEFORE_PUBLICATION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                let evidence = crate::native_evidence::NativeEvidence::new(options);
+                let evidence =
+                    crate::native_evidence::NativeEvidence::for_source_key("local", options);
                 let mut work = crate::viewer::lock(&evidence.storage.work);
                 while !evidence
                     .refresh_catalog(&mut work, crate::model::now_ms())
@@ -5145,10 +5074,11 @@ mod tests {
                 evidence.retire();
             }));
         });
-        let observed = crate::session_overview_observe(
+        let observed = crate::overview_repair::session_overview_observe_with_gate(
             &fixture.options,
-            "source",
+            "local",
             "sid=selected&scope=retained_history",
+            || Ok(()),
         );
         assert_eq!(observed.status, 503);
         let observed: Value = serde_json::from_slice(&observed.body).unwrap();
@@ -5158,10 +5088,11 @@ mod tests {
         // A later request can observe the committed producer revision and read
         // it normally; the rejected repair did not publish partial metadata.
         assert_eq!(
-            crate::session_overview_observe(
+            crate::overview_repair::session_overview_observe_with_gate(
                 &fixture.options,
-                "source",
-                "sid=selected&scope=retained_history"
+                "local",
+                "sid=selected&scope=retained_history",
+                || Ok(())
             )
             .status,
             200
@@ -5169,8 +5100,8 @@ mod tests {
         assert_eq!(
             crate::session_transcript_range(
                 &fixture.options,
-                "source",
-                "sid=selected&scope=retained_history&limit=1",
+                "local",
+                "sid=selected&limit=1",
                 None
             )
             .status,
@@ -5180,21 +5111,42 @@ mod tests {
 
     #[test]
     fn transcript_snapshot_survives_publication_after_selected_observation() {
+        let read_slots =
+            |options: &Options,
+             source: &str,
+             query: &str,
+             reader: Option<&dyn crate::SessionSourceReader>| {
+                crate::transcript_range::session_transcript_range_with_gate(
+                    options,
+                    source,
+                    query,
+                    reader,
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    || Ok(()),
+                )
+            };
         use std::io::Write;
         for scope in ["current", "retained_history"] {
             let fixture = Fixture::new();
             let path = fixture.source("selected");
             writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"selected","uuid":"answer","parentUuid":"selected","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"selected answer"}]}})).unwrap();
             fixture.publish_existing();
-            let observation = crate::session_overview_observe(
+            let observation = crate::overview_repair::session_overview_observe_with_gate(
                 &fixture.options,
-                "source",
+                "local",
                 "sid=selected&scope=retained_history",
+                || Ok(()),
             );
             assert_eq!(observation.status, 200);
-            let before = session_catalog_identity(&fixture.options, "source", "selected")
-                .unwrap()
-                .unwrap();
+            let before = catalog_identity(
+                &fixture.options,
+                "local",
+                "selected",
+                CatalogReadScope::Current,
+                false,
+            )
+            .unwrap()
+            .unwrap();
 
             // Force a real, atomic producer commit between selected identity
             // and recipe loading. The former two-connection read returns 409
@@ -5203,7 +5155,8 @@ mod tests {
             let options = fixture.options.clone();
             crate::transcript_range::AFTER_SELECTION.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || {
-                    let evidence = crate::native_evidence::NativeEvidence::new(options);
+                    let evidence =
+                        crate::native_evidence::NativeEvidence::for_source_key("local", options);
                     let mut work = crate::viewer::lock(&evidence.storage.work);
                     while !evidence
                         .refresh_catalog(&mut work, crate::model::now_ms())
@@ -5214,20 +5167,26 @@ mod tests {
                 }));
             });
             let query = format!("sid=selected&scope={scope}&after=0&limit=1");
-            let page = crate::session_transcript_range(&fixture.options, "source", &query, None);
+            let page = read_slots(&fixture.options, "local", &query, None);
             assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
             let page: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(page["identity"]["generation"], before.generation);
             assert_eq!(page["entries"][0]["text"], "synthetic prompt");
             assert_eq!(page["range"]["next"], 1);
-            let after = session_catalog_identity(&fixture.options, "source", "selected")
-                .unwrap()
-                .unwrap();
+            let after = catalog_identity(
+                &fixture.options,
+                "local",
+                "selected",
+                CatalogReadScope::Current,
+                false,
+            )
+            .unwrap()
+            .unwrap();
             assert_ne!(after.generation, before.generation);
             let generation = page["projection"]["generation"].as_str().unwrap();
-            let continuation = crate::session_transcript_range(
+            let continuation = read_slots(
                 &fixture.options,
-                "source",
+                "local",
                 &format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}"),
                 None,
             );
@@ -5240,8 +5199,7 @@ mod tests {
             // producer snapshot merely because the caller has no cursor.
             let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             db.execute("UPDATE meta SET value='unpublished' WHERE key='slot_projection_catalog_generation'", []).unwrap();
-            let rejected =
-                crate::session_transcript_range(&fixture.options, "source", &query, None);
+            let rejected = read_slots(&fixture.options, "local", &query, None);
             assert_eq!(rejected.status, 409);
             let rejected: Value = serde_json::from_slice(&rejected.body).unwrap();
             assert_eq!(rejected["error"]["code"], "stale_projection");
@@ -5251,6 +5209,20 @@ mod tests {
 
     #[test]
     fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
+        let read_slots =
+            |options: &Options,
+             source: &str,
+             query: &str,
+             reader: Option<&dyn crate::SessionSourceReader>| {
+                crate::transcript_range::session_transcript_range_with_gate(
+                    options,
+                    source,
+                    query,
+                    reader,
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    || Ok(()),
+                )
+            };
         use std::io::Write;
         struct Original(Vec<u8>);
         impl crate::SessionSourceReader for Original {
@@ -5285,23 +5257,30 @@ mod tests {
             let path = fixture.source("selected");
             fixture.publish_existing();
             assert_eq!(
-                crate::session_overview_observe(
+                crate::overview_repair::session_overview_observe_with_gate(
                     &fixture.options,
-                    "source",
-                    "sid=selected&scope=retained_history"
+                    "local",
+                    "sid=selected&scope=retained_history",
+                    || Ok(()),
                 )
                 .status,
                 200
             );
             let original = Original(fs::read(&path).unwrap());
-            let before = session_catalog_identity(&fixture.options, "source", "selected")
-                .unwrap()
-                .unwrap();
+            let before = catalog_identity(
+                &fixture.options,
+                "local",
+                "selected",
+                CatalogReadScope::Current,
+                false,
+            )
+            .unwrap()
+            .unwrap();
             let options = fixture.options.clone();
             crate::transcript_range::AFTER_SELECTION.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || {
                     writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"selected","uuid":"appended","parentUuid":"selected","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"new native answer"}]}})).unwrap();
-                    let evidence = crate::native_evidence::NativeEvidence::new(options);
+                    let evidence = crate::native_evidence::NativeEvidence::for_source_key("local", options);
                     let mut work = crate::viewer::lock(&evidence.storage.work);
                     while !evidence
                         .refresh_catalog(&mut work, crate::model::now_ms())
@@ -5312,12 +5291,7 @@ mod tests {
                 }));
             });
             let query = format!("sid=selected&scope={scope}&after=0&limit=100");
-            let page = crate::session_transcript_range(
-                &fixture.options,
-                "source",
-                &query,
-                Some(&original),
-            );
+            let page = read_slots(&fixture.options, "local", &query, Some(&original));
             assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
             let page: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(page["identity"]["generation"], before.generation);
@@ -5327,15 +5301,16 @@ mod tests {
             assert_eq!(page["content_observation"]["state"], "cached");
 
             assert_eq!(
-                crate::session_overview_observe(
+                crate::overview_repair::session_overview_observe_with_gate(
                     &fixture.options,
-                    "source",
-                    "sid=selected&scope=retained_history"
+                    "local",
+                    "sid=selected&scope=retained_history",
+                    || Ok(()),
                 )
                 .status,
                 200
             );
-            let fresh = crate::session_transcript_range(&fixture.options, "source", &query, None);
+            let fresh = read_slots(&fixture.options, "local", &query, None);
             assert_eq!(fresh.status, 200);
             let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
             assert_ne!(fresh["identity"]["generation"], before.generation);
@@ -5345,14 +5320,13 @@ mod tests {
             let continuation =
                 format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}");
             assert_eq!(
-                crate::session_transcript_range(&fixture.options, "source", &continuation, None)
-                    .status,
+                read_slots(&fixture.options, "local", &continuation, None).status,
                 200
             );
             let old = page["projection"]["generation"].as_str().unwrap();
-            let stale = crate::session_transcript_range(
+            let stale = read_slots(
                 &fixture.options,
-                "source",
+                "local",
                 &continuation.replace(generation, old),
                 None,
             );
@@ -5360,9 +5334,9 @@ mod tests {
             let stale: Value = serde_json::from_slice(&stale.body).unwrap();
             assert_eq!(stale["error"]["code"], "stale_projection");
             assert!(stale.get("entries").is_none());
-            let stale_errors = crate::session_transcript_range(
+            let stale_errors = read_slots(
                 &fixture.options,
-                "source",
+                "local",
                 &format!("{continuation}&errors_generation=wrong"),
                 None,
             );
@@ -5382,7 +5356,14 @@ mod tests {
         fixture.publish(2);
         crate::events::CACHE_READS.with(|reads| reads.set(0));
         let get = |query: &str| {
-            let reply = crate::session_transcript_range(&fixture.options, "source", query, None);
+            let reply = crate::transcript_range::session_transcript_range_with_gate(
+                &fixture.options,
+                "local",
+                query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+                || Ok(()),
+            );
             (
                 reply.status,
                 serde_json::from_slice::<Value>(&reply.body).unwrap(),
@@ -5409,7 +5390,14 @@ mod tests {
         for chunk in 0..chunks {
             let query =
                 format!("sid=selected&after=2&limit=1&generation={generation}&field_chunk={chunk}");
-            let reply = crate::session_entry_field(&fixture.options, "source", &query, None);
+            let reply = crate::transcript_range::session_entry_field_with_gate(
+                &fixture.options,
+                "local",
+                &query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+                || Ok(()),
+            );
             assert_eq!(reply.status, 200);
             let body: Value = serde_json::from_slice(&reply.body).unwrap();
             assert!(body["observation"]["source_bytes"].as_u64().unwrap() <= 64 * 1024 + 11);
@@ -5442,6 +5430,23 @@ mod tests {
             plan.contains("SEARCH session_slots USING PRIMARY KEY"),
             "{plan}"
         );
+    }
+
+    fn read_slot_range(
+        options: &crate::Options,
+        source: &str,
+        query: &str,
+        reader: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+    ) -> ViewerReply {
+        crate::transcript_range::session_transcript_range_with_gate(
+            options,
+            source,
+            query,
+            reader,
+            mode,
+            || Ok(()),
+        )
     }
 
     #[test]
@@ -5578,11 +5583,12 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         crate::events::CACHE_READS.with(|reads| reads.set(0));
-        let reply = crate::session_transcript_range(
+        let reply = read_slot_range(
             &fixture.options,
-            "source",
+            "local",
             "sid=archived&after=0&limit=2",
             Some(&provider),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -5598,22 +5604,24 @@ mod tests {
             cached: false,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
-        let reply = crate::session_transcript_range(
+        let reply = read_slot_range(
             &fixture.options,
-            "source",
+            "local",
             "sid=archived&after=0&limit=2",
             Some(&fresh),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(reply.status, 200);
         let fresh_body: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(fresh_body["content_observation"]["state"], "available");
         assert_eq!(fresh_body["identity"]["freshness"]["state"], "unavailable");
         let generation = fresh_body["projection"]["generation"].as_str().unwrap();
-        let reply = crate::session_entry_field(
+        let reply = read_slot_range(
             &fixture.options,
-            "source",
+            "local",
             &format!("sid=archived&after=1&limit=1&generation={generation}&field_chunk=0"),
             Some(&fresh),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(reply.status, 200);
         let field: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -5626,11 +5634,12 @@ mod tests {
             cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
-        let reply = crate::session_transcript_range(
+        let reply = read_slot_range(
             &fixture.options,
-            "source",
+            "local",
             "sid=archived&after=0&limit=2",
             Some(&changed),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(reply.status, 409);
@@ -5664,8 +5673,8 @@ mod tests {
             assert_eq!(
                 crate::session_transcript_range(
                     &fixture.options,
-                    "source",
-                    "sid=session-00000&after=0&limit=1",
+                    "local",
+                    "sid=session-00000&limit=1",
                     None
                 )
                 .status,
@@ -5691,11 +5700,12 @@ mod tests {
         let before = crate::native_timing::cleanup_tests::snapshot(&connection);
         let cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
         assert!(cache.qualified_catalog().unwrap());
-        let unavailable = crate::session_transcript_range(
+        let unavailable = read_slot_range(
             &fixture.options,
-            "source",
+            "local",
             "sid=session-00000&after=0&limit=1",
             None,
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(unavailable.status, 503);
         assert_eq!(
@@ -5762,7 +5772,7 @@ mod tests {
             ("/api/session-identity", "sid=session-00000"),
             (
                 "/api/session-transcript",
-                "machine=local&sid=session-00000&after=0&limit=1",
+                "machine=local&sid=session-00000&limit=1",
             ),
         ] {
             let reply = core.respond("GET", path, query, None);
@@ -5813,8 +5823,8 @@ mod tests {
         fixture.publish(0);
         let reply = crate::session_transcript_range(
             &fixture.options,
-            "source",
-            "sid=edit-session&limit=100",
+            "local",
+            "sid=edit-session&limit=32",
             None,
         );
         assert_eq!(reply.status, 200);
@@ -5826,8 +5836,8 @@ mod tests {
             .find(|entry| entry["name"] == "Edit")
             .unwrap();
         assert_eq!(edit["diff"], json!([["del", "-before"], ["add", "+after"]]));
-        assert_eq!(edit["clipped"], false);
-        assert_eq!(edit["field"]["complete"], true);
+        assert!(edit.get("clipped").is_none());
+        assert!(edit.get("field").is_none());
         assert!(edit.get("out").is_none());
     }
 
@@ -5851,7 +5861,14 @@ mod tests {
             }
             fixture.publish(0);
             let read = |query| {
-                let reply = crate::session_transcript_range(&fixture.options, "local", query, None);
+                let reply = crate::transcript_range::session_transcript_range_with_gate(
+                    &fixture.options,
+                    "local",
+                    query,
+                    None,
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    || Ok(()),
+                );
                 assert_eq!(reply.status, 200);
                 serde_json::from_slice::<Value>(&reply.body).unwrap()
             };
@@ -5882,7 +5899,7 @@ mod tests {
             let fixture = Fixture::new();
             let path = fixture.source("pending-call");
             use std::io::Write;
-            writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}", json!({"type":"assistant","sessionId":"pending-call","uuid":"call","parentUuid":"pending-call","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"pending-tool","name":"Bash","input":{"command":"cargo test"}}]}})).unwrap();
+            writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"pending-call","uuid":"call","parentUuid":"pending-call","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"pending-tool","name":"Bash","input":{"command":"cargo test"}}]}})).unwrap();
             if live {
                 let facts_path = fixture.options.facts.as_ref().unwrap();
                 let mut facts = crate::read_facts(facts_path).unwrap();
@@ -5901,48 +5918,25 @@ mod tests {
                 let reply = crate::session_annotations(
                     &fixture.options,
                     "local",
-                    "sid=pending-call&scope=retained_history&kind=errors&limit=100",
+                    "sid=pending-call&kind=errors&limit=100",
                 );
                 assert_eq!(reply.status, 200);
                 serde_json::from_slice::<Value>(&reply.body).unwrap()
             };
             let before_errors = errors();
             assert_eq!(before_errors["total"], if live { 0 } else { 1 });
-            let descriptor = crate::session_catalog_page(
-                &fixture.options,
-                "local",
-                "sid=pending-call&scope=retained_history",
-            );
-            assert_eq!(descriptor.status, 200);
-            let descriptor: Value = serde_json::from_slice(&descriptor.body).unwrap();
-            assert_eq!(
-                descriptor["items"][0]["transcript"]["errors_generation"],
-                before_errors["generation"]
-            );
-            if live {
-                // Read-only retained custody cannot inherit a recorded live PID.
-                let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-                db.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='pending-call'", []).unwrap();
-                let retained = errors();
-                assert_eq!(retained["total"], 1);
-                assert_ne!(retained["generation"], before_errors["generation"]);
-                db.execute("UPDATE session_catalog SET lifecycle='current',metadata=json_set(metadata,'$.lifecycle','current') WHERE session_key='pending-call'", []).unwrap();
-                assert_eq!(errors()["generation"], before_errors["generation"]);
-            }
-            let read = || {
-                let reply = crate::session_transcript_range(
-                    &fixture.options,
-                    "local",
-                    "sid=pending-call&scope=retained_history&after=0&limit=100",
-                    None,
-                );
+            let query = "sid=pending-call";
+            let transcript = |query: &str| {
+                let reply = crate::session_transcript_range(&fixture.options, "local", query, None);
                 assert_eq!(
                     reply.status,
                     200,
                     "{}",
                     String::from_utf8_lossy(&reply.body)
                 );
-                let page: Value = serde_json::from_slice(&reply.body).unwrap();
+                serde_json::from_slice::<Value>(&reply.body).unwrap()
+            };
+            let tool = |page: &Value| {
                 page["entries"]
                     .as_array()
                     .unwrap()
@@ -5951,7 +5945,9 @@ mod tests {
                     .unwrap()
                     .clone()
             };
-            let entry = read();
+            let before = transcript(query);
+            assert_eq!(before["errors_generation"], before_errors["generation"]);
+            let entry = tool(&before);
             if live {
                 assert_eq!(entry["live"], true);
                 assert!(entry.get("ok").is_none());
@@ -5963,7 +5959,8 @@ mod tests {
                 crate::write_facts(facts_path, &facts).unwrap();
                 fixture.publish(0);
             }
-            let stopped = read();
+            let stopped_page = transcript(query);
+            let stopped = tool(&stopped_page);
             assert_eq!(stopped["unfinished"], true);
             assert_eq!(stopped["ok"], false);
             assert!(stopped["live"].is_null());
@@ -5975,41 +5972,29 @@ mod tests {
                     &fixture.options,
                     "local",
                     &format!(
-                        "sid=pending-call&scope=retained_history&kind=errors&limit=100&generation={}",
+                        "sid=pending-call&kind=errors&limit=100&generation={}",
                         before_errors["generation"].as_str().unwrap()
                     ),
                 );
                 assert_eq!(stale.status, 409);
-                let stale_range = crate::session_transcript_range(
-                    &fixture.options,
-                    "local",
-                    &format!(
-                        "sid=pending-call&scope=retained_history&after=0&limit=100&errors_generation={}",
-                        before_errors["generation"].as_str().unwrap()
-                    ),
-                    None,
-                );
-                assert_eq!(stale_range.status, 409);
-                let current_range = crate::session_transcript_range(
-                    &fixture.options,
-                    "local",
-                    &format!(
-                        "sid=pending-call&scope=retained_history&after=0&limit=100&errors_generation={}",
-                        stopped_errors["generation"].as_str().unwrap()
-                    ),
-                    None,
-                );
-                assert_eq!(current_range.status, 200);
-                let current_range: Value = serde_json::from_slice(&current_range.body).unwrap();
                 assert_eq!(
-                    current_range["projection"]["errors_generation"],
+                    stopped_page["errors_generation"],
                     stopped_errors["generation"]
                 );
+                assert_eq!(before["binding"], stopped_page["binding"]);
+                assert_eq!(entry["address"], stopped["address"]);
             }
             let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let stored: String = db.query_row("SELECT metadata FROM session_slots WHERE session_key='pending-call' AND json_extract(metadata,'$.recipe.outcome')='Pending'", [], |row|row.get(0)).unwrap();
             assert!(!stored.contains("\"Live\""));
             assert!(!stored.contains("\"since\""));
+            fixture.retain("pending-call", &path);
+            let retained = transcript("sid=pending-call&scope=retained_history");
+            assert_eq!(tool(&retained)["unfinished"], true);
+            assert_eq!(
+                retained["errors_generation"],
+                retained["identity"]["generation"]
+            );
         }
     }
 
@@ -6023,7 +6008,7 @@ mod tests {
             "codex-object",
         ] {
             let fixture = Fixture::new();
-            let body = "native tool output line \"quoted\" \n".repeat(15000);
+            let body = "native tool output line \"quoted\" \n".repeat(35_000);
             let key = if harness.starts_with("claude") {
                 "claude-tools"
             } else {
@@ -6081,8 +6066,8 @@ mod tests {
             crate::events::CACHE_READS.with(|reads| reads.set(0));
             let reply = crate::session_transcript_range(
                 &fixture.options,
-                "source",
-                &format!("sid={key}&after=0&limit=100"),
+                "local",
+                &format!("sid={key}"),
                 None,
             );
             assert_eq!(
@@ -6119,46 +6104,55 @@ mod tests {
                     .unwrap()
                     .starts_with("native tool output line")
             );
-            assert!(page["observation"]["source_bytes"].as_u64().unwrap() < 16 * 1024);
-            let generation = page["projection"]["generation"].as_str().unwrap();
-            let slot = entry["slot"].as_u64().unwrap();
+            assert!(reply.body.len() < 64 * 1024);
+            let address = crate::viewer::percent_encode(&entry["address"].to_string());
+            let read_chunk = |chunk| {
+                crate::session_entry_field(
+                    &fixture.options,
+                    "local",
+                    &format!("sid={key}&address={address}&field_chunk={chunk}"),
+                    None,
+                )
+            };
             let chunks = entry["field"]["chunks"].as_u64().unwrap();
+            assert!(chunks > 1);
+            // Read the final chunk first to require a checkpoint seek in a
+            // result whose full record exceeds the 1 MiB request allowance.
+            let tail = read_chunk(chunks - 1);
+            assert_eq!(tail.status, 200);
+            let tail: Value = serde_json::from_slice(&tail.body).unwrap();
+            assert_eq!(tail["entry"]["field"]["complete"], true);
+            assert!(body.ends_with(tail["entry"]["text"].as_str().unwrap()));
             let mut expanded = String::new();
             for chunk in 0..chunks {
-                let reply = crate::session_entry_field(
-                    &fixture.options,
-                    "source",
-                    &format!(
-                        "sid={key}&after={slot}&limit=1&generation={generation}&field_chunk={chunk}"
-                    ),
-                    None,
-                );
+                let reply = read_chunk(chunk);
                 assert_eq!(reply.status, 200);
                 let part: Value = serde_json::from_slice(&reply.body).unwrap();
+                let part = &part["entry"];
+                assert_eq!(part["address"], entry["address"]);
                 assert_eq!(part["field"]["name"], "out");
-                assert_eq!(
-                    part["provenance"], entry["field"]["provenance"],
-                    "{harness}: native result anchor"
-                );
-                assert_ne!(
-                    part["provenance"]["offset"], entry["provenance"]["offset"],
-                    "tool calls and results retain distinct native positions"
-                );
-                assert_eq!(
-                    part["field"]["layers"],
-                    if harness == "codex-encoded" { 2 } else { 1 }
-                );
-                assert_eq!(part["content_observation"]["state"], "cached");
-                assert_eq!(
-                    part["content_observation"]["sources"][0]["generation_hash"]
-                        .as_str()
-                        .unwrap()
-                        .len(),
-                    64
-                );
+                assert_eq!(part["field"]["chunk"], chunk);
+                assert_eq!(part["field"]["complete"], chunk + 1 == chunks);
                 expanded.push_str(part["text"].as_str().unwrap());
             }
             assert_eq!(expanded, body);
+            let output = crate::session_entry_field(
+                &fixture.options,
+                "local",
+                &format!("sid={key}&address={address}&part=output"),
+                None,
+            );
+            assert_eq!(output.status, 200);
+            let output: Value = serde_json::from_slice(&output.body).unwrap();
+            assert_eq!(output["entry"]["outputTruncated"], true);
+            assert!(
+                body.starts_with(
+                    output["entry"]["out"]
+                        .as_str()
+                        .unwrap()
+                        .trim_end_matches('…')
+                )
+            );
             crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
         }
     }
@@ -6186,9 +6180,9 @@ mod tests {
         }
         let provider = Reject(std::sync::atomic::AtomicUsize::new(0));
         let get = || {
-            crate::session_transcript_range_with_mode(
+            read_slot_range(
                 &fixture.options,
-                "source",
+                "local",
                 "sid=mixed&after=0&limit=1",
                 Some(&provider),
                 crate::SessionSourceReadMode::LocalThenProvider,
@@ -6289,7 +6283,7 @@ mod tests {
         let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
         facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
         crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
-        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let mut cache = fixture.open_index();
         let prepared = crate::model::prepare_sources(
             &fixture.options,
             &mut cache,
@@ -6306,22 +6300,42 @@ mod tests {
         );
         drop(cache);
         assert_eq!(
-            session_catalog_identity(&fixture.options, "source", "local-proof")
+            session_catalog_identity(&fixture.options, "local", "local-proof")
                 .unwrap()
                 .unwrap()
                 .owner_qualification,
-            CatalogOwnerQualification::Provisional
+            CatalogOwnerQualification::Qualified
         );
         (fixture, path)
+    }
+
+    #[test]
+    fn warehouse_identity_is_provisional_without_recorded_codex_selection() {
+        let (fixture, _) = local_only_codex_fixture();
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = None;
+        crate::write_facts(facts_path, &facts).unwrap();
+
+        let identity = session_catalog_identity(&fixture.options, "local", "local-proof")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            identity.owner_qualification,
+            CatalogOwnerQualification::Provisional
+        );
+        assert!(identity.native_id.is_none());
+        assert_eq!(identity.native_ids, ["local-proof"]);
+        assert_eq!(identity.native_selection.unwrap().state, "unavailable");
     }
 
     #[test]
     fn selected_web_field_and_mcp_proofs_share_the_recipe_snapshot() {
         for reader in ["web", "field", "mcp"] {
             let (fixture, path) = local_only_codex_fixture();
-            let first = crate::session_transcript_range_with_mode(
+            let first = read_slot_range(
                 &fixture.options,
-                "source",
+                "local",
                 "sid=local-proof&after=0&limit=1",
                 None,
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
@@ -6348,10 +6362,10 @@ mod tests {
                 crate::query_source::BEFORE_FOCUSED_CAPTURE
                     .with(|hook| *hook.borrow_mut() = Some(collect));
                 let mut query =
-                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                    crate::Query::with_machines(vec![("local".into(), fixture.options.clone())]);
                 let result = query
                     .call_selected(
-                        "source",
+                        "local",
                         "local-proof",
                         "read_transcript",
                         &json!({"id":"local-proof","after":0,"limit":1}),
@@ -6378,9 +6392,9 @@ mod tests {
                         ""
                     }
                 );
-                let reply = crate::session_transcript_range_with_mode(
+                let reply = read_slot_range(
                     &fixture.options,
-                    "source",
+                    "local",
                     &request,
                     None,
                     crate::SessionSourceReadMode::LocalOrPinnedProvider,
@@ -6393,9 +6407,9 @@ mod tests {
                 );
                 assert!(String::from_utf8_lossy(&reply.body).contains("local original answer"));
             }
-            let fresh = crate::session_transcript_range_with_mode(
+            let fresh = read_slot_range(
                 &fixture.options,
-                "source",
+                "local",
                 "sid=local-proof&after=0&limit=1",
                 None,
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
@@ -6413,9 +6427,9 @@ mod tests {
         for mutation in ["append", "copy"] {
             let (fixture, path) = local_only_codex_fixture();
             let get = |after: usize, generation: Option<&str>| {
-                crate::session_transcript_range_with_mode(
+                read_slot_range(
                     &fixture.options,
-                    "source",
+                    "local",
                     &format!(
                         "sid=local-proof&after={after}&limit=1{}",
                         generation
@@ -6441,7 +6455,7 @@ mod tests {
                     json!({"type":"synthetic_append","iteration":append})
                 )
                 .unwrap();
-                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let mut cache = fixture.open_index();
                 // Commit Index/proofs and deliberately defer Catalog publication.
                 let _prepared = crate::model::prepare_sources(
                     &fixture.options,
@@ -6474,9 +6488,9 @@ mod tests {
                     assert_eq!(body["entries"][0]["text"], text);
                     // Native message scalars support the same generation-bound
                     // field expansion as the initially rendered preview.
-                    let expanded = crate::session_entry_field_with_mode(
+                    let expanded = read_slot_range(
                         &fixture.options,
-                        "source",
+                        "local",
                         &format!(
                             "sid=local-proof&after={after}&limit=1&generation={generation}&field_chunk=0"
                         ),
@@ -6493,7 +6507,7 @@ mod tests {
                     assert_eq!(expanded["text"], text);
                 }
                 let mut query =
-                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                    crate::Query::with_machines(vec![("local".into(), fixture.options.clone())]);
                 for tool in ["get_session", "read_transcript"] {
                     let args = if tool == "get_session" {
                         json!({"id":"local-proof"})
@@ -6502,7 +6516,7 @@ mod tests {
                     };
                     let value = query
                         .call_selected(
-                            "source",
+                            "local",
                             "local-proof",
                             tool,
                             &args,
@@ -6540,15 +6554,8 @@ mod tests {
         use std::io::Write;
         for mutation in ["append", "copy", "touch", "legacy"] {
             let (fixture, path) = local_only_codex_fixture();
-            let get = |query: &str, mode| {
-                crate::session_transcript_range_with_mode(
-                    &fixture.options,
-                    "source",
-                    query,
-                    None,
-                    mode,
-                )
-            };
+            let get =
+                |query: &str, mode| read_slot_range(&fixture.options, "local", query, None, mode);
             let query = "sid=local-proof&scope=retained_history&after=0&limit=1";
             let before = get(query, crate::SessionSourceReadMode::LocalThenProvider);
             assert_eq!(before.status, 200);
@@ -6672,19 +6679,26 @@ mod tests {
                 assert_eq!(stale.status, 409);
             }
             if mutation != "legacy" {
-                let observed = crate::session_overview_observe(
+                let observed = crate::overview_repair::session_overview_observe_with_gate(
                     &fixture.options,
-                    "source",
+                    "local",
                     "sid=local-proof&scope=retained_history",
+                    || Ok(()),
                 );
                 assert_eq!(observed.status, 200);
                 // Observe acknowledges metadata; it does not relabel the carrier.
-                let identity = session_catalog_identity(&fixture.options, "source", "local-proof")
-                    .unwrap()
-                    .unwrap();
+                let identity = catalog_identity(
+                    &fixture.options,
+                    "local",
+                    "local-proof",
+                    CatalogReadScope::Current,
+                    false,
+                )
+                .unwrap()
+                .unwrap();
                 assert_eq!(identity.source_refs[0].state, "stale");
                 let mut query =
-                    crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
+                    crate::Query::with_machines(vec![("local".into(), fixture.options.clone())]);
                 for tool in ["get_session", "read_transcript"] {
                     let args = if tool == "get_session" {
                         json!({"id":"local-proof"})
@@ -6695,7 +6709,7 @@ mod tests {
                     crate::events::HASHED_BYTES.with(|n| n.set(0));
                     let data = query
                         .call_selected(
-                            "source",
+                            "local",
                             "local-proof",
                             tool,
                             &args,
@@ -6769,9 +6783,9 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            let page = crate::session_transcript_range_with_mode(
+            let page = read_slot_range(
                 &fixture.options,
-                "source",
+                "local",
                 "sid=local-proof&after=0&limit=2",
                 None,
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
@@ -6790,7 +6804,7 @@ mod tests {
     fn pinned_provider_never_hides_a_concurrent_local_read_mutation() {
         use std::io::Write;
         let (fixture, path) = local_only_codex_fixture();
-        let identity = session_catalog_identity(&fixture.options, "source", "local-proof")
+        let identity = session_catalog_identity(&fixture.options, "local", "local-proof")
             .unwrap()
             .unwrap();
         let provider = PinnedOriginal {
@@ -6809,9 +6823,9 @@ mod tests {
                     .unwrap();
             }))
         });
-        let page = crate::session_transcript_range_with_mode(
+        let page = read_slot_range(
             &fixture.options,
-            "source",
+            "local",
             "sid=local-proof&after=0&limit=1",
             Some(&provider),
             crate::SessionSourceReadMode::LocalOrPinnedProvider,
@@ -6842,7 +6856,7 @@ mod tests {
                 // Match a provisional selected owner while complete discovery
                 // is still pending, with real source-qualified paged recipes.
                 {
-                    let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                    let mut cache = fixture.open_index();
                     let prepared = crate::model::prepare_sources(
                         &fixture.options,
                         &mut cache,
@@ -6858,12 +6872,12 @@ mod tests {
                         crate::events::Outcome::Written
                     );
                 }
-                let before = session_catalog_identity(&fixture.options, "source", "pinned")
+                let before = session_catalog_identity(&fixture.options, "local", "pinned")
                     .unwrap()
                     .unwrap();
                 assert_eq!(
                     before.owner_qualification,
-                    CatalogOwnerQualification::Provisional
+                    CatalogOwnerQualification::Qualified
                 );
                 let original = fs::read(&path).unwrap();
                 let provider = PinnedOriginal {
@@ -6876,13 +6890,7 @@ mod tests {
                 };
                 let query = format!("sid=pinned&scope={scope}&after=0&limit=1");
                 let get = |query: &str, mode| {
-                    crate::session_transcript_range_with_mode(
-                        &fixture.options,
-                        "source",
-                        query,
-                        Some(&provider),
-                        mode,
-                    )
+                    read_slot_range(&fixture.options, "local", query, Some(&provider), mode)
                 };
                 let initial = get(&query, crate::SessionSourceReadMode::LocalThenProvider);
                 assert_eq!(initial.status, 200);
@@ -6938,12 +6946,7 @@ mod tests {
                 // Metadata-only observation succeeds in the same stale cache;
                 // it does not establish that the transcript body was readable.
                 assert_eq!(
-                    crate::session_annotations(
-                        &fixture.options,
-                        "source",
-                        "sid=pinned&scope=retained_history&kind=errors&limit=1"
-                    )
-                    .status,
+                    fixture.semantic_body("sid=pinned&scope=retained_history").0,
                     200
                 );
                 crate::events::CACHE_READS.with(|reads| reads.set(0));
@@ -7037,7 +7040,7 @@ mod tests {
         let path = fixture.source("pinned");
         writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"pinned","uuid":"answer","parentUuid":"pinned","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"original answer"}]}})).unwrap();
         fixture.publish_existing();
-        let source = session_catalog_identity(&fixture.options, "source", "pinned")
+        let source = session_catalog_identity(&fixture.options, "local", "pinned")
             .unwrap()
             .unwrap()
             .source_refs[0]
@@ -7055,9 +7058,9 @@ mod tests {
             if wrong_reference {
                 provider.source.prefix_sha256[0] ^= 1;
             }
-            let reply = crate::session_transcript_range_with_mode(
+            let reply = read_slot_range(
                 &fixture.options,
-                "source",
+                "local",
                 "sid=pinned&after=0&limit=2",
                 Some(&provider),
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
@@ -7087,7 +7090,7 @@ mod tests {
                 .unwrap();
             sources.extend(serde_json::from_str::<CatalogRow>(&text).unwrap().sources);
         }
-        let source = session_catalog_identity(&fixture.options, "source", "archived")
+        let source = session_catalog_identity(&fixture.options, "local", "archived")
             .unwrap()
             .unwrap()
             .source_refs[0]
@@ -7139,26 +7142,32 @@ mod tests {
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='session-00001'",[]).unwrap();
         SQL_STEPS.with(|steps| steps.set(0));
-        let (status, before) = fixture.body("limit=1");
+        let (status, before) = fixture.semantic_body("limit=1");
         assert_eq!(status, 200);
         let baseline = SQL_STEPS.with(|steps| steps.get());
         assert_eq!(before["items"].as_array().unwrap().len(), 1);
         assert_eq!(before["items"][0]["key"], "session-00000");
         connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT 'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(metadata,'$.key','retained-'||printf('%05d',x)) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
         SQL_STEPS.with(|steps| steps.set(0));
-        let (status, after) = fixture.body("limit=1");
+        let (status, after) = fixture.semantic_body("limit=1");
         assert_eq!(status, 200);
         assert_eq!(after["items"], before["items"]);
         assert_eq!(SQL_STEPS.with(|steps| steps.get()), baseline);
-        let (status, history) = fixture.body("scope=retained_history&limit=2");
+        let (status, history) = fixture.semantic_body("scope=retained_history&limit=2");
         assert_eq!(status, 200);
         assert_eq!(history["items"].as_array().unwrap().len(), 2);
         assert!(history["next_cursor"].is_string());
         // Local absence does not revoke native-current authority by itself.
         assert!(
-            session_catalog_identity(&fixture.options, "source", "session-00001")
-                .unwrap()
-                .is_some()
+            catalog_identity(
+                &fixture.options,
+                "local",
+                "session-00001",
+                CatalogReadScope::Current,
+                false
+            )
+            .unwrap()
+            .is_some()
         );
     }
 
@@ -7200,8 +7209,8 @@ mod tests {
         assert_eq!(original.len(), rewritten.len());
         let old = crate::session_transcript_range(
             &fixture.options,
-            "source",
-            "sid=session-00000&after=0&limit=1",
+            "local",
+            "sid=session-00000&limit=1",
             None,
         );
         let old: Value = serde_json::from_slice(&old.body).unwrap();
@@ -7230,36 +7239,33 @@ mod tests {
             crate::events::change_time_ns(&before),
             crate::events::change_time_ns(&after)
         );
-        let stale = session_catalog_identity(&fixture.options, "source", "session-00000")
-            .unwrap()
-            .unwrap();
-        assert_eq!(stale.source_refs[0].state, "stale");
+        assert!(
+            session_catalog_identity(&fixture.options, "local", "session-00000")
+                .unwrap()
+                .is_none()
+        );
         let range = crate::session_transcript_range(
             &fixture.options,
-            "source",
-            "sid=session-00000&after=0&limit=1",
+            "local",
+            "sid=session-00000&limit=1",
             None,
         );
         assert_eq!(range.status, 409);
         let range: Value = serde_json::from_slice(&range.body).unwrap();
-        assert_eq!(range["error"]["code"], "stale_projection");
-        assert_eq!(range["resynchronize"], true);
+        assert_eq!(range["error"]["code"], "stale_cursor");
+        assert_eq!(range["reset_cursor"], true);
         assert!(!range.to_string().contains("rewritten prompt"));
         fixture.publish_existing();
         let fresh = crate::session_transcript_range(
             &fixture.options,
-            "source",
-            "sid=session-00000&after=0&limit=1",
+            "local",
+            "sid=session-00000&limit=1",
             None,
         );
         let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
         assert_eq!(fresh["entries"][0]["text"], "rewritten prompt");
-        assert_eq!(fresh["freshness"]["state"], "cached");
-        assert!(fresh["projection"]["generation"].is_string());
-        assert_ne!(
-            fresh["projection"]["generation"],
-            old["projection"]["generation"]
-        );
+        assert!(fresh["binding"].is_string());
+        assert_ne!(fresh["binding"], old["binding"]);
     }
 
     #[test]
@@ -7285,7 +7291,7 @@ mod tests {
         };
         let status = |scope: &str| {
             let before = crate::events::CACHE_READS.with(|reads| reads.get());
-            let (code, body) = fixture.body(scope);
+            let (code, body) = fixture.semantic_body(scope);
             assert_eq!(code, 200);
             assert_eq!(body["capabilities"]["runtime_status"], true);
             let row = &body["items"][0];
@@ -7326,7 +7332,7 @@ mod tests {
                 status(""),
                 json!({"state":null,"observation":"unavailable"})
             );
-            let (_, body) = fixture.body("");
+            let (_, body) = fixture.semantic_body("");
             assert_eq!(
                 body["items"][0]["facts_observation"]["state"],
                 if field == "runtime" {
@@ -7345,7 +7351,7 @@ mod tests {
             status(""),
             json!({"state":null,"observation":"unavailable"})
         );
-        let (_, unavailable) = fixture.body("");
+        let (_, unavailable) = fixture.semantic_body("");
         assert_eq!(
             unavailable["items"][0]["facts_observation"]["state"],
             "unavailable"
@@ -7357,13 +7363,13 @@ mod tests {
             &serde_json::from_value::<crate::Facts>(changed).unwrap(),
         )
         .unwrap();
-        let (_, pending) = fixture.body("");
+        let (_, pending) = fixture.semantic_body("");
         assert_eq!(pending["completeness"]["state"], "complete");
         assert_eq!(pending["freshness"], "stale");
         assert_eq!(pending["items"][0]["facts_observation"]["state"], "stale");
         fixture.publish_existing();
         assert_ne!(status("")["state"], Value::Null);
-        let (_, refreshed) = fixture.body("");
+        let (_, refreshed) = fixture.semantic_body("");
         assert_eq!(refreshed["freshness"], "cached");
         assert_eq!(
             refreshed["items"][0]["facts_observation"]["state"],
@@ -7421,7 +7427,12 @@ mod tests {
             crate::viewer::percent_encode(&turn_id)
         );
         let trace = || {
-            let reply = crate::session_causal_trace(&fixture.options, "local", &trace_query);
+            let reply = crate::causal_trace::session_causal_trace_with_gate(
+                &fixture.options,
+                "local",
+                &trace_query,
+                || Ok(()),
+            );
             assert_eq!(
                 reply.status,
                 200,
@@ -7564,7 +7575,7 @@ mod tests {
         };
         let status = || {
             let reads = crate::events::CACHE_READS.with(std::cell::Cell::get);
-            let (code, body) = fixture.body("sid=session-00000");
+            let (code, body) = fixture.semantic_body("sid=session-00000");
             assert_eq!(code, 200);
             let family = &body["items"][0]["details"]["family"];
             assert_eq!(family["state"], "complete");
@@ -7578,7 +7589,12 @@ mod tests {
                 assert!(child.get(private).is_none());
             }
             assert!(!body.to_string().contains("synthetic prompt"));
-            let trace = crate::session_causal_trace(&fixture.options, "local", &trace_query);
+            let trace = crate::causal_trace::session_causal_trace_with_gate(
+                &fixture.options,
+                "local",
+                &trace_query,
+                || Ok(()),
+            );
             assert_eq!(
                 trace.status,
                 200,
@@ -7717,13 +7733,14 @@ mod tests {
         }
         let reads = crate::events::CACHE_READS.with(std::cell::Cell::get);
         let assert_budget = || {
-            let reply = crate::session_causal_trace(
+            let reply = crate::causal_trace::session_causal_trace_with_gate(
                 &fixture.options,
                 "local",
                 &format!(
                     "sid=session-00000&scope=retained_history&turn={}",
                     crate::viewer::percent_encode(&turn_id)
                 ),
+                || Ok(()),
             );
             assert_eq!(reply.status, 413);
         };
@@ -7732,7 +7749,7 @@ mod tests {
             db.execute(&format!("UPDATE {table} SET metadata=json_set(metadata,'$.query.runtime','unavailable-runtime') WHERE session_key!='session-00000'"), []).unwrap();
         }
         assert_eq!(
-            fixture.body("sid=session-00001").1["items"][0]["status"]["observation"],
+            fixture.semantic_body("sid=session-00001").1["items"][0]["status"]["observation"],
             "unavailable"
         );
         assert_budget();
@@ -7770,7 +7787,7 @@ mod tests {
         };
         save(&row);
         let status = || {
-            let (code, body) = fixture.body("sid=family-parent");
+            let (code, body) = fixture.semantic_body("sid=family-parent");
             assert_eq!(code, 200);
             body["items"][0]["details"]["family"]["runs"][0]["status"].clone()
         };
@@ -7875,49 +7892,38 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(2);
         let source = fixture.source("session-00000");
-        assert_eq!(
-            fixture.body("limit=1").1["items"][0]["freshness"]["state"],
-            "stale"
-        );
+        let identity = || session_catalog_identity(&fixture.options, "local", "session-00000");
+        assert!(identity().unwrap().is_none());
+        let (_, pending) = fixture.body("limit=1");
+        assert_eq!(pending["coverage"]["pending"], 1);
+        assert_eq!(pending["items"][0]["key"], "session-00001");
         fs::remove_file(&source).unwrap();
         let (status, missing) = fixture.body("limit=1");
         assert_eq!(status, 200);
-        assert_eq!(missing["items"][0]["freshness"]["state"], "unavailable");
-        assert_eq!(
-            missing["items"][0]["source_refs"][0]["state"],
-            "unavailable"
-        );
+        assert_eq!(missing["items"][0]["key"], "session-00001");
+        assert!(identity().unwrap().is_none());
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("/etc/passwd", &source).unwrap();
-            assert_eq!(
-                fixture.body("limit=1").1["items"][0]["freshness"]["state"],
-                "unavailable"
-            );
+            assert!(identity().unwrap().is_none());
         }
         let mut changed = fixture.options.clone();
         changed.claude_home = fixture.root.join("another-claude");
-        let core = ViewerCore::new(changed);
-        let reply = core.respond("GET", "/api/sessions", "limit=1", None);
-        assert_eq!(reply.status, 503);
+        let reply = session_catalog_page(&changed, "local", "limit=1");
+        assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(body["error"]["code"], "catalog_scope_changed");
-        assert!(
-            body.get("items").is_none(),
-            "metadata from a prior configuration is not source authority"
-        );
-        // The refused read still schedules native observation. Drain its
-        // actual worker before the fixture removes its private source roots.
-        core.close();
+        assert_eq!(body["items"], json!([]));
     }
 
     #[test]
     fn focused_catalog_requires_an_unambiguous_machine_scope_and_bounded_arguments() {
         let fixture = Fixture::new();
-        fixture.publish(1);
+        fixture.source("session-00000");
+        fixture.publish_for("one");
+        let other = Fixture::new();
         let core = ViewerCore::with_machines(vec![
             ("one".into(), fixture.options.clone()),
-            ("two".into(), fixture.options.clone()),
+            ("two".into(), other.options.clone()),
         ]);
         let body = |query| {
             let reply = core.respond("GET", "/api/sessions", query, None);
@@ -7943,10 +7949,10 @@ mod tests {
         let empty = Fixture::new();
         // The projection reader itself stays read-only. Viewer transport
         // explicitly demands its native producer, covered separately.
-        assert_eq!(
-            session_catalog_page(&empty.options, "local", "").status,
-            503
-        );
+        let (status, cold) = empty.body("");
+        assert_eq!(status, 200);
+        assert_eq!(cold["items"], json!([]));
+        assert_eq!(cold["coverage"]["pending"], 1);
         assert!(
             !EventCache::path(&empty.options.cache).exists(),
             "a read-only catalog miss must not create an index"
@@ -7967,7 +7973,7 @@ mod tests {
                 }
             })
             .collect();
-        let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let mut cache = fixture.open_index();
         let first = crate::model::prepare_sources(
             &fixture.options,
             &mut cache,
@@ -8187,7 +8193,14 @@ mod tests {
             cache.publish_partial_catalog(&prepared).unwrap(),
             crate::events::Outcome::Conflict
         );
-        assert_eq!(fixture.body("").0, 503);
+        assert!(
+            read_page(
+                &fixture.options,
+                &crate::storage::Namespace::local(),
+                &Request::parse("").unwrap(),
+            )
+            .is_err()
+        );
         connection
             .execute(
                 "INSERT INTO session_catalog_invalidations VALUES ('unrelated',999,'changed',0)",
@@ -8269,7 +8282,10 @@ mod tests {
                 let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
                 let records = crate::events::PARSED.with(std::cell::Cell::get);
                 let started = std::time::Instant::now();
-                let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+                let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                    "local",
+                    fixture.options.clone(),
+                );
                 let mut work = crate::viewer::lock(&evidence.storage.work);
                 let mut steps = 0;
                 while !evidence
@@ -8303,14 +8319,16 @@ mod tests {
                 let current = crate::session_transcript_range(
                     &fixture.options,
                     "local",
-                    "sid=native-session&limit=100",
+                    "sid=native-session&limit=32",
                     None,
                 );
-                let history = crate::session_transcript_range(
+                let history = crate::transcript_range::session_transcript_range_with_gate(
                     &fixture.options,
                     "local",
-                    "sid=native-session&scope=retained_history&limit=100",
+                    "sid=native-session&scope=retained_history&after=0&limit=32",
                     None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    || Ok(()),
                 );
                 assert_eq!(
                     (current.status, history.status),
@@ -8402,7 +8420,7 @@ mod tests {
             "facts write lost the newly published dependency"
         );
         fixture.publish_existing();
-        let (_, body) = fixture.body("sid=selected");
+        let (_, body) = fixture.semantic_body("sid=selected");
         assert_eq!(body["items"][0]["facts_observation"]["state"], "cached");
     }
 
@@ -8479,7 +8497,7 @@ mod tests {
         let response = crate::session_transcript_range(
             &fixture.options,
             "local",
-            "sid=selected&limit=100",
+            "sid=selected&limit=32",
             None,
         );
         assert_eq!(response.status, 200);
@@ -8520,7 +8538,10 @@ mod tests {
         intent.complete().unwrap();
         db.execute_batch("CREATE TRIGGER reject_move BEFORE UPDATE ON session_catalog BEGIN SELECT RAISE(ABORT,'injected publication failure'); END;").unwrap();
         {
-            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let mut work = crate::viewer::lock(&evidence.storage.work);
             assert!(
                 evidence
@@ -8575,12 +8596,23 @@ mod tests {
         fixture.publish_existing();
         assert_eq!(crate::events::PARSED.with(std::cell::Cell::get) - parsed, 1);
         for scope in ["", "&scope=retained_history"] {
-            let response = crate::session_transcript_range(
-                &fixture.options,
-                "local",
-                &format!("sid=move-replay&limit=100{scope}"),
-                None,
-            );
+            let response = if scope.is_empty() {
+                crate::session_transcript_range(
+                    &fixture.options,
+                    "local",
+                    "sid=move-replay&limit=32",
+                    None,
+                )
+            } else {
+                crate::transcript_range::session_transcript_range_with_gate(
+                    &fixture.options,
+                    "local",
+                    "sid=move-replay&scope=retained_history&after=0&limit=32",
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    || Ok(()),
+                )
+            };
             assert_eq!(response.status, 200);
             let body: Value = serde_json::from_slice(&response.body).unwrap();
             assert_eq!(body["entries"].as_array().unwrap().len(), 2, "{body}");
@@ -8685,7 +8717,7 @@ mod tests {
                     }
                 }
                 assert!(elapsed < Duration::from_secs(10));
-                let (_, page) = fixture.body("limit=100");
+                let (_, page) = fixture.semantic_body("limit=100");
                 assert!(
                     page["items"]
                         .as_array()
@@ -8765,11 +8797,10 @@ mod tests {
             let key = writer_key
                 .map(str::to_owned)
                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            assert_eq!(
-                fixture.body("limit=100").0,
-                503,
-                "fixture must start unpublished"
-            );
+            let (status, cold) = fixture.body("limit=100");
+            assert_eq!(status, 200);
+            assert_eq!(cold["items"], json!([]));
+            assert_eq!(cold["coverage"]["pending"], 1);
 
             let writer =
                 crate::source_change::SourceLock::acquire(&fixture.options, &key, true).unwrap();
@@ -8786,7 +8817,10 @@ mod tests {
             let contention = std::io::Error::last_os_error();
             assert_eq!(contention.raw_os_error(), Some(libc::EAGAIN));
 
-            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let (started, starts) = mpsc::channel();
             let (finished, finishes) = mpsc::channel();
             let worker = thread::spawn(move || {
@@ -8915,7 +8949,7 @@ mod tests {
                         );
                     }
                 }
-                let (_, page) = fixture.body("limit=100");
+                let (_, page) = fixture.semantic_body("limit=100");
                 assert!(
                     page["items"]
                         .as_array()
@@ -9020,7 +9054,10 @@ mod tests {
         while previous < total {
             // A new owner on every step exercises durable discovery and parser
             // checkpoints, without any in-memory snapshot or index reuse.
-            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let mut work = crate::viewer::lock(&evidence.storage.work);
             let before = crate::events::PARSED.with(std::cell::Cell::get);
             let hashed = crate::events::HASHED_BYTES.with(std::cell::Cell::get);
@@ -9049,7 +9086,7 @@ mod tests {
             );
             records += crate::events::PARSED.with(std::cell::Cell::get) - before;
             assert_eq!(work.events.as_ref().unwrap().resident_index_payloads(), 0);
-            let body = fixture.body("sid=large").1;
+            let body = fixture.semantic_body("sid=large").1;
             assert_eq!(
                 body["completeness"]["state"],
                 if complete { "complete" } else { "partial" }
@@ -9065,7 +9102,10 @@ mod tests {
         }
         assert_eq!(records, 513, "restarted cold steps reparsed records");
         assert!(steps >= 4);
-        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+            "local",
+            fixture.options.clone(),
+        );
         let mut work = crate::viewer::lock(&evidence.storage.work);
         let parsed = crate::events::PARSED.with(std::cell::Cell::get);
         let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -9318,7 +9358,10 @@ mod tests {
             let hashed = crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get);
             let full_prefix = crate::events::HASHED_BYTES.with(std::cell::Cell::get);
             let started = std::time::Instant::now();
-            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let mut work = crate::viewer::lock(&evidence.storage.work);
             assert!(
                 evidence
@@ -9361,7 +9404,10 @@ mod tests {
             evidence.retire();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             let restarted = std::time::Instant::now();
-            let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+            let evidence = crate::native_evidence::NativeEvidence::for_source_key(
+                "local",
+                fixture.options.clone(),
+            );
             let mut work = crate::viewer::lock(&evidence.storage.work);
             assert!(
                 evidence
@@ -9402,7 +9448,7 @@ mod tests {
             for n in 0..unrelated {
                 fixture.source(&format!("unrelated-{n:05}"));
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = fixture.open_index();
             assert_eq!(cache.paths().count(), 0);
             assert!(
                 crate::model::prepare_sources(
@@ -9434,8 +9480,16 @@ mod tests {
             let (status, body) = fixture.body("limit=60");
             assert_eq!(status, 200);
             assert_eq!(body["items"].as_array().unwrap().len(), 60);
-            assert_eq!(body["completeness"]["state"], "partial");
-            assert_eq!(body["freshness"], "updating");
+            assert_eq!(body["coverage"]["committed"], 60);
+            assert_eq!(body["coverage"]["pending"], unrelated);
+            assert_eq!(
+                body["completeness"]["state"],
+                if unrelated == 0 {
+                    "complete"
+                } else {
+                    "partial"
+                }
+            );
             assert_eq!(cache.paths().count(), 60);
             let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let observed: i64 = connection
@@ -9445,18 +9499,17 @@ mod tests {
                 observed, 60,
                 "unrelated native sources must remain unobserved before first page"
             );
-            let identity = session_catalog_identity(&fixture.options, "source", "selected-00000")
+            let identity = session_catalog_identity(&fixture.options, "local", "selected-00000")
                 .unwrap()
                 .unwrap();
-            assert_eq!(identity.native_id, None);
+            assert_eq!(identity.native_id.as_deref(), Some("selected-00000"));
             assert_eq!(
                 identity.owner_qualification,
-                CatalogOwnerQualification::Provisional
+                CatalogOwnerQualification::Qualified
             );
-            assert!(
-                session_catalog_history_identity(&fixture.options, "source", "selected-00000")
-                    .unwrap()
-                    .is_some()
+            assert_eq!(
+                session_catalog_history_identity(&fixture.options, "local", "selected-00000"),
+                Err(CatalogIdentityError::RetainedUnverified)
             );
             eprintln!(
                 "scoped-cold-first-page unrelated={unrelated} elapsed_us={} bytes={} native_sources={observed}",
@@ -9562,9 +9615,11 @@ mod tests {
             let response = core.respond("GET", "/api/sessions", "", None);
             if response.status == 200 {
                 let body: Value = serde_json::from_slice(&response.body).unwrap();
-                assert_eq!(body["items"][0]["key"], "first");
-                assert_eq!(body["refresh"]["state"], "updating");
-                break;
+                if body["items"][0]["key"] == "first" {
+                    assert_eq!(body["projection"], 7);
+                    assert_eq!(body["coverage"]["committed"], 1);
+                    break;
+                }
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -9727,7 +9782,11 @@ mod tests {
     fn initial_catalog_wait_publishes_a_cold_page() {
         let fixture = Fixture::new();
         fixture.source("cold-wait");
-        assert_eq!(fixture.body("").0, 503);
+        let (status, cold) = fixture.body("");
+        assert_eq!(status, 200);
+        assert_eq!(cold["completeness"]["state"], "partial");
+        assert_eq!(cold["coverage"]["pending"], 1);
+        assert_eq!(cold["items"], json!([]));
 
         let observer = crate::SessionCatalogObserver::with_pool(
             "",
@@ -9745,7 +9804,11 @@ mod tests {
     fn initial_catalog_wait_does_not_demand_when_publication_predates_wait() {
         let fixture = Fixture::new();
         fixture.source("published-before-wait");
-        assert_eq!(fixture.body("").0, 503);
+        let (status, cold) = fixture.body("");
+        assert_eq!(status, 200);
+        assert_eq!(cold["completeness"]["state"], "partial");
+        assert_eq!(cold["coverage"]["pending"], 1);
+        assert_eq!(cold["items"], json!([]));
         fixture.publish_existing();
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         assert_eq!(
@@ -9776,7 +9839,7 @@ mod tests {
             !demanded,
             "a persisted publication must not start cold work"
         );
-        let (status, page) = fixture.body("");
+        let (status, page) = fixture.semantic_body("");
         assert_eq!(status, 200);
         assert_eq!(page["completeness"]["state"], "partial");
     }
@@ -9789,7 +9852,7 @@ mod tests {
 
         let pool = crate::RefreshPool::new(1);
         let observer = crate::SessionCatalogObserver::with_pool(
-            "source",
+            "local",
             fixture.options.clone(),
             pool.clone(),
         );
@@ -9802,7 +9865,7 @@ mod tests {
         let waiting_sources = sources.clone();
         let waiter = std::thread::spawn(move || {
             let result = waiting_sources.wait_until_initial_catalog(
-                "source",
+                "local",
                 pool,
                 std::time::Instant::now() + Duration::from_secs(10),
             );
@@ -9886,6 +9949,5 @@ mod tests {
 mod union;
 pub use union::session_catalog_union;
 
-#[cfg(test)]
 #[path = "catalog_warehouse.rs"]
-mod warehouse_fixture;
+pub(crate) mod warehouse;

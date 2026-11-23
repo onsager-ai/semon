@@ -150,7 +150,6 @@ impl RuntimeObservations {
             fallback: None,
         }
     }
-    #[cfg(test)]
     pub(crate) fn warehouse_process(
         &self,
         harness: &str,

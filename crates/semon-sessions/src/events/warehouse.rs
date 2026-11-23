@@ -102,6 +102,8 @@ pub(crate) enum Fact {
         time: Option<i64>,
     },
     Gap,
+    PromptImages(crate::attachments::PromptMetadata),
+    NativeFields(crate::native_field::SparseRecord),
     SessionId(String),
     Title {
         present: bool,
@@ -164,6 +166,8 @@ pub(crate) enum Fact {
     },
     Operation {
         parent: Position,
+        tool: &'static str,
+        ok: Option<bool>,
     },
     ToolResult {
         id: String,

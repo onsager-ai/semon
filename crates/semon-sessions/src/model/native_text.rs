@@ -250,7 +250,7 @@ pub(super) fn down_target(record: &Value, block: usize) -> Option<String> {
     (pinned || text.contains("queued for delivery to")).then(String::new)
 }
 
-pub(super) fn notification_result(record: &Value, id: &str) -> Option<String> {
+pub(crate) fn notification_result(record: &Value, id: &str) -> Option<String> {
     let text = record
         .get("attachment")
         .and_then(|attachment| attachment.get("prompt"))

@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 const PRODUCER_RECORD_MAX: u64 = 32 * 1024 * 1024;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeField {
     pub(crate) record_offset: u64,
@@ -30,7 +30,7 @@ impl NativeField {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum NativeFieldKind {
     Text,
     ClaudeResult,
@@ -96,12 +96,15 @@ pub(crate) fn capture_with_record(
     let Some(value) = crate::tx::parse_native_record(&bytes) else {
         return (None, None);
     };
-    let field = capture_parsed(&bytes, &value, offset, block, kind, recipe);
+    let field = json_string::index_json_string_spans(&bytes)
+        .ok()
+        .and_then(|spans| capture_parsed(&bytes, &spans, &value, offset, block, kind, recipe));
     (field, Some((offset, value)))
 }
 
 fn capture_parsed(
     bytes: &[u8],
+    spans: &[json_string::JsonStringSpan],
     value: &serde_json::Value,
     offset: u64,
     block: u32,
@@ -132,27 +135,38 @@ fn capture_parsed(
                 .is_some_and(serde_json::Value::is_array) =>
         {
             let parts = value.pointer("/payload/content")?.as_array()?;
-            if parts.len() != 1
-                || block != 0
+            let mut text_parts = parts
+                .iter()
+                .enumerate()
+                .filter(|(_, part)| part["text"].is_string());
+            let (index, part) = text_parts.next()?;
+            if block != 0
+                || text_parts.next().is_some()
                 || !matches!(
-                    parts[0]["type"].as_str(),
+                    part["type"].as_str(),
                     Some("input_text" | "output_text" | "text")
                 )
-                || !parts[0]["text"].is_string()
             {
                 return None;
             }
-            "/payload/content/0/text".to_owned()
+            format!("/payload/content/{index}/text")
         }
         Recipe::U if value.pointer("/message/content")?.is_string() => {
             "/message/content".to_owned()
         }
-        Recipe::U | Recipe::A => {
-            if matches!(recipe, Recipe::U)
-                && value.pointer("/message/content")?.as_array()?.len() != 1
-            {
+        Recipe::U => {
+            let parts = value.pointer("/message/content")?.as_array()?;
+            let mut text_parts = parts
+                .iter()
+                .enumerate()
+                .filter(|(_, part)| part["type"] == "text" && part["text"].is_string());
+            let (index, _) = text_parts.next()?;
+            if block != 0 || text_parts.next().is_some() {
                 return None;
             }
+            format!("/message/content/{index}/text")
+        }
+        Recipe::A => {
             let content = value.pointer(&format!("/message/content/{block}"))?;
             if content.get("type")?.as_str()? != "text" {
                 return None;
@@ -165,6 +179,10 @@ fn capture_parsed(
                 return None;
             }
             format!("/message/content/{block}/thinking")
+        }
+        Recipe::Operation { .. } => {
+            value.pointer("/payload/item/aggregated_output")?.as_str()?;
+            "/payload/item/aggregated_output".to_owned()
         }
         Recipe::Tool { .. } => {
             if value
@@ -219,17 +237,14 @@ fn capture_parsed(
         }
         _ => return None,
     };
-    let span = json_string::index_json_string_spans(bytes)
-        .ok()?
-        .into_iter()
-        .find(|span| span.json_pointer == pointer)?;
+    let span = spans.iter().find(|span| span.json_pointer == pointer)?;
     let span = if layers == 2 {
-        json_string::index_nested_json_string_spans(bytes, &span)
+        json_string::index_nested_json_string_spans(bytes, span)
             .ok()?
             .into_iter()
             .find(|span| span.json_pointer == "/output")?
     } else {
-        span
+        span.clone()
     };
     let native_event_id = value
         .get("uuid")
@@ -247,6 +262,250 @@ fn capture_parsed(
         checkpoints: span.checkpoints,
         native_event_id,
     })
+}
+
+/// Body-free metadata for reconstructing bounded portions of a large record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SparseRecord {
+    length: u64,
+    fields: Vec<NativeField>,
+}
+
+pub(crate) struct SelectedField {
+    pub(crate) block: u32,
+    pub(crate) kind: NativeFieldKind,
+    pub(crate) chunks: usize,
+    pub(crate) text: Option<String>,
+}
+
+impl std::fmt::Debug for SelectedField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectedField")
+            .field("block", &self.block)
+            .field("kind", &self.kind)
+            .field("chunks", &self.chunks)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SparseRecord {
+    pub(crate) fn capture(value: &serde_json::Value, raw: &[u8], offset: u64) -> Option<Self> {
+        use crate::{events::Reply, field};
+        if raw.len() <= json_string::JSON_STRING_CHUNK_DECODED_MAX {
+            return None;
+        }
+        let recipe = |block| Recipe::Tool {
+            outcome: crate::slot_projection::Outcome::Ok,
+            name: String::new(),
+            reply: Some(Reply {
+                b: block,
+                ..Reply::default()
+            }),
+            result_source: false,
+            item: None,
+            background: None,
+        };
+        let mut candidates = Vec::new();
+        let parts = || {
+            value
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_array)
+        };
+        match field(value, "type") {
+            Some("user")
+                if parts().is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|part| field(part, "type") == Some("tool_result"))
+                }) =>
+            {
+                for (block, part) in parts()?.iter().take(1025).enumerate() {
+                    if field(part, "type") == Some("tool_result") {
+                        candidates.push((
+                            block as u32,
+                            NativeFieldKind::ClaudeResult,
+                            recipe(block as u32),
+                        ));
+                    }
+                }
+            }
+            Some("user" | "user.message") => candidates.push((0, NativeFieldKind::Text, Recipe::U)),
+            Some("assistant.message") => candidates.push((0, NativeFieldKind::Text, Recipe::A)),
+            Some("assistant") => {
+                for (block, part) in parts()?.iter().take(1025).enumerate() {
+                    let recipe = match field(part, "type") {
+                        Some("text") => Recipe::A,
+                        Some("thinking") => Recipe::Think,
+                        _ => continue,
+                    };
+                    candidates.push((block as u32, NativeFieldKind::Text, recipe));
+                }
+            }
+            Some("event_msg")
+                if value
+                    .pointer("/payload/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("item_completed")
+                    && value
+                        .pointer("/payload/item/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("CommandExecution") =>
+            {
+                candidates.push((
+                    0,
+                    NativeFieldKind::CodexResult,
+                    Recipe::Operation {
+                        kind: "CommandExecution".to_owned(),
+                        ok: None,
+                        script_offset: None,
+                    },
+                ));
+            }
+            Some("response_item") => {
+                let payload = value.get("payload")?;
+                match (field(payload, "type"), field(payload, "role")) {
+                    (Some("message"), Some("user")) => {
+                        candidates.push((0, NativeFieldKind::Text, Recipe::U))
+                    }
+                    (Some("message"), Some("assistant")) => {
+                        candidates.push((0, NativeFieldKind::Text, Recipe::A))
+                    }
+                    (Some("function_call_output"), _) => {
+                        candidates.push((0, NativeFieldKind::ClaudeResult, recipe(0)))
+                    }
+                    _ => (),
+                }
+            }
+            _ => (),
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        let spans = json_string::index_json_string_spans(raw).ok()?;
+        let mut fields: Vec<_> = candidates
+            .into_iter()
+            .filter_map(|(block, kind, recipe)| {
+                capture_parsed(raw, &spans, value, offset, block, kind, &recipe)
+            })
+            .filter(|field| {
+                field.end - field.start > json_string::JSON_STRING_CHUNK_DECODED_MAX as u64
+            })
+            .collect();
+        fields.sort_by_key(|field| field.start);
+        (!fields.is_empty()).then_some(Self {
+            length: raw.len() as u64,
+            fields,
+        })
+    }
+
+    /// Keep the native record structure and a bounded prefix of each selected
+    /// scalar. Requested chunks use the exact source checkpoints, independent
+    /// of the number of preceding bytes.
+    pub(crate) fn read(
+        &self,
+        reader: &dyn crate::SessionSourceReader,
+        source: &crate::SessionSourceRef,
+        offset: u64,
+        (preview, chunk): (usize, Option<usize>),
+        omitted: impl Iterator<Item = std::ops::Range<u64>>,
+        bytes_left: &mut usize,
+    ) -> std::io::Result<(serde_json::Value, Vec<SelectedField>)> {
+        use crate::source_reader::append_committed_range;
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+        let end = offset
+            .checked_add(self.length)
+            .filter(|end| *end <= source.offset)
+            .ok_or_else(invalid)?;
+        let mut omitted = omitted.peekable();
+        let mut append =
+            |mut start: u64, end: u64, native: &mut Vec<u8>, bytes_left: &mut usize| {
+                while let Some(range) = omitted.next_if(|range| range.start < end) {
+                    if range.start < start || range.end > end {
+                        return Err(invalid());
+                    }
+                    append_committed_range(
+                        reader,
+                        source,
+                        offset + start..offset + range.start,
+                        native,
+                        bytes_left,
+                    )?;
+                    start = range.end;
+                }
+                append_committed_range(
+                    reader,
+                    source,
+                    offset + start..offset + end,
+                    native,
+                    bytes_left,
+                )
+            };
+        let mut native = Vec::new();
+        let mut selected = Vec::new();
+        let mut cursor = 0;
+        for field in &self.fields {
+            if field.record_offset != offset
+                || field.start < cursor
+                || field.end > self.length
+                || field.checkpoints.first() != Some(&field.start)
+                || field.checkpoints.last() != Some(&field.end)
+                || !field.checkpoints.windows(2).all(|pair| {
+                    pair[0] < pair[1]
+                        && pair[1] - pair[0]
+                            <= json_string::JSON_STRING_CHECKPOINT_BYTES
+                                + field.scalar_slack() as u64
+                })
+            {
+                return Err(invalid());
+            }
+            append(cursor, field.start, &mut native, bytes_left)?;
+            let mut decoded = 0;
+            let mut text = None;
+            for (index, pair) in field.checkpoints.windows(2).enumerate() {
+                if decoded > preview && chunk != Some(index) {
+                    continue;
+                }
+                let mut raw = Vec::new();
+                append_committed_range(
+                    reader,
+                    source,
+                    offset + pair[0]..offset + pair[1],
+                    &mut raw,
+                    bytes_left,
+                )?;
+                let slice = json_string::decode_json_string_layered_chunk(
+                    &raw,
+                    field.layers,
+                    true,
+                    json_string::JSON_STRING_CHUNK_DECODED_MAX,
+                )?;
+                if !slice.complete || slice.consumed != raw.len() {
+                    return Err(invalid());
+                }
+                if decoded <= preview {
+                    decoded += slice.text.len();
+                    native.extend_from_slice(&raw);
+                }
+                if chunk == Some(index) {
+                    text = Some(slice.text);
+                }
+            }
+            selected.push(SelectedField {
+                block: field.block,
+                kind: field.kind,
+                chunks: field.checkpoints.len().saturating_sub(1),
+                text,
+            });
+            cursor = field.end;
+        }
+        append(cursor, end - offset, &mut native, bytes_left)?;
+        if omitted.next().is_some() {
+            return Err(invalid());
+        }
+        let value = crate::tx::parse_native_record(&native).ok_or_else(invalid)?;
+        Ok((value, selected))
+    }
 }
 
 /// A small, qualified string preview reuses the selected transcript's scalar

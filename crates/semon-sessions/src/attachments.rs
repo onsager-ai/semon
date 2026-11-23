@@ -370,15 +370,16 @@ pub(crate) struct PromptCache {
     entries: std::sync::Mutex<std::collections::VecDeque<(u64, PromptMetadata)>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ImageRange {
+    block: usize,
     start: u64,
     end: u64,
 }
 
-#[derive(Clone)]
-struct PromptMetadata {
-    refs: Vec<Value>,
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PromptMetadata {
+    pub(crate) refs: Vec<Value>,
     ranges: Vec<ImageRange>,
     length: u64,
 }
@@ -411,7 +412,7 @@ impl PromptMetadata {
         let mut ranges = Vec::new();
         if let Some(parts) = parts(record).filter(|parts| has_image(parts)) {
             let raw_parts = raw_parts(text)?;
-            for (part, raw_part) in parts.iter().zip(raw_parts) {
+            for (block, (part, raw_part)) in parts.iter().zip(raw_parts).enumerate() {
                 if inline(part).is_none() {
                     continue;
                 }
@@ -433,6 +434,7 @@ impl PromptMetadata {
                     return None;
                 }
                 ranges.push(ImageRange {
+                    block,
                     start: (start + 1) as u64,
                     end: (end - 1) as u64,
                 });
@@ -444,6 +446,77 @@ impl PromptMetadata {
             ranges,
             length: raw.len() as u64,
         })
+    }
+
+    /// A body-free recipe for a prompt that cannot fit the page's proof budget.
+    pub(crate) fn oversized(record: &Value, raw: &[u8]) -> Option<Self> {
+        if raw.len() <= crate::transcript_range::PAGE_SOURCE_BYTES
+            || raw.len() as u64 > PROMPT_LINE_MAX
+        {
+            return None;
+        }
+        let metadata = Self::of(record, raw)?;
+        (!metadata.ranges.is_empty() && metadata.bytes() <= PROMPT_CACHE_BYTES).then_some(metadata)
+    }
+
+    /// Reconstruct only the selected prompt and the one explicitly requested
+    /// image. The caller qualifies each copied range against the same prefix.
+    pub(crate) fn selected_record(
+        &self,
+        source: &crate::SessionSourceRef,
+        offset: u64,
+        image: Option<usize>,
+        reader: &dyn crate::SessionSourceReader,
+        bytes_left: &mut usize,
+    ) -> std::io::Result<Value> {
+        let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+        let end = offset.checked_add(self.length).ok_or_else(invalid)?;
+        if self.length > PROMPT_LINE_MAX || end > source.offset {
+            return Err(invalid());
+        }
+        let mut record = Vec::new();
+        let mut cursor = offset;
+        for range in self.omitted_ranges(image)? {
+            let start = offset + range.start;
+            crate::source_reader::append_committed_range(
+                reader,
+                source,
+                cursor..start,
+                &mut record,
+                bytes_left,
+            )?;
+            cursor = offset + range.end;
+        }
+        crate::source_reader::append_committed_range(
+            reader,
+            source,
+            cursor..end,
+            &mut record,
+            bytes_left,
+        )?;
+        crate::tx::parse_native_record(&record).ok_or_else(invalid)
+    }
+
+    pub(crate) fn omitted_ranges(
+        &self,
+        image: Option<usize>,
+    ) -> std::io::Result<impl Iterator<Item = std::ops::Range<u64>> + '_> {
+        let selected = image
+            .and_then(|index| self.refs.get(index))
+            .and_then(|row| {
+                row["v"].as_str()?;
+                row["b"].as_u64()
+            });
+        let mut end = 0;
+        for range in &self.ranges {
+            if end > range.start || range.start > range.end || range.end > self.length {
+                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+            }
+            end = range.end;
+        }
+        Ok(self.ranges.iter().filter_map(move |range| {
+            (selected != Some(range.block as u64)).then_some(range.start..range.end)
+        }))
     }
 
     fn bytes(&self) -> usize {

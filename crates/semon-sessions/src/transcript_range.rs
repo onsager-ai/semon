@@ -1,11 +1,17 @@
 //! Selected immutable slot/range reads, independent of the global event model.
+#[cfg(any(test, feature = "postgres"))]
+use crate::catalog::{self, CatalogSessionIdentity};
+#[cfg(test)]
 use crate::{
-    CatalogIdentityError, Options, SessionSourceReader, SessionSourceRef,
-    catalog::{self, CatalogSessionIdentity},
+    CatalogIdentityError,
+    viewer::{decoded, query_value},
+};
+use crate::{
+    Options, SessionSourceReader, SessionSourceRef,
     events::EventCache,
     model::summary::CatalogSource,
     slot_projection::{SavedSlot, VERSION},
-    viewer::{ViewerReply, decoded, query_value},
+    viewer::ViewerReply,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
@@ -16,17 +22,21 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
 const MAX_LIMIT: usize = 100;
-const PAGE_SOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const PAGE_SOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const ATTACHMENT_SOURCE_BYTES: usize = 12 * 1024 * 1024;
+#[cfg(any(test, feature = "postgres"))]
 const PAGE_SOURCE_REQUESTS: usize = 256;
+#[cfg(any(test, feature = "postgres"))]
 const RECORD_BYTES: usize = 128 * 1024;
+#[cfg(any(test, feature = "postgres"))]
 const READ_CHUNK: usize = 4096;
 
 #[cfg(test)]
 thread_local! {
     pub(crate) static AFTER_LOCAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    pub(crate) static LAST_LOCAL_FAILURE: std::cell::Cell<Option<crate::source_carrier::FailureStage>> = const { std::cell::Cell::new(None) };
 }
 
 fn reply(status: u16, value: Value) -> ViewerReply {
@@ -38,6 +48,7 @@ fn reply(status: u16, value: Value) -> ViewerReply {
         extra_headers: Vec::new(),
     }
 }
+#[cfg(any(test, feature = "postgres"))]
 fn unavailable() -> ViewerReply {
     catalog::error(
         503,
@@ -96,9 +107,16 @@ pub fn session_transcript_range_with_mode(
     if let Some(reply) = crate::index_rebuild::history_reply(options) {
         return reply;
     }
-    session_transcript_range_with_gate(options, source_key, query, reader, mode, || Ok(()))
+    crate::catalog::warehouse::http::transcript_with_mode(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        reader,
+        mode,
+        false,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_transcript_range_with_gate(
     options: &Options,
     source_key: &str,
@@ -118,9 +136,15 @@ pub(crate) fn session_transcript_range_with_gate(
 /// pass the returned projection generation into the subsequent range read so
 /// a rewrite cannot reinterpret the recorded slot address.
 pub fn session_turn_anchor(options: &Options, source_key: &str, query: &str) -> ViewerReply {
-    session_turn_anchor_with_gate(options, source_key, query, || Ok(()))
+    crate::catalog::warehouse::http::anchor(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        None,
+        None,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_turn_anchor_with_gate(
     options: &Options,
     source_key: &str,
@@ -230,129 +254,6 @@ pub(crate) fn session_turn_anchor_with_gate(
             200,
             json!({"api":1,"source_key":source_key,"catalog_key":key,"turn":turn,"slot":slot,"generation":projection}),
         ))
-    };
-    read().unwrap_or_else(|_| unavailable())
-}
-
-pub(crate) fn session_activity_anchor_with_gate(
-    options: &Options,
-    source_key: &str,
-    query: &str,
-    before_read: impl FnOnce() -> Result<(), ViewerReply>,
-) -> ViewerReply {
-    let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
-        let _scope = crate::selected_read::Scope::ensure();
-        let invalid = || {
-            catalog::error(
-                400,
-                "invalid_arguments",
-                "Supply a session and activity step.",
-                false,
-            )
-        };
-        for name in ["sid", "scope", "generation", "ordinal", "step", "machine"] {
-            if query
-                .split('&')
-                .filter(|part| part.split('=').next() == Some(name))
-                .count()
-                > 1
-            {
-                return Ok(invalid());
-            }
-        }
-        let Some(key) = query_value(query, "sid")
-            .and_then(decoded)
-            .filter(|s| !s.is_empty() && s.len() <= 4096)
-        else {
-            return Ok(invalid());
-        };
-        let Some(generation) = query_value(query, "generation")
-            .and_then(decoded)
-            .filter(|s| !s.is_empty() && s.len() <= 4096)
-        else {
-            return Ok(invalid());
-        };
-        let Some(ordinal) = query_value(query, "ordinal")
-            .and_then(decoded)
-            .and_then(|s| s.parse().ok())
-        else {
-            return Ok(invalid());
-        };
-        let Some(id) = query_value(query, "step")
-            .and_then(decoded)
-            .and_then(|s| serde_json::from_str(&s).ok())
-        else {
-            return Ok(invalid());
-        };
-        if query_value(query, "scope").is_some_and(|scope| scope != "retained_history") {
-            return Ok(invalid());
-        }
-        if let Err(response) = before_read() {
-            return Ok(response);
-        }
-        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
-            .selected_connection(source_key)?;
-        let tx = db.transaction()?;
-        let identity = match catalog::catalog_selection_in_snapshot(
-            options,
-            source_key,
-            &key,
-            crate::CatalogReadScope::RetainedHistory,
-            &tx,
-        ) {
-            Ok(Some((identity, _))) => identity,
-            Ok(None) => {
-                return Ok(catalog::error(
-                    404,
-                    "session_not_found",
-                    "Recorded session unavailable.",
-                    false,
-                ));
-            }
-            Err(_) => return Ok(unavailable()),
-        };
-        let current: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
-                [],
-                |record| record.get(0),
-            )
-            .optional()?;
-        if current.as_deref() != Some(identity.generation.as_str()) {
-            return Ok(reply(
-                200,
-                json!({"available":false,"reason":"stale_transcript"}),
-            ));
-        }
-        let history = crate::history_projection::catalog(&tx, &key)?;
-        let text: Option<String> = match history.as_ref() {
-            Some(text) => Some(text.clone()),
-            None => tx
-                .query_row(
-                    "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                    [&key],
-                    |record| record.get(0),
-                )
-                .optional()?,
-        };
-        let Some(text) = text else {
-            return Ok(reply(
-                200,
-                json!({"available":false,"reason":"stale_transcript"}),
-            ));
-        };
-        let row = serde_json::from_str(&text)?;
-        let result = resolve_step_slot(
-            &tx,
-            &row,
-            history.is_some(),
-            &StepAnchor {
-                generation,
-                ordinal,
-                id,
-            },
-        )?;
-        Ok(reply(200, result))
     };
     read().unwrap_or_else(|_| unavailable())
 }
@@ -517,174 +418,12 @@ pub(crate) fn resolve_step_slot(
 /// bodies are opened. Each page holds at most 100 identities, even when failures
 /// are spread throughout a large transcript.
 pub fn session_annotations(options: &Options, source_key: &str, query: &str) -> ViewerReply {
-    session_annotations_with_gate(options, source_key, query, || Ok(()))
-}
-
-pub(crate) fn session_annotations_with_gate(
-    options: &Options,
-    source_key: &str,
-    query: &str,
-    before_read: impl FnOnce() -> Result<(), ViewerReply>,
-) -> ViewerReply {
-    let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
-        let argument = |name| query_value(query, name).and_then(decoded);
-        let invalid_arguments = || {
-            catalog::error(
-                400,
-                "invalid_arguments",
-                "Use one selected session, retained scope, errors or signals, and limit=1..100.",
-                false,
-            )
-        };
-        for name in [
-            "sid",
-            "machine",
-            "scope",
-            "kind",
-            "after",
-            "limit",
-            "generation",
-        ] {
-            if query
-                .split('&')
-                .filter(|part| part.split('=').next() == Some(name))
-                .count()
-                > 1
-                || query_value(query, name).is_some_and(|value| decoded(value).is_none())
-            {
-                return Ok(invalid_arguments());
-            }
-        }
-        let Some(key) = argument("sid").filter(|key| !key.is_empty() && key.len() <= 4096) else {
-            return Ok(invalid_arguments());
-        };
-        if argument("scope").as_deref() != Some("retained_history") {
-            return Ok(invalid_arguments());
-        }
-        let kind = argument("kind").unwrap_or_default();
-        if !matches!(kind.as_str(), "errors" | "signals") {
-            return Ok(invalid_arguments());
-        }
-        let limit = argument("limit")
-            .map(|value| value.parse::<usize>())
-            .transpose();
-        let after = argument("after")
-            .map(|value| value.parse::<usize>())
-            .transpose();
-        let (Ok(limit), Ok(after)) = (limit, after) else {
-            return Ok(invalid_arguments());
-        };
-        let limit = limit.unwrap_or(100);
-        let after = after.unwrap_or(0);
-        if !(1..=MAX_LIMIT).contains(&limit) || (after > 0 && argument("generation").is_none()) {
-            return Ok(invalid_arguments());
-        }
-        if let Err(reply) = before_read() {
-            return Ok(reply);
-        }
-        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
-            .selected_connection(source_key)?;
-        let tx = db.transaction()?;
-        let (identity, session) = match catalog::catalog_selection_in_snapshot(
-            options,
-            source_key,
-            &key,
-            crate::CatalogReadScope::RetainedHistory,
-            &tx,
-        ) {
-            Ok(Some(selected)) => selected,
-            Ok(None) => {
-                return Ok(catalog::error(
-                    404,
-                    "session_not_found",
-                    "Recorded session unavailable.",
-                    false,
-                ));
-            }
-            Err(_) => return Ok(unavailable()),
-        };
-        let catalog_generation: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if catalog_generation.as_deref() != Some(identity.generation.as_str()) {
-            return Ok(stale(ProjectionFence::CatalogPublication));
-        }
-        let history = crate::history_projection::catalog(&tx, &key)?.is_some();
-        let header = if history {
-            "session_history_projections"
-        } else {
-            "session_slot_projections"
-        };
-        let slots = if history {
-            "session_history_slots"
-        } else {
-            "session_slots"
-        };
-        let projection: Option<(String, u32)> = tx
-            .query_row(
-                &format!("SELECT generation,version FROM {header} WHERE session_key=?1"),
-                [&key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((stored, version)) = projection else {
-            return Ok(unavailable());
-        };
-        if version != VERSION {
-            return Ok(unavailable());
-        }
-        let working = selected_working(&session);
-        let predicate = if kind == "signals" {
-            "json_extract(metadata,'$.recipe.recipe')='Signal'"
-        } else if working {
-            "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome')='Err') OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
-        } else {
-            "((json_extract(metadata,'$.recipe.recipe') IN ('Tool','Yielded','Sent') AND json_extract(metadata,'$.recipe.outcome') IN ('Err','Pending')) OR (json_extract(metadata,'$.recipe.recipe')='Operation' AND json_extract(metadata,'$.recipe.ok')=0))"
-        };
-        // Error membership includes pending calls only when the same qualified
-        // observation renders them unfinished. Fence paging when that changes,
-        // even if the immutable source/slot generation did not move.
-        let generation = if kind == "errors" {
-            error_generation(&entry_generation(&stored), &session)
-        } else {
-            entry_generation(&stored)
-        };
-        if argument("generation").is_some_and(|expected| expected != generation) {
-            return Ok(stale(if kind == "errors" {
-                ProjectionFence::ErrorsGeneration
-            } else {
-                ProjectionFence::ProjectionGeneration
-            }));
-        }
-        let total: i64 = tx.query_row(
-            &format!("SELECT count(*) FROM {slots} WHERE session_key=?1 AND {predicate}"),
-            [&key],
-            |row| row.get(0),
-        )?;
-        let total = usize::try_from(total)?;
-        if after > total {
-            return Ok(invalid_arguments());
-        }
-        let mut statement = tx.prepare(&format!("SELECT slot FROM {slots} WHERE session_key=?1 AND {predicate} ORDER BY slot LIMIT ?2 OFFSET ?3"))?;
-        let entries: Vec<Value> = statement
-            .query_map(
-                rusqlite::params![key, i64::try_from(limit)?, i64::try_from(after)?],
-                |row| Ok(json!({"slot":row.get::<_,i64>(0)?})),
-            )?
-            .collect::<rusqlite::Result<_>>()?;
-        drop(statement);
-        tx.commit()?;
-        let end = after + entries.len();
-        Ok(reply(
-            200,
-            json!({"api":1,"source_key":source_key,"catalog_key":key,"scope":"retained_history","kind":kind,"generation":generation,"total":total,"first":after,"entries":entries,"next_cursor":if end<total {Some(end)}else{None}}),
-        ))
-    };
-    read().unwrap_or_else(|_| unavailable())
+    crate::catalog::warehouse::http::annotations(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        None,
+        None,
+    )
 }
 
 /// A persisted pending recipe never grants live authority. Both transcript
@@ -755,6 +494,7 @@ pub(crate) fn observation(
     Ok(projection.filter(|(_, version, total)| *version == VERSION && (0..=9_007_199_254_740_991).contains(total)).map(|(generation, _, total)| json!({"generation":entry_generation(&generation),"total":total})))
 }
 
+#[cfg(any(test, feature = "postgres"))]
 struct Selection {
     proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     identity: CatalogSessionIdentity,
@@ -770,6 +510,7 @@ struct Selection {
     context: Value,
 }
 
+#[cfg(any(test, feature = "postgres"))]
 #[derive(Clone, Copy)]
 pub(crate) enum SelectedPart {
     Transcript,
@@ -778,6 +519,7 @@ pub(crate) enum SelectedPart {
     Attachment(usize),
 }
 
+#[cfg(test)]
 pub(crate) fn read(
     options: &Options,
     source_key: &str,
@@ -970,7 +712,9 @@ pub(crate) fn read(
                 true,
             ));
         }
-        Err(CatalogIdentityError::Unavailable) => return Ok(unavailable()),
+        Err(CatalogIdentityError::Unavailable | CatalogIdentityError::RetainedUnverified) => {
+            return Ok(unavailable());
+        }
     };
     #[cfg(test)]
     if let Some(hook) = AFTER_SELECTION.with(|hook| hook.borrow_mut().take()) {
@@ -1220,11 +964,15 @@ pub(crate) fn render_postgres_part(
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races
 // from rejected native bytes without exposing paths or provider errors.
+#[cfg(any(test, feature = "postgres"))]
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ProjectionFence {
+    #[cfg(test)]
     CatalogPublication,
+    #[cfg(test)]
     ProjectionGeneration,
+    #[cfg(test)]
     ErrorsGeneration,
     LocalSourceRevision(
         crate::source_carrier::RevisionReason,
@@ -1235,19 +983,24 @@ enum ProjectionFence {
     SourceRange,
 }
 
+pub(crate) fn source_budget_reply() -> ViewerReply {
+    reply(
+        503,
+        json!({
+            "error":{
+                "code":"source_budget_exhausted",
+                "message":"The selected source evidence exceeds the bounded read budget.",
+                "retryable":false,
+            },
+            "reset_cursor":false,"fence_reason":"source_budget","stage":"budget",
+        }),
+    )
+}
+
+#[cfg(any(test, feature = "postgres"))]
 fn stale(reason: ProjectionFence) -> ViewerReply {
     if matches!(reason, ProjectionFence::SourceBudget) {
-        let mut reply = catalog::error(
-            503,
-            "source_budget_exhausted",
-            "The selected source evidence exceeds the bounded read budget.",
-            false,
-        );
-        let mut body: Value = serde_json::from_slice(&reply.body).expect("owned JSON reply");
-        body["fence_reason"] = json!("source_budget");
-        body["stage"] = json!("budget");
-        reply.body = body.to_string().into_bytes();
-        return reply;
+        return source_budget_reply();
     }
     let mut reply = catalog::error(
         409,
@@ -1279,8 +1032,10 @@ impl std::error::Error for MissingLocalSource {}
 
 #[derive(Debug)]
 struct LocalRevisionChanged(
+    #[cfg_attr(not(any(test, feature = "postgres")), allow(dead_code))]
     crate::source_carrier::RevisionReason,
     bool,
+    #[cfg_attr(not(any(test, feature = "postgres")), allow(dead_code))]
     crate::source_carrier::FailureStage,
     Option<io::Error>,
 );
@@ -1295,16 +1050,8 @@ impl std::error::Error for LocalRevisionChanged {
     }
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn source_read_fence(error: &io::Error) -> ProjectionFence {
-    #[cfg(test)]
-    LAST_LOCAL_FAILURE.with(|stage| {
-        stage.set(
-            error
-                .get_ref()
-                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-                .map(|detail| detail.2),
-        );
-    });
     error
         .get_ref()
         .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
@@ -1318,6 +1065,7 @@ fn source_read_fence(error: &io::Error) -> ProjectionFence {
         .unwrap_or(ProjectionFence::SourceGeneration)
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn field_failure_reply(error: &io::Error) -> ViewerReply {
     if matches!(source_read_fence(error), ProjectionFence::SourceBudget) {
         return stale(ProjectionFence::SourceBudget);
@@ -1781,6 +1529,7 @@ pub(crate) fn native_entry_id(
     format!("{:x}", Sha256::digest(identity.as_bytes()))
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn reference_in_selection(
     options: &Options,
     selection: &Selection,
@@ -1796,6 +1545,7 @@ fn reference_in_selection(
     })
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn render(
     options: &Options,
     selection: Selection,
@@ -1831,7 +1581,7 @@ fn render(
         proofs: std::sync::Mutex::default(),
         block: std::sync::Mutex::default(),
         bytes_left: std::sync::Mutex::new(if attachment.is_some() {
-            12 * 1024 * 1024
+            ATTACHMENT_SOURCE_BYTES
         } else {
             PAGE_SOURCE_BYTES
         }),
@@ -1870,7 +1620,7 @@ fn render(
         result
     };
     let source_budget = if attachment.is_some() {
-        12 * 1024 * 1024
+        ATTACHMENT_SOURCE_BYTES
     } else {
         PAGE_SOURCE_BYTES
     };
@@ -2348,9 +2098,16 @@ pub fn session_entry_field_with_mode(
     reader: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
 ) -> ViewerReply {
-    session_entry_field_with_gate(options, source_key, query, reader, mode, || Ok(()))
+    crate::catalog::warehouse::http::transcript_with_mode(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        reader,
+        mode,
+        true,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_entry_field_with_gate(
     options: &Options,
     source_key: &str,
@@ -2376,6 +2133,7 @@ pub(crate) fn session_entry_field_with_gate(
     session_transcript_range_with_gate(options, source_key, query, reader, mode, before_read)
 }
 
+#[cfg(any(test, feature = "postgres"))]
 fn render_field(
     options: &Options,
     selection: Selection,
@@ -2560,7 +2318,7 @@ mod budget_contract_tests {
     }
 }
 
-fn copy_selected_output_fields(entry: &mut Value, output: &Value) {
+pub(crate) fn copy_selected_output_fields(entry: &mut Value, output: &Value) {
     entry["out"] = output["text"].clone();
     if let Some(cut) = output.get("cut") {
         entry["cut"] = cut.clone();

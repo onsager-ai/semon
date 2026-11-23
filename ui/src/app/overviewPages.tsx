@@ -1270,7 +1270,7 @@ export function createOverviewPages(host: OverviewHost) {
           const args = new URLSearchParams({
             machine: first.source_key,
             sid: first.catalog_key,
-            scope: 'retained_history',
+            scope: 'current',
             generation: first.contentGeneration!,
             events: JSON.stringify(ids),
           });
@@ -1283,6 +1283,7 @@ export function createOverviewPages(host: OverviewHost) {
               value.api !== 1 ||
               identity.source_key !== first.source_key ||
               identity.catalog_key !== first.catalog_key ||
+              identity.read_scope !== 'current' ||
               value.generation !== first.contentGeneration
             )
               throw Error('Home preview identity changed');

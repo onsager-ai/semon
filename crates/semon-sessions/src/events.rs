@@ -4004,6 +4004,18 @@ fn parse(
                 if let Some(ordinal) = record_ordinal {
                     index.capture_record_identity(&record, line_offset, ordinal, before_signals);
                 }
+                if let Some(batch) = &mut index.warehouse_observations {
+                    if let Some(images) =
+                        crate::attachments::PromptMetadata::oversized(&record, &line)
+                    {
+                        batch.push(line_offset, 0, Fact::PromptImages(images));
+                    }
+                    if let Some(fields) =
+                        crate::native_field::SparseRecord::capture(&record, &line, line_offset)
+                    {
+                        batch.push(line_offset, 0, Fact::NativeFields(fields));
+                    }
+                }
             }
             _ => {
                 index.warehouse_fact(line_offset, 0, || Fact::Gap);
@@ -5793,7 +5805,7 @@ fn assigned_result_projection(
     exact_statement(tokens, at)
 }
 
-fn result_source(script: &str) -> bool {
+pub(crate) fn result_source(script: &str) -> bool {
     if script.len() > RESULT_SOURCE_BYTES_MAX {
         return false;
     }
@@ -6018,7 +6030,7 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
     if operations || failed {
         summary.event_mut(index).expect("event exists").poll = None;
         if let Some(start) = known {
-            push_poll(summary, start, offset);
+            push_poll(summary, start, offset, summary.events[index].t);
         }
         return;
     }
@@ -6039,17 +6051,29 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
         // A command these logs haven't seen yet: a new start, whether this
         // single source call started it.
         Some(session) => {
-            if summary.yields.len() >= YIELDS_MAX
-                && !summary.yields.contains_key(&session)
-                && let Some(oldest) = summary
+            let prior = summary.yields.insert(session, index);
+            let evicted = if summary.yields.len() > YIELDS_MAX {
+                let oldest = summary
                     .yields
                     .iter()
                     .min_by_key(|(_, start)| **start)
                     .map(|(session, _)| session.clone())
+                    .expect("open yield set is over capacity");
+                summary.yields.remove(&oldest)
+            } else {
+                None
+            };
+            if let Some(start) = prior.or(evicted)
+                && let Some(id) = summary.events[start].id.clone()
             {
-                summary.yields.remove(&oldest);
+                let reply = Reply {
+                    o: offset,
+                    t: summary.events[index].t,
+                    f: ACK,
+                    ..Reply::default()
+                };
+                summary.tool_result_fact(&id, Some(start), &reply, "yield_closed", None);
             }
-            summary.yields.insert(session, index);
             summary.event_mut(index).expect("event exists").poll = None;
             summary.event_mut(index).expect("event exists").y = Some(Box::default());
             return;
@@ -6060,12 +6084,21 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
         return;
     };
     summary.event_mut(index).expect("event exists").poll = Some(start);
-    push_poll(summary, start, offset);
+    push_poll(summary, start, offset, summary.events[index].t);
 }
 
 /// Adds a poll's output line to the yielded command it polled, up to
 /// [`POLLS_MAX`]; past that the command's output is marked cut.
-fn push_poll(summary: &mut FileIndex, start: usize, offset: u64) {
+fn push_poll(summary: &mut FileIndex, start: usize, offset: u64, time: Option<i64>) {
+    if let Some(id) = summary.events.get(start).and_then(|event| event.id.clone()) {
+        let reply = Reply {
+            o: offset,
+            t: time,
+            f: ACK,
+            ..Reply::default()
+        };
+        summary.tool_result_fact(&id, Some(start), &reply, "yield_poll", None);
+    }
     if let Some(found) = summary.event_mut(start)
         && let Some(yielded) = found.y.as_mut()
     {
@@ -6808,7 +6841,20 @@ const HARNESS_TAGS: [&str; 5] = [
     "turn_aborted",
 ];
 
-fn harness_tag(text: &str) -> Option<&'static str> {
+pub(crate) fn codex_message_text(payload: &Value) -> String {
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| field(part, "text"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn harness_tag(text: &str) -> Option<&'static str> {
     let rest = text.trim_start().strip_prefix('<')?;
     HARNESS_TAGS.into_iter().find(|tag| {
         rest.strip_prefix(tag)
@@ -6928,7 +6974,11 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                     time,
                 );
             }
-            let operation = matches!(field(item, "type"), Some("CommandExecution" | "FileChange"));
+            let operation_tool = match field(item, "type") {
+                Some("CommandExecution") => Some("exec_command"),
+                Some("FileChange") => Some("apply_patch"),
+                _ => None,
+            };
             let legacy_tool = field(item, "id").is_some_and(|id| non_code_mode_tool(summary, id));
             let open = open_code_mode_call(summary);
             let code = item.get("exit_code").and_then(Value::as_i64);
@@ -6964,12 +7014,19 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
             // call is open to own it. Otherwise it is a plain call's item, or
             // its owner is ambiguous: its wrapper, or the plain call, is the
             // step, and the item adds nothing but the exit code below.
-            let parent = if operation && !legacy_tool && yielded.is_none() {
+            let parent = if operation_tool.is_some() && !legacy_tool && yielded.is_none() {
                 open
             } else {
                 None
             };
-            if operation && let Some(id) = field(item, "id") {
+            let result_id = if let Some(start) = yielded {
+                summary.events[start].id.clone()
+            } else {
+                field(item, "id").map(str::to_owned)
+            };
+            if operation_tool.is_some()
+                && let Some(id) = result_id.as_deref()
+            {
                 summary.tool_result_fact(
                     id,
                     yielded
@@ -6994,13 +7051,17 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                     code,
                 );
             }
-            if let Some(parent) = parent {
+            if let (Some(parent), Some(tool)) = (parent, operation_tool) {
                 let call = &summary.events[parent];
                 let position = warehouse::Position {
                     offset: call.o,
                     block: call.b,
                 };
-                summary.warehouse_fact(offset, 0, || Fact::Operation { parent: position });
+                summary.warehouse_fact(offset, 0, || Fact::Operation {
+                    parent: position,
+                    tool,
+                    ok: known.then_some(!failed),
+                });
                 extra(
                     summary,
                     Event {
@@ -7105,16 +7166,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
         }
         Some("response_item") => match field(payload, "type") {
             Some("message") => {
-                let text = payload
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .map(|parts| {
-                        parts
-                            .iter()
-                            .filter_map(|part| field(part, "text"))
-                            .collect::<String>()
-                    })
-                    .unwrap_or_default();
+                let text = codex_message_text(payload);
                 match field(payload, "role") {
                     Some("user") => {
                         close_code_mode(summary);
@@ -7229,21 +7281,24 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                         f: flags,
                         ..Reply::default()
                     };
-                    summary.tool_result_fact(
-                        id,
-                        summary.warehouse_call_index(id),
-                        &reply,
-                        "response_output",
-                        code,
-                    );
+                    let call = summary.warehouse_call_index(id);
+                    let mut indexed = reply.clone();
                     if script_output || !code_mode_call {
                         resolve(summary, id, |_| reply);
                     }
+                    let mut kind = "response_output";
                     if let Some(index) = code_mode_index
                         && script_output
                     {
                         fold_yield(summary, index, output, offset);
+                        if summary.events[index].y.is_some() {
+                            indexed.f |= ACK;
+                            kind = "yield_started";
+                        } else if summary.events[index].poll.is_some() {
+                            kind = "yield_poll_wrapper";
+                        }
                     }
+                    summary.tool_result_fact(id, call, &indexed, kind, code);
                 }
             }
             Some("reasoning")

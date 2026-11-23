@@ -71,6 +71,33 @@ pub(super) fn lifecycle(dsn: &str) {
             .all(|row| row["key"] != "foreign-session")
     );
     let key = body["items"][0]["key"].as_str().unwrap();
+    let sqlite_root = crate::storage::conformance::root();
+    let sqlite_options = crate::storage::conformance::source(&sqlite_root.0, "sqlite-runtime");
+    crate::storage::conformance::native(&sqlite_root.0, "sqlite-lane", "SQLite session");
+    let sqlite_namespace = Namespace::new("sqlite-runtime").unwrap();
+    crate::storage::conformance::produce(&sqlite_namespace, &sqlite_options).unwrap();
+    let mixed = crate::ViewerCore::from_sources(Arc::new(SessionSources::from_evidence(vec![
+        (namespace.to_string(), evidence.clone()),
+        (
+            sqlite_namespace.to_string(),
+            NativeEvidence::for_source(sqlite_namespace, sqlite_options),
+        ),
+    ])));
+    for (key, source) in [(key, "injected-runtime"), ("sqlite-lane", "sqlite-runtime")] {
+        let query = format!("sid={}", crate::viewer::percent_encode(key));
+        let located = mixed.respond("GET", "/api/session-locate", &query, None);
+        let located: Value = serde_json::from_slice(&located.body).unwrap();
+        assert_eq!(located["unavailable"], 0, "{located}");
+        assert_eq!(located["matches"].as_array().unwrap().len(), 1, "{located}");
+        assert_eq!(located["matches"][0]["source_key"], source, "{located}");
+        assert_eq!(located["matches"][0]["catalog_key"], key, "{located}");
+    }
+    assert_eq!(
+        mixed
+            .respond("GET", "/session/sqlite-runtime/sqlite-lane", "", None)
+            .status,
+        200
+    );
     assert!(evidence.storage.work.lock().unwrap().events.is_none());
     assert_eq!(
         evidence.storage.generation().unwrap().as_deref(),
@@ -584,6 +611,7 @@ pub(super) fn lifecycle(dsn: &str) {
         )
         .unwrap();
     assert!(!retained_query["sessions"].as_array().unwrap().is_empty());
+    mixed.close();
     core.close();
     sources.close();
     #[cfg(target_os = "linux")]

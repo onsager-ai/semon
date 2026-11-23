@@ -426,10 +426,16 @@ mod tests {
             1
         );
         assert_eq!(
-            crate::session_catalog_history_identity(&home.options, "local", "run")
-                .unwrap()
-                .unwrap()
-                .source_refs[0]
+            crate::catalog::catalog_identity(
+                &home.options,
+                "local",
+                "run",
+                crate::CatalogReadScope::RetainedHistory,
+                false,
+            )
+            .unwrap()
+            .unwrap()
+            .source_refs[0]
                 .source,
             proof.source
         );

@@ -1,9 +1,12 @@
+export type CatalogReadScope = 'current' | 'retained_history';
+
 /** Public addresses bind source and Catalog key. Harness/native IDs are provenance. */
 export interface SessionRoute {
   source: string;
   key: string;
   turn: string | null;
   controls: URLSearchParams;
+  readScope: CatalogReadScope;
 }
 export interface SessionCandidate {
   source_key: string;
@@ -16,6 +19,69 @@ const identifier = (value: string) =>
   value !== '.' &&
   value !== '..' &&
   !/[\u0000-\u001f\u007f-\u009f]/u.test(value);
+export interface NativeEntryAddress {
+  record: { path: string; offset: number; block: number; occurrence: number };
+  binding: string;
+  block: number;
+  entry_id: string;
+}
+export function parseNativeEntryAddress(value: unknown): NativeEntryAddress {
+  const fields = (value: unknown, names: string[]): Record<string, unknown> => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value))
+      throw new Error('Invalid native transcript address');
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record);
+    if (keys.length !== names.length || names.some((name) => !keys.includes(name)))
+      throw new Error('Invalid native transcript address');
+    return record;
+  };
+  const ordinal = (value: unknown) => {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
+      throw new Error('Invalid native transcript position');
+    return value;
+  };
+  const address = fields(value, ['record', 'binding', 'block', 'entry_id']);
+  const record = fields(address.record, ['path', 'offset', 'block', 'occurrence']);
+  if (
+    typeof record.path !== 'string' ||
+    !identifier(record.path) ||
+    typeof address.binding !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(address.binding) ||
+    typeof address.entry_id !== 'string' ||
+    !identifier(address.entry_id) ||
+    ordinal(address.block) > 0xffffffff
+  )
+    throw new Error('Invalid native transcript address');
+  return {
+    record: {
+      path: record.path,
+      offset: ordinal(record.offset),
+      block: ordinal(record.block),
+      occurrence: ordinal(record.occurrence),
+    },
+    binding: address.binding,
+    block: ordinal(address.block),
+    entry_id: address.entry_id,
+  };
+}
+export interface RetainedPeerAddress {
+  trace: string;
+  witness: string;
+}
+export function parseRetainedPeerAddress(value: unknown): RetainedPeerAddress {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid retained trace binding');
+  const peer = value as Record<string, unknown>;
+  if (
+    Object.keys(peer).length !== 2 ||
+    typeof peer.trace !== 'string' ||
+    !identifier(peer.trace) ||
+    typeof peer.witness !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(peer.witness)
+  )
+    throw new Error('Invalid retained trace binding');
+  return { trace: peer.trace, witness: peer.witness };
+}
 export const routeSegment = (value: string) =>
   encodeURIComponent(value).replace(
     /[!'()*]/g,
@@ -70,7 +136,11 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
                 ? !!value && new TextEncoder().encode(value).length <= 4096
                 : name === 'part'
                   ? ['output', 'script', 'attachment'].includes(value)
-                  : false;
+                  : name === 'address'
+                    ? !!parseNativeEntryAddress(JSON.parse(value))
+                    : name === 'peer'
+                      ? !!parseRetainedPeerAddress(JSON.parse(value))
+                      : name === 'scope' && (value === 'current' || value === 'retained_history');
     if (!valid || controls.has(name)) return fail();
     controls.set(name, value);
   }
@@ -81,12 +151,22 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
     return fail();
   if (
     (Number(controls.get('after') ?? 0) > 0 && !controls.has('generation')) ||
+    (controls.has('address') && (controls.has('after') || controls.has('generation'))) ||
     ((controls.has('field_chunk') || controls.has('part')) &&
+      !controls.has('address') &&
       (!controls.has('after') || !controls.has('generation')))
   )
     return fail();
   controls.sort();
-  return { source, key, turn, controls };
+  const readScope = controls.get('scope') === 'retained_history' ? 'retained_history' : 'current';
+  if (
+    controls.has('peer') &&
+    (readScope !== 'retained_history' ||
+      (turn && !controls.has('address')) ||
+      controls.has('generation'))
+  )
+    return fail();
+  return { source, key, turn, controls, readScope };
 }
 export function canonicalSessionRoute(route: SessionRoute, source: string, key: string) {
   const query = [...route.controls]

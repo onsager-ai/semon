@@ -34,6 +34,8 @@ CREATE TABLE warehouse_signal (
 CREATE INDEX warehouse_signal_position ON warehouse_signal(source,pos,revision);
 CREATE INDEX warehouse_signal_current ON warehouse_signal(source,seq) WHERE retired_revision IS NULL;
 CREATE INDEX warehouse_signal_expiry ON warehouse_signal(retired_revision) WHERE retired_revision IS NOT NULL;
+CREATE INDEX warehouse_signal_effort ON warehouse_signal(source,pos DESC,seq DESC)
+  WHERE retired_revision IS NULL AND json_extract(payload,'$.k')='effort';
 CREATE TABLE warehouse_current (
   path TEXT PRIMARY KEY, source INTEGER NOT NULL UNIQUE REFERENCES warehouse_source(source)
 ) STRICT, WITHOUT ROWID;
@@ -50,16 +52,19 @@ CREATE TABLE warehouse_identity (
   recipe_version INTEGER NOT NULL, recipe_generation TEXT NOT NULL,
   recipe_source_generation TEXT NOT NULL, source_generation TEXT NOT NULL,
   complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+  trace_peers TEXT NOT NULL,
+  metadata TEXT NOT NULL,
   witness TEXT NOT NULL,
   UNIQUE(scope,source_key,catalog_key,retained)
 ) STRICT;
 CREATE TABLE warehouse_identity_member (
   identity INTEGER NOT NULL REFERENCES warehouse_identity(id) ON DELETE CASCADE,
   source INTEGER NOT NULL REFERENCES warehouse_source(source),
-  ordinal INTEGER NOT NULL, receipt TEXT NOT NULL,
+  ordinal INTEGER NOT NULL, receipt TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0),
   PRIMARY KEY(identity,ordinal), UNIQUE(identity,source)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX warehouse_identity_member_source ON warehouse_identity_member(source,identity);
+CREATE INDEX warehouse_identity_member_source ON warehouse_identity_member(source,revision,identity);
+CREATE INDEX warehouse_identity_member_native ON warehouse_identity_member(json_extract(receipt,'$.native_id'),identity);
 CREATE TABLE fact_session_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER,
@@ -113,6 +118,16 @@ CREATE TABLE fact_prompt (
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER, ts INTEGER,
   PRIMARY KEY(source,pos,block,kind,occurrence)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_prompt_images (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, recipe TEXT NOT NULL,
+  PRIMARY KEY(source,pos,block,occurrence)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_native_fields (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, recipe TEXT NOT NULL,
+  PRIMARY KEY(source,pos,block,occurrence)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_tool_call (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   occurrence INTEGER NOT NULL, ordinal INTEGER, call_id TEXT, tool TEXT,
@@ -122,6 +137,8 @@ CREATE TABLE fact_tool_call (
 CREATE TABLE fact_operation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   occurrence INTEGER NOT NULL, ordinal INTEGER, call_pos INTEGER NOT NULL, call_block INTEGER NOT NULL,
+  tool TEXT NOT NULL CHECK(tool IN ('exec_command','apply_patch')),
+  ok INTEGER CHECK(ok IN (0,1)),
   PRIMARY KEY(source,pos,block,occurrence)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_tool_result (
@@ -212,7 +229,7 @@ CREATE TABLE dim_session (
   source INTEGER PRIMARY KEY, harness TEXT NOT NULL, native_id TEXT NOT NULL,
   parent_id TEXT, nickname TEXT, agent_path TEXT,
   first_ts INTEGER, last_ts INTEGER, title_pos INTEGER, model TEXT,
-  model_pos INTEGER, prompt_pos INTEGER, continued INTEGER NOT NULL,
+  model_pos INTEGER, prompt_pos INTEGER, effort TEXT, continued INTEGER NOT NULL,
   lineage INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE lineage_group (
@@ -237,12 +254,25 @@ CREATE INDEX record_timed_offset ON fact_record(source,pos) WHERE ts IS NOT NULL
 CREATE INDEX record_gap ON fact_record(source,coalesce(ts,-9223372036854775808),pos) WHERE gap;
 CREATE INDEX prompt_position ON fact_prompt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
 CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
-  WHERE pos>=0 AND NOT gap;
+  WHERE pos>=0;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
 CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
+CREATE INDEX claude_call_identity ON fact_claude_call(call_id,source);
+CREATE INDEX agent_storage_parent ON fact_agent_observation(storage_parent,source,revision);
+CREATE INDEX agent_call ON fact_agent_observation(call_id,source,revision);
+CREATE INDEX parent_observed_target ON fact_parent_observation(parent_harness,parent_id,source);
+CREATE INDEX marker_observed_target ON fact_eof_observation(parent_harness,parent_id,source) WHERE kind='marker';
+CREATE INDEX process_capture_pid ON fact_process_observation(capture,pid,source);
+CREATE INDEX process_environment_target ON fact_environment_observation(parent_harness,parent_id,source);
+CREATE INDEX process_ancestor_pid ON fact_ancestor_observation(capture,ancestor_pid,source);
 CREATE INDEX operation_parent ON fact_operation(source,call_pos,pos);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
+CREATE INDEX relay_send_target ON fact_relay_send(target,source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
+CREATE INDEX relay_result_correlation ON fact_relay_result(correlation,source,pos)
+  WHERE correlation IS NOT NULL AND NOT failed;
+CREATE INDEX home_assistant_position ON fact_subagent_event(source,pos,block)
+  WHERE kind='assistant';
 CREATE INDEX relay_receipt_position ON fact_relay_receipt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
 CREATE INDEX relay_receipt_correlation ON fact_relay_receipt(correlation,source,pos,block,occurrence);
 CREATE VIEW dim_lineage AS

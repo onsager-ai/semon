@@ -516,11 +516,11 @@ impl NativeEvidence {
 
     /// Search interest only changes producer scheduling. HTTP readers neither
     /// open native files nor acquire the producer's Work/publication fence.
-    pub(crate) fn catalog_search_epoch(&self) -> u64 {
+    fn catalog_search_epoch(&self) -> u64 {
         lock(&self.catalog_search).epoch
     }
 
-    pub(crate) fn note_catalog_search_result(
+    fn note_catalog_search_result(
         &self,
         epoch: u64,
         interest: Option<(&str, Option<&str>)>,
@@ -533,33 +533,36 @@ impl NativeEvidence {
         queue.note(interest, paths)
     }
 
-    #[cfg(test)]
-    pub(crate) fn note_catalog_search(&self, interest: Option<(&str, Option<&str>)>) {
-        let Some((query, harness)) = interest else {
-            return;
-        };
+    pub(crate) fn note_warehouse_search(&self, (query, harness): (&str, Option<&str>)) -> bool {
         let epoch = self.catalog_search_epoch();
         let paths = (|| {
-            let connection = crate::events::store::catalog_probe_connection(&EventCache::path(
-                &self.options.cache,
-            ))
-            .map_err(|_| ())?;
-            let draining: bool = connection.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_backfill_state')='draining' AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')", [], |row| row.get::<_, Option<bool>>(0)).map_err(|_| ())?.unwrap_or(false);
+            let connection =
+                crate::events::store::focused_connection(&EventCache::path(&self.options.cache))
+                    .map_err(|_| ())?;
+            let snapshot = connection.unchecked_transaction().map_err(|_| ())?;
+            let draining: bool = snapshot.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_backfill_state')='draining' AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')", [], |row| row.get::<_, Option<bool>>(0)).map_err(|_| ())?.unwrap_or(false);
             if !draining {
                 return Ok(Vec::new());
             }
             EventCache::catalog_search_sources(
-                &connection,
+                &snapshot,
                 &self.options,
                 crate::events::CatalogSearchInterest { query, harness },
                 CATALOG_SEARCH_CAPACITY,
             )
             .map_err(|_| ())
         })();
-        assert!(
-            self.note_catalog_search_result(epoch, interest, paths),
-            "test search admission exceeds the pending-path capacity"
-        );
+        self.note_catalog_search_result(epoch, Some((query, harness)), paths)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_catalog_search(&self, interest: Option<(&str, Option<&str>)>) {
+        if let Some(interest) = interest {
+            assert!(
+                self.note_warehouse_search(interest),
+                "test search admission exceeds the pending-path capacity"
+            );
+        }
     }
 
     fn acknowledge_catalog_search(&self, cache: &EventCache, prepared: &model::PreparedSources) {
@@ -1587,6 +1590,9 @@ impl NativeEvidence {
         }
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
+            if let Some(namespace) = self.storage.namespace() {
+                crate::events::store::publish_catalog_names(&self.options, namespace)?;
+            }
             lock(&self.catalog_search).close();
         }
         Ok(complete && !work.tree_repair_pending)
@@ -2801,12 +2807,12 @@ mod catalog_owner_tests {
         if shared_roots {
             options.claude_home = options.codex_home.clone();
         }
-        let initial = NativeEvidence::new(options.clone());
+        let initial = NativeEvidence::for_source_key("", options.clone());
         drain_catalog(&initial, &std::cell::Cell::new(0));
         drop(initial);
         let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
         db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
-        let evidence = NativeEvidence::new(options);
+        let evidence = NativeEvidence::for_source_key("", options);
         let core =
             crate::ViewerCore::from_sources(Arc::new(SessionSources::from_evidence(vec![(
                 String::new(),
@@ -2910,7 +2916,10 @@ mod catalog_owner_tests {
                 assert_eq!(body["search"]["index_complete"], false);
             }
         }
-        pending_search_source(&evidence, &db, "audit");
+        let pending = pending_search_source(&evidence, &db, "audit");
+        // This basename is still a scheduling hint for `audit`, while its
+        // header leaves the committed audit session unambiguous.
+        fs::write(pending, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"pending-audit\"}}\n").unwrap();
         let reply = core.respond("GET", "/api/sessions", "q=audit&harness=codex", None);
         assert_eq!(reply.status, 200);
         let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();

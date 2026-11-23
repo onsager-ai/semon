@@ -65,6 +65,32 @@ well as selecting metadata from committed facts.
   binding intact and lists show the current owner. Exact History reads return
   `retained_identity_unverified` when the binding is missing or its witness
   fails qualification. Phase 3 does not read `session_history_*`.
+- Owner decision 2026-11-22: list clicks and plain session links without an
+  explicit scope open the current owner. History and archive links carry
+  `scope=retained_history` through Back and evidence navigation. A plain link
+  opens the replacement if its Catalog key is reused. Explicit History reads
+  keep the `retained_identity_unverified` refusal for unqualified bindings.
+- Owner decision 2026-11-22: a retained trace certifies the peer component,
+  source incarnations, and committed member prefixes it observed. A History
+  evidence link names that trace binding and peer. It opens those exact
+  prefixes under qualifying current or frozen custody. If the observation or
+  custody no longer qualifies, show why the peer is unavailable. A peer link
+  never falls through to a replacement owner, and an ordinary unbound History
+  request still returns `retained_identity_unverified`.
+- Owner decision 2026-11-22: selected reads derive retained edges and their
+  native entry addresses solely from the certified prefixes, within the
+  existing request budgets. When an exact match cannot be proven, show the
+  evidence as unavailable and give the reason. Untyped relay matching stays
+  in selected reads. Retained reads never fall back to the semantic trace
+  tables keyed by Catalog key. Phase 3 adds no persisted graph contract.
+- Owner decision 2026-11-22: the source prepares a seekable copy of each
+  needed archive chain in a background job. The copy lives next to the Index,
+  is checked against the archive chain, and stores hash-verified chunks. It is
+  a rebuildable cache owned by Semon. Preparation leaves the archives untouched.
+  Selected History reads verify only the chunks they need and charge them to
+  the request budget. An old retired session whose copy is pending shows a
+  preparing state. Body bytes and derived copies stay origin-local and follow
+  the archive's custody rules.
 - Qualification starts with the new schema. The host rebuild replays authorized
   originals without importing old Index rows or a custody manifest. Pre-cutover
   retained keys without a verified warehouse binding get the same explicit
@@ -75,6 +101,10 @@ well as selecting metadata from committed facts.
   candidate work and continuation frontiers without a semantic-ready check.
   Keep ordinary lists free of transcript or native-log scans. Resolve title
   positions through the existing authorized metadata/field path when needed.
+  Publish qualified Codex names with the source observer's completed Catalog
+  work. They affect Catalog metadata revisions and search, independently of
+  transcript evidence generations. Read Claude child labels from the committed
+  ledger-bound sidecar and child models from its current warehouse revision.
 - Capture runtime evidence once per source per request. Use the current
   [`RuntimeObservations`](../../crates/semon-sessions/src/native_evidence/runtime.rs)
   and `catalog.rs` `relative_status` rules alongside phase 2's
@@ -133,9 +163,21 @@ well as selecting metadata from committed facts.
   but still rejects a later stat change within the request. Qualify verified
   growth across block reads and the final recheck in the same reader. Verify
   covering blocks and requalify identity and custody before exposing bytes.
+  Oversized prompt image recipes hold source-relative string ranges and image
+  descriptors only. Index writes them with the native record in schema 61.
+  Pages prove the surrounding JSON and text with the page allowance. Exact
+  image reads prove the surrounding JSON and only the requested image range
+  with the attachment allowance, and validate the decoded type, size and
+  content version. Retained reads use the original member's recipe and
+  certified prefix. These facts stay in the origin Index.
   Return an explicit restart when membership, incarnation, custody or prefix
   integrity changes. The next fresh request or refresh uses the latest
   committed state.
+  Large allowlisted text and tool result strings also have source-relative
+  scalar checkpoints. A transcript proves the surrounding record and bounded
+  previews. An expansion proves its requested chunk and checks the full entry
+  address. The Index stores no scalar text. Relay matching reads complete
+  records within its existing budget.
 
 ## Performance and benchmark gate
 
@@ -274,6 +316,11 @@ custody change or membership change, including one caused by a late parent
 link, requires an explicit restart. Cursor state is bounded by the sources a
 page touches. The server holds no cursor state between requests.
 
+As a consequence of the pre-release policy, new detail links use native
+addresses. A saved numeric position tied to a semantic projection generation
+opens the session and reports that the saved position is unavailable. The
+Viewer never guesses which entry to highlight from the old coordinate.
+
 ### Prefix receipts in the selected-read fixture adapter
 
 The Index writes one `warehouse_prefix` receipt when an admitted source
@@ -364,7 +411,20 @@ receipts start an incoming turn in the parent. For untyped legacy receipts,
 selected detail uses matched receipts as incoming relay turns and the latest
 unmatched receipt as completion evidence when explicit terminal evidence is
 absent. Pairing is request-local and uses the selected committed prefixes.
+Trace uses the native Claude run reducer for explicit hand-backs, notifications
+and resumed runs. It includes a bounded return preview and the exact rendered
+entry when available. Otherwise its return evidence carries a refusal reason.
 
-PR 3 owns the atomic Viewer route cutover, end-to-end scale verification,
-concurrent HTTP reads during ingestion, and the Viewer/browser gates. The
-fixture adapters remain separate from the production routes until cutover.
+Schema 59 records the signal revision alongside each certified retained member's
+prefix. Signal cleanup preserves versions covered by a certified member after
+its transient prefix receipt expires. It also records the native Codex
+operation outcome for exact error markers and selected rendering, and indexes
+normalized effort for Catalog metadata.
+
+The SQLite Viewer, host Catalog APIs and workspace reads use projection 7.
+They queue observation demand and serve each source's committed Index snapshot.
+Home publishes event metadata and the current selection's identity generation.
+Question and result text is read on demand from verified native records. Schema
+62 indexes the native positions of assistant text for that selection.
+PostgreSQL remains on projection 6. Analytics and ASI retain their existing
+read paths until phase 4.

@@ -263,7 +263,10 @@ fn emit_catalog_publish_attempt(
 // v52: warehouse-owned retained identity and certified original component receipts.
 // v53: committed warehouse prefix receipts for selected read continuations.
 // v54: as-of native signal observations for warehouse read continuations.
-pub(crate) const SCHEMA_VERSION: i64 = 57;
+// v60: native operation tool labels for selected call totals.
+// v61: source-relative image ranges and scalar checkpoints for selected reads.
+// v62: assistant result positions for warehouse Home metadata and hydration.
+pub(crate) const SCHEMA_VERSION: i64 = 62;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -5550,6 +5553,20 @@ fn read_tree_summary(
     path: &str,
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
+    let Some(mut summary) = read_tree_summary_header(statement, path, ledger)? else {
+        return Ok(None);
+    };
+    if !tree_state::restore(connection, path, ledger, &mut summary)? {
+        return Ok(None);
+    }
+    Ok(Some(summary))
+}
+
+fn read_tree_summary_header(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
     let encoded: Option<Option<String>> = statement
         .query_row([tree_summary_key(path)], |row| {
             crate::selected_read::row(row, 512)?;
@@ -5568,11 +5585,19 @@ fn read_tree_summary(
     {
         return Ok(None);
     }
-    let mut summary = record.summary;
-    if !tree_state::restore(connection, path, ledger, &mut summary)? {
-        return Ok(None);
-    }
-    Ok(Some(summary))
+    Ok(Some(record.summary))
+}
+
+pub(crate) fn committed_codex_lifecycle(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+    native_id: &str,
+) -> rusqlite::Result<Option<crate::TurnLifecycle>> {
+    let mut statement = connection.prepare_cached(NATIVE_METADATA_VALUE)?;
+    Ok(read_tree_summary_header(&mut statement, path, ledger)?
+        .and_then(|summary| summary.codex_turn.owned(native_id))
+        .map(|turn| turn.with_generation(&ledger.prefix)))
 }
 
 fn write_tree_summary(
@@ -5804,6 +5829,70 @@ fn read_claude_sidecar(
             && record.sidecar.valid())
         .then_some(record.sidecar)
     }))
+}
+
+pub(crate) fn committed_claude_agent(
+    db: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_sidecar::AgentMetadata>> {
+    let mut statement = db.prepare_cached(NATIVE_METADATA_VALUE)?;
+    Ok(read_claude_sidecar(&mut statement, path, ledger)?.map(|sidecar| sidecar.metadata))
+}
+
+const CATALOG_NAMES: &str = "warehouse_codex_names";
+
+pub(crate) fn catalog_names_json(db: &Connection) -> rusqlite::Result<Option<String>> {
+    db.prepare_cached("SELECT value FROM meta WHERE key=?1")?
+        .query_row([CATALOG_NAMES], |row| row.get(0))
+        .optional()
+}
+
+pub(crate) fn publish_catalog_names(
+    options: &crate::Options,
+    namespace: &crate::storage::Namespace,
+) -> io::Result<()> {
+    let _facts_fence = options
+        .facts
+        .as_ref()
+        .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
+        .transpose()?;
+    let names = if let Some(path) = options.facts.as_ref() {
+        let Ok(authority) = crate::facts::source_authority::CurrentSources::open(path) else {
+            // Offline or unavailable Facts cannot publish a new name observation.
+            return Ok(());
+        };
+        if authority.facts_known() {
+            authority.read_snapshot()?.native_names
+        } else {
+            Vec::new()
+        }
+    } else {
+        crate::facts::MachineFacts::native_names_read_only(options)?
+    };
+    let names = names
+        .into_iter()
+        .filter(crate::NativeName::valid)
+        .take(4096)
+        .map(|name| (name.native_id, name.name))
+        .collect::<BTreeMap<_, _>>();
+    let encoded = serde_json::to_string(&names).map_err(io::Error::other)?;
+    let path = super::EventCache::path(&options.cache);
+    let db = focused_connection(&path)?;
+    crate::storage::sqlite::qualify(&db, namespace).map_err(io::Error::other)?;
+    let previous = catalog_names_json(&db).map_err(io::Error::other)?;
+    if previous.as_ref() == Some(&encoded) || (previous.is_none() && names.is_empty()) {
+        return Ok(());
+    }
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    require_current(&tx)?;
+    crate::storage::sqlite::qualify(&tx, namespace).map_err(io::Error::other)?;
+    tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES, encoded])
+        .map_err(io::Error::other)?;
+    tx.commit().map_err(io::Error::other)
 }
 
 fn claude_sidecar_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
@@ -7207,7 +7296,8 @@ mod tests {
             .unwrap();
         }
         if seed_catalog {
-            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+            let evidence =
+                crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
             let complete = (0..128).any(|_| {
                 evidence
                     .refresh_catalog(
@@ -7260,7 +7350,7 @@ mod tests {
             writeln!(file, "{}", serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original {index}")}]}})).unwrap();
         }
         drop(file);
-        let initial = crate::native_evidence::NativeEvidence::new(options.clone());
+        let initial = crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
         assert!((0..128).any(|_| {
             initial
                 .refresh_catalog(
@@ -8979,7 +9069,8 @@ mod tests {
                 writeln!(file,"{}",serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original native record {n}")}]}})).unwrap();
             }
             drop(file);
-            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+            let evidence =
+                crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
             assert!((0..128).any(|_| {
                 evidence
                     .refresh_catalog(
@@ -9173,12 +9264,12 @@ mod tests {
     #[test]
     fn catalog_batch_matches_row_wise_partial_native_lineage_history_and_archive_proofs() {
         let root = scratch("catalog-batch-partial-lineage");
-        let (options, _, _) = catalog_native_fixture(&root, 4, false);
+        let (options, _, _) = catalog_native_fixture(&root, 4, true);
         let relative = "projects/-work-proj/native-cl-02.jsonl";
         let path = options.claude_home.join(relative);
         use std::io::Write;
         writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", serde_json::json!({"type":"user","uuid":"native-clear-marker","timestamp":"2026-09-24T00:02:00Z","sessionId":"native-cl-02","session_id":"native-cl-00","origin":{"kind":"human"},"message":{"role":"user","content":"Native clear joins original lineage"}})).unwrap();
-        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
         let complete = (0..128).any(|_| {
             evidence
                 .refresh_catalog(

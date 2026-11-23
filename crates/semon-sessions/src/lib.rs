@@ -84,13 +84,10 @@ pub fn analytics_index_path(cache: &Path) -> PathBuf {
     events::EventCache::path(cache)
 }
 pub use causal_trace::session_causal_trace;
-pub(crate) use causal_trace::session_causal_trace_with_gate;
 pub use origin_projection::SqliteAnalyticsInput;
-pub(crate) use overview::session_home_details_with_gate;
 pub use overview::{
     OverviewSource, overview_source_key, session_home_details_with_mode, session_overview_reply,
 };
-pub(crate) use overview_repair::session_overview_observe_with_gate;
 pub use overview_repair::{
     overview_repair_candidates, overview_repair_sources, repair_session_overview,
     repair_session_overview_with_control, request_session_projection_upgrade,
@@ -114,12 +111,10 @@ pub use catalog::{
     validate_session_catalog_query,
 };
 pub use catalog_observer::{SessionCatalogObserver, invalidate_session_sources};
-pub(crate) use native_resolution::page_with_gate as session_catalog_resolve_page_with_gate;
 pub use native_resolution::{
     CatalogNativeResolution, CatalogNativeResolutionState, session_catalog_resolve_native,
 };
 pub use session_bookmark::session_bookmark;
-pub(crate) use session_bookmark::session_bookmark_with_gate;
 mod claude_usage;
 pub mod copilot;
 pub use claude_usage::ClaudeUsageEvidence;
@@ -175,10 +170,6 @@ mod transcript_range;
 pub use transcript_range::{
     SessionSourceReadMode, session_annotations, session_entry_field, session_entry_field_with_mode,
     session_transcript_range, session_transcript_range_with_mode, session_turn_anchor,
-};
-pub(crate) use transcript_range::{
-    session_annotations_with_gate, session_entry_field_with_gate,
-    session_transcript_range_with_gate, session_turn_anchor_with_gate,
 };
 mod native_evidence;
 mod native_timing;

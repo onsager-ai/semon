@@ -404,14 +404,37 @@ fn shared_owner_names_group_display_but_keep_machine_sources() {
         semon_sessions::ReceivedMachines::new(root.0.join("received"), &options),
     );
     for source in ["machine-aaaaaaaaaaaaaaaa", "machine-bbbbbbbbbbbbbbbb"] {
-        let reply = core.respond(
-            "GET",
-            "/api/sessions",
-            &format!("machine={source}&sid=shared"),
-            None,
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let query = format!("machine={source}");
+        loop {
+            let reply = core.respond("GET", "/api/sessions", &query, None);
+            assert_eq!(
+                reply.status,
+                200,
+                "{source}: {}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            if body["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["key"] == "shared")
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{source}: {body}");
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+        let reply = core.respond("GET", "/api/sessions", &format!("{query}&sid=shared"), None);
+        assert_eq!(
+            reply.status,
+            200,
+            "{source}: {}",
+            String::from_utf8_lossy(&reply.body)
         );
-        assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["machine"], source);
         assert_eq!(body["items"][0]["key"], "shared");
     }
     core.close();

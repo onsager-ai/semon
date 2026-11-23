@@ -238,9 +238,13 @@ pub fn session_overview_observe(
     source_key: &str,
     query: &str,
 ) -> crate::ViewerReply {
-    session_overview_observe_with_gate(options, source_key, query, || Ok(()))
+    crate::catalog::warehouse::http::observe(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn session_overview_observe_with_gate(
     options: &Options,
     source_key: &str,
@@ -272,6 +276,7 @@ pub(crate) fn session_overview_observe_with_gate(
     }
 }
 
+#[cfg(test)]
 fn parse_session_overview_observe_query(query: &str) -> io::Result<String> {
     let mut values = BTreeMap::new();
     for pair in query.split('&') {
@@ -307,6 +312,7 @@ fn parse_session_overview_observe_query(query: &str) -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Select one session"))
 }
 
+#[cfg(test)]
 fn selected_observation_error(error: io::Error) -> crate::ViewerReply {
     crate::catalog::error(
         if error.kind() == io::ErrorKind::InvalidInput {

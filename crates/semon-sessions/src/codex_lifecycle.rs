@@ -472,7 +472,8 @@ mod tests {
             // Query's complete fallback does not itself promise Catalog/trace
             // publication. Exercise the owning native producer before asserting
             // either its persisted rows or portable archive custody.
-            let evidence = crate::native_evidence::NativeEvidence::new(self.options.clone());
+            let evidence =
+                crate::native_evidence::NativeEvidence::for_source_key("", self.options.clone());
             let mut work = crate::viewer::lock(&evidence.storage.work);
             while !evidence.refresh_catalog(&mut work, NOW).unwrap() {}
             drop(work);

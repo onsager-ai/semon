@@ -423,16 +423,19 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
                 .unwrap()
                 .is_some()
         );
-        assert_eq!(
-            crate::session_transcript_range(
+        // Recovery repairs semantic slots. Read the same projection before
+        // and after repair to measure that publication and its recipes.
+        let read_range = |query: &str| {
+            crate::transcript_range::session_transcript_range_with_gate(
                 &home.options,
                 "local",
-                "sid=long&after=0&limit=1",
-                None
+                query,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                || Ok(()),
             )
-            .status,
-            503
-        );
+        };
+        assert_eq!(read_range("sid=long&after=0&limit=1").status, 503);
         assert!(crate::request_session_projection_upgrade(&home.options, "long").unwrap());
         assert_eq!(
             db.query_row(
@@ -484,12 +487,7 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
                 .as_ref()
                 .map(|value| format!("&generation={value}"))
                 .unwrap_or_default();
-            let reply = crate::session_transcript_range(
-                &home.options,
-                "local",
-                &format!("sid=long&after={after}&limit=17{pin}"),
-                None,
-            );
+            let reply = read_range(&format!("sid=long&after={after}&limit=17{pin}"));
             assert_eq!(
                 reply.status,
                 200,
@@ -538,7 +536,7 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
         let started = Instant::now();
         let mut expanded = String::new();
         for chunk in 0..chunks {
-            let reply = crate::session_entry_field(
+            let reply = crate::transcript_range::session_entry_field_with_gate(
                 &home.options,
                 "local",
                 &format!(
@@ -546,6 +544,8 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
                     generation.as_ref().unwrap()
                 ),
                 None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                || Ok(()),
             );
             assert_eq!(reply.status, 200);
             let part: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -565,7 +565,7 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
             json!({"prefix_records":prefix,"pages":pages,
             "slots":slots.len(),"paging_us":page_us,"paging_source_bytes":source_bytes,
             "field_chunks":chunks,"field_bytes":expanded.len(),"field_expansion_us":started.elapsed().as_micros(),
-            "full_index_loads":loads,"scope":"public native range and field APIs; synthetic local source, no browser"})
+            "full_index_loads":loads,"scope":"projection 6 native range and field reads; synthetic local source, no browser"})
         );
     }
 }

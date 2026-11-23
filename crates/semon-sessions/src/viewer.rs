@@ -14,11 +14,6 @@ use std::{
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-#[cfg(test)]
-thread_local! {
-    static INITIAL_CATALOG_WAIT_STARTED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
-}
-
 use crate::{
     Node, Options, collect_with_index, model,
     native_evidence::{NativeEvidence, Snapshot, Work},
@@ -1081,15 +1076,6 @@ fn next_check(started: Instant, built_at: Option<Instant>) -> Instant {
 }
 
 impl MachineView {
-    /// A view over the agent homes, `/proc` and cache that `options` name,
-    /// refreshed before each read until [`MachineView::set_refresh`], and
-    /// checked in the background by [`RefreshPool::shared`] until
-    /// [`MachineView::set_pool`]. Nothing is read until the first request.
-    #[cfg(test)]
-    pub(crate) fn new(options: Options) -> Arc<Self> {
-        Self::from_evidence(NativeEvidence::new(options))
-    }
-
     pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
         Self::from_evidence(NativeEvidence::for_source_key(key, options))
     }
@@ -1433,12 +1419,6 @@ impl MachineView {
                 self.evidence.catalog_demand.store(true, Ordering::Relaxed);
                 self.note_read_state(&mut state, Kind::Catalog, true, now)?;
                 demanded = true;
-                #[cfg(test)]
-                INITIAL_CATALOG_WAIT_STARTED.with(|started| {
-                    if let Some(send) = started.borrow_mut().take() {
-                        let _ = send.send(());
-                    }
-                });
             }
             let wait = deadline.saturating_duration_since(now);
             let (next, _) = self
@@ -2027,10 +2007,15 @@ mod tests {
             )
         }
 
+        fn open_index(&self) -> EventCache {
+            crate::storage::sqlite::open_index(&self.options, &crate::storage::Namespace::local())
+                .unwrap()
+        }
+
         /// A view with a refresh pool of its own, so that tests running
         /// side by side don't share workers unless they mean to.
         fn viewer(&self) -> Arc<MachineView> {
-            let view = MachineView::new(self.options.clone());
+            let view = MachineView::for_source_key("", self.options.clone());
             view.set_pool(RefreshPool::new(2));
             view
         }
@@ -2152,6 +2137,360 @@ mod tests {
         String::from_utf8_lossy(&response).into_owned()
     }
 
+    fn committed_http_request(
+        server: &Server,
+        viewer: &Viewer,
+        path: &str,
+        during_read: Option<&dyn Fn()>,
+    ) -> Value {
+        use crate::catalog::warehouse::{after_list_snapshot, after_transcript_body};
+
+        let port = viewer.port;
+        let token = &viewer.token;
+        let deadline = Duration::from_secs(10);
+        let (opened, read_open) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        thread::scope(|scope| {
+            let pause = during_read.is_some();
+            scope.spawn(move || {
+                if pause {
+                    let hook = move || {
+                        opened.send(()).unwrap();
+                        resume.recv_timeout(deadline).unwrap();
+                    };
+                    if path.starts_with("/api/sessions?") {
+                        after_list_snapshot(hook);
+                    } else {
+                        after_transcript_body(move |_| hook());
+                    }
+                }
+                viewer.handle(server.recv_timeout(deadline).unwrap().unwrap());
+            });
+            let client = scope.spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                stream.set_read_timeout(Some(deadline)).unwrap();
+                write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost:{port}\r\nCookie: semon_session=test-id.{token}\r\nConnection: close\r\n\r\n").unwrap();
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+                let mut wire = String::new();
+                stream.read_to_string(&mut wire).unwrap();
+                let (head, body) = wire.split_once("\r\n\r\n").unwrap();
+                assert_eq!(head.split_whitespace().nth(1), Some("200"), "{path} {head} {body}");
+                serde_json::from_str::<Value>(body).unwrap()
+            });
+            if let Some(advance) = during_read {
+                read_open.recv_timeout(deadline).unwrap();
+                advance();
+                release.send(()).unwrap();
+            }
+            client.join().unwrap()
+        })
+    }
+
+    fn committed_carrier_prefix(options: &Options, carrier: &Path) -> (i64, u64) {
+        use rusqlite::OptionalExtension;
+
+        let db = crate::events::EventCache::path(&options.cache);
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT p.revision,p.pos FROM warehouse_current c
+                 JOIN warehouse_prefix p ON p.source=c.source
+                 WHERE c.path=?1 AND p.superseded=0",
+                [carrier.to_str().unwrap()],
+                |row| Ok((row.get(0)?, u64::try_from(row.get::<_, i64>(1)?).unwrap())),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn sqlite_http_reads_committed_prefixes_while_the_index_advances() {
+        let fixture = lane_fixture();
+        let child = json!({"type":"user","sessionId":"lane","agentId":"child","isSidechain":true,
+            "uuid":"child-prompt","timestamp":"2026-09-24T00:02:00Z","message":{"role":"user","content":"Inspect the lane"}});
+        fixture.write(
+            "claude/projects/project/lane/subagents/agent-child.jsonl",
+            &format!("{child}\n"),
+        );
+        let view = fixture.viewer();
+        let pool = RefreshPool::new(1);
+        view.set_pool(pool.clone());
+        let _dispatch = pool.hold_dispatch();
+        publish_native(&view);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let token = "0123456789abcdef0123456789abcdef";
+        let viewer = Viewer {
+            core: ViewerCore::with_test_view(view.clone()),
+            token: token.into(),
+            port,
+            receive: Some(Arc::new(TestAccess)),
+            public_origin: None,
+            asi: None,
+            storage_refusals: Mutex::default(),
+        };
+        let admit = || {
+            view.invalidate();
+            publish_native(&view);
+        };
+        let lane = fixture.root.join("claude/projects/project/lane.jsonl");
+        let request = |path: &str, during_read: Option<&dyn Fn()>| {
+            committed_http_request(&server, &viewer, path, during_read)
+        };
+
+        let list = "/api/sessions?machine=local&limit=20";
+        let latest = "/api/session-transcript?machine=local&sid=lane&limit=1";
+        let first = request(latest, None);
+        let cursor = first["earlier_cursor"].as_str().unwrap();
+        let earlier = format!("{latest}&cursor={}", percent_encode(cursor));
+        let session = json!({"type":"user","timestamp":"2026-09-24T00:02:00Z","sessionId":"new-lane",
+            "origin":{"kind":"human"},"message":{"role":"user","content":"A newly admitted session"}});
+        let pending = fixture.write(
+            "claude/projects/project/new-lane.jsonl",
+            &session.to_string(),
+        );
+        let assert_relationship = |page: &Value, total: u64| {
+            let rows = page["items"].as_array().unwrap();
+            assert_eq!(page["total"], total);
+            assert_eq!(rows.len() as u64, total);
+            let child = rows.iter().find(|row| row["key"] == "child").unwrap();
+            assert_eq!(child["parent"], "lane");
+        };
+        let old_list = request(
+            list,
+            Some(&|| {
+                admit();
+                let before = committed_carrier_prefix(&fixture.options, &pending);
+                let mut file = fs::OpenOptions::new().append(true).open(&pending).unwrap();
+                writeln!(file).unwrap();
+                admit();
+                let after = committed_carrier_prefix(&fixture.options, &pending);
+                assert!(
+                    after.0 > before.0 && after.1 > before.1,
+                    "the Index committed a complete record during the list read"
+                );
+            }),
+        );
+        assert_relationship(&old_list, 2);
+        assert!(
+            old_list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["key"] != "new-lane")
+        );
+        assert_eq!(old_list["coverage"]["pending"], 1);
+
+        for (round, text) in ["first committed append", "second committed append"]
+            .into_iter()
+            .enumerate()
+        {
+            let previous = request(latest, None);
+            let during = request(
+                latest,
+                Some(&|| {
+                    let before = committed_carrier_prefix(&fixture.options, &lane);
+                    say(&fixture, "lane", round + 1, text);
+                    admit();
+                    let after = committed_carrier_prefix(&fixture.options, &lane);
+                    assert!(
+                        after.0 > before.0 && after.1 > before.1,
+                        "the Index advanced while the transcript body was held"
+                    );
+                }),
+            );
+            assert_eq!(during["entries"], previous["entries"]);
+            let fresh = request(latest, None);
+            assert_eq!(fresh["entries"][0]["text"], text);
+            let old = request(&earlier, None);
+            assert_eq!(old["position"], "earlier");
+            assert_eq!(old["entries"][0]["text"], "<script>alert(1)</script>");
+            let concurrent = request(
+                list,
+                Some(&|| {
+                    let before = committed_carrier_prefix(&fixture.options, &pending);
+                    say(
+                        &fixture,
+                        "new-lane",
+                        round + 10,
+                        "advance during repeated list reads",
+                    );
+                    admit();
+                    let after = committed_carrier_prefix(&fixture.options, &pending);
+                    assert!(
+                        after.0 > before.0 && after.1 > before.1,
+                        "the writer progressed during a repeated list read"
+                    );
+                }),
+            );
+            assert_relationship(&concurrent, 3);
+            let page = request(list, None);
+            assert_relationship(&page, 3);
+            assert!(
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["key"] == "new-lane")
+            );
+            assert_eq!(page["coverage"]["pending"], 0);
+        }
+        viewer.core.close();
+    }
+
+    #[test]
+    fn workspace_union_uses_one_committed_snapshot_per_source() {
+        let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
+        let mut core = ViewerCore::with_machines(vec![
+            ("a".into(), alpha.options.clone()),
+            ("b".into(), bravo.options.clone()),
+        ]);
+        let pool = RefreshPool::new(1);
+        core.set_refresh_pool(pool.clone());
+        let dispatch = pool.hold_dispatch();
+        publish_core_native(&core);
+        let views = core.machine_views();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let viewer = Viewer {
+            core,
+            token: "0123456789abcdef0123456789abcdef".into(),
+            port: server.server_addr().to_ip().unwrap().port(),
+            receive: Some(Arc::new(TestAccess)),
+            public_origin: None,
+            asi: None,
+            storage_refusals: Mutex::default(),
+        };
+        let sources = [(&alpha, "a"), (&bravo, "b")].map(|(fixture, key)| crate::OverviewSource {
+            key: key.into(),
+            label: key.into(),
+            options: fixture.options.clone(),
+            up: true,
+        });
+        let reply = crate::session_catalog_union(&sources, "workspace", "limit=1");
+        assert_eq!(reply.status, 200);
+        let first = body_of(&reply);
+        assert_eq!(first["total"], 2);
+        let cursor = first["next_cursor"].as_str().unwrap();
+        let continuation = format!("limit=1&cursor={}", percent_encode(cursor));
+        assert_eq!(
+            crate::session_catalog_union(&sources, "workspace", &continuation).status,
+            200
+        );
+        let pending = [(&alpha, "new-a"), (&bravo, "new-b")].map(|(fixture, key)| {
+            fixture.write(
+                &format!("claude/projects/project/{key}.jsonl"),
+                &json!({"type":"user","timestamp":"2026-09-24T00:03:00Z","sessionId":key,
+                    "origin":{"kind":"human"},"message":{"role":"user","content":"Committed during workspace list"}}).to_string(),
+            )
+        });
+        let (opened, snapshot) = mpsc::sync_channel(0);
+        let (release, resume) = mpsc::sync_channel(0);
+        let deadline = Duration::from_secs(10);
+        let sources = &sources;
+        let during = thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                crate::catalog::warehouse::after_list_snapshot(move || {
+                    opened.send(()).unwrap();
+                    resume.recv_timeout(deadline).unwrap();
+                });
+                crate::session_catalog_union(sources, "workspace", "limit=8")
+            });
+            snapshot.recv_timeout(deadline).unwrap();
+            for path in &pending {
+                let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+                writeln!(file).unwrap();
+            }
+            for (view, carrier) in views.iter().zip(&pending) {
+                let before = committed_carrier_prefix(view.options(), carrier);
+                view.invalidate();
+                publish_native(view);
+                let after = committed_carrier_prefix(view.options(), carrier);
+                assert!(
+                    after.0 > before.0 && after.1 == fs::metadata(carrier).unwrap().len(),
+                    "the source committed during the union read"
+                );
+            }
+            release.send(()).unwrap();
+            reader.join().unwrap()
+        });
+        assert_eq!(
+            during.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&during.body)
+        );
+        let during = body_of(&during);
+        let rows = during["items"].as_array().unwrap();
+        assert_eq!(during["total"], 3);
+        assert_eq!(rows.len(), 3);
+        for (key, source) in [("lane-a", "a"), ("lane-b", "b"), ("new-b", "b")] {
+            assert!(
+                rows.iter()
+                    .any(|row| row["key"] == key && row["machine"]["key"] == source)
+            );
+        }
+        let fresh = crate::session_catalog_union(sources, "workspace", "limit=8");
+        assert_eq!(fresh.status, 200);
+        let stale = crate::session_catalog_union(sources, "workspace", &continuation);
+        assert_eq!(stale.status, 409);
+        assert_eq!(body_of(&stale)["error"]["code"], "stale_cursor");
+        let fresh = body_of(&fresh);
+        let rows = fresh["items"].as_array().unwrap();
+        assert_eq!(fresh["total"], 4);
+        assert_eq!(rows.len(), 4);
+        for (key, source) in [("new-a", "a"), ("new-b", "b")] {
+            assert!(
+                rows.iter()
+                    .any(|row| row["key"] == key && row["machine"]["key"] == source)
+            );
+        }
+        let requests = [
+            ("a", &alpha, "lane-a", "done on alpha", "appended on alpha"),
+            ("b", &bravo, "lane-b", "done on bravo", "appended on bravo"),
+        ];
+        for (source, fixture, sid, original, appended) in requests {
+            let latest = format!("/api/session-transcript?machine={source}&sid={sid}&limit=1");
+            let read = |uri: &str| committed_http_request(&server, &viewer, uri, None);
+            let first = read(&latest);
+            assert_eq!(first["entries"][0]["text"], original);
+            let cursor = first["earlier_cursor"].as_str().unwrap();
+            let earlier = format!("{latest}&cursor={}", percent_encode(cursor));
+            let prefix = read(&earlier);
+            assert!(!prefix["entries"].as_array().unwrap().is_empty());
+            let selected = views
+                .iter()
+                .find(|view| view.evidence.read_key() == source)
+                .unwrap();
+            let carrier = fixture
+                .options
+                .claude_home
+                .join(format!("projects/project/{sid}.jsonl"));
+            let during = committed_http_request(
+                &server,
+                &viewer,
+                &latest,
+                Some(&|| {
+                    let before = committed_carrier_prefix(selected.options(), &carrier);
+                    say(fixture, sid, 1, appended);
+                    selected.invalidate();
+                    publish_native(selected);
+                    let after = committed_carrier_prefix(selected.options(), &carrier);
+                    assert!(
+                        after.0 > before.0 && after.1 > before.1,
+                        "the Index committed during the transcript request"
+                    );
+                }),
+            );
+            assert_eq!(during["entries"], first["entries"]);
+            let fresh = read(&latest);
+            assert_eq!(fresh["entries"][0]["text"], appended);
+            assert_eq!(read(&earlier)["entries"], prefix["entries"]);
+        }
+        drop(dispatch);
+        viewer.core.close();
+    }
+
     #[test]
     #[ignore = "manual Star Catalog scale baseline"]
     fn receiver_catalog_list_baseline() {
@@ -2179,6 +2518,7 @@ mod tests {
             asi: None,
             storage_refusals: Mutex::default(),
         };
+        let (warmed, warm_ready) = mpsc::channel();
         let worker = thread::spawn(move || {
             for phase in [
                 "fresh",
@@ -2187,7 +2527,10 @@ mod tests {
                 "pending_machine",
                 "warm_after_changes",
             ] {
-                let request = server.recv().unwrap();
+                let request = server
+                    .recv_timeout(Duration::from_secs(90))
+                    .unwrap()
+                    .unwrap();
                 crate::catalog::LIST_BASELINE
                     .with(|sample| sample.replace(Some(Default::default())));
                 viewer.handle(request);
@@ -2199,6 +2542,16 @@ mod tests {
                     sample.selection.as_micros(),
                     sample.title_and_presentation.as_micros()
                 );
+                if phase == "fresh" {
+                    let view = viewer
+                        .core
+                        .machine_views()
+                        .into_iter()
+                        .find(|view| view.evidence.read_key() == machine_id("scale-a"))
+                        .unwrap();
+                    publish_native(&view);
+                    warmed.send(()).unwrap();
+                }
             }
             viewer.core.close();
         });
@@ -2227,7 +2580,8 @@ mod tests {
             );
             (status.to_owned(), rows)
         };
-        request("fresh");
+        let fresh = request("fresh");
+        warm_ready.recv_timeout(Duration::from_secs(90)).unwrap();
         let warm = request("warm");
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -2237,10 +2591,13 @@ mod tests {
         request("after_append");
         let pending = register_received(&received_dir, "scale-pending");
         fs::create_dir_all(pending).unwrap();
-        request("pending_machine");
+        let pending = request("pending_machine");
         let last = request("warm_after_changes");
         worker.join().unwrap();
-        assert!(warm == ("200".into(), 40) || last == ("200".into(), 40));
+        assert_eq!(fresh.0, "200");
+        assert_eq!(warm, ("200".into(), 40));
+        assert_eq!(pending, ("200".into(), 0));
+        assert_eq!(last, ("200".into(), 40));
     }
 
     #[test]
@@ -2435,7 +2792,8 @@ mod tests {
     fn late_native_name_refreshes_catalog_without_moving_transcript_projection() {
         let fixture = Fixture::new();
         let id = "00000000-0000-0000-0000-000000000077";
-        fixture.codex(id, &[]);
+        fixture.codex(id, &[json!({"type":"response_item","timestamp":"2026-09-24T00:00:01Z",
+            "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Original prompt"}]}})]);
         let sources =
             crate::SessionSources::with_machines(vec![(String::new(), fixture.options.clone())]);
         let evidence = &sources.machines[0].1;
@@ -2451,39 +2809,48 @@ mod tests {
             }
             panic!("single-source native Catalog publication did not complete");
         };
-        let row = || {
-            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=100");
+        let catalog = |query| {
+            let reply = crate::session_catalog_page(&fixture.options, "local", query);
             assert_eq!(reply.status, 200);
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
-            assert_eq!(page["items"].as_array().unwrap().len(), 1);
-            page["items"][0].clone()
+            page
         };
-        let turns = || {
-            let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-            let mut selected = db.prepare("SELECT metadata FROM session_trace_turns WHERE session_key=?1 ORDER BY turn_id").unwrap();
-            selected
-                .query_map([id], |row| row.get::<_, String>(0))
-                .unwrap()
-                .map(Result::unwrap)
-                .collect::<Vec<_>>()
+        let transcript = || {
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "local",
+                &format!("sid={id}"),
+                None,
+            );
+            assert_eq!(reply.status, 200);
+            body_of(&reply)
         };
         prepare();
-        let before = row();
-        let before_turns = turns();
+        let before = catalog("limit=100");
+        let before_transcript = transcript();
+        assert!(!before_transcript["entries"].as_array().unwrap().is_empty());
         fixture.write("codex/session_index.jsonl", &(json!({"id":id,"thread_name":"Meaningful late name","updated_at":"2026-10-10T00:00:00Z"}).to_string() + "\n"));
+        assert_eq!(catalog("limit=100")["generation"], before["generation"]);
         prepare();
-        let after = row();
-        assert_eq!(after["name"], "Meaningful late name");
-        assert_ne!(before["name"], after["name"]);
-        assert_eq!(before["transcript"], after["transcript"]);
-        assert_eq!(before["sources"], after["sources"]);
-        assert_eq!(before_turns, turns());
+        let after = catalog("limit=100");
+        assert_eq!(after["items"][0]["name"], "Meaningful late name");
+        assert_ne!(before["generation"], after["generation"]);
+        assert_eq!(
+            before["items"][0]["source_refs"],
+            after["items"][0]["source_refs"]
+        );
+        let search = catalog("q=meaningful%20late%20name");
+        assert_eq!(search["items"][0]["key"], id);
+        let after_transcript = transcript();
+        assert_eq!(before_transcript["identity"], after_transcript["identity"]);
+        assert_eq!(before_transcript["binding"], after_transcript["binding"]);
+        assert_eq!(before_transcript["entries"], after_transcript["entries"]);
         sources.close();
     }
 
     #[test]
-    fn native_transcript_json_preserves_security_headers_and_generation_fencing() {
+    fn native_transcript_json_preserves_security_headers_and_address_fencing() {
         let fixture = Fixture::new();
         fixture.write("proc/sys/kernel/hostname", "testbox\n");
         fixture.claude(
@@ -2493,7 +2860,7 @@ mod tests {
         );
         model::observe_catalog(
             &fixture.options,
-            &mut EventCache::open_scoped(&fixture.options.cache).unwrap(),
+            &mut fixture.open_index(),
             &mut false,
             &mut model::Texts::default(),
             model::now_ms(),
@@ -2504,7 +2871,7 @@ mod tests {
             http(
                 &fixture,
                 &format!(
-                    "GET /api/session-transcript?machine=local&sid=xss&after=0&limit=1&t={token}{query} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n{extra}\r\n"
+                    "GET /api/session-transcript?machine=local&sid=xss&t={token}{query} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n{extra}\r\n"
                 ),
             )
         };
@@ -2526,9 +2893,9 @@ mod tests {
             "identity",
             "session",
             "projection",
-            "range",
+            "earlier_cursor",
             "entries",
-            "content_observation",
+            "binding",
         ] {
             assert!(selected.get(key).is_some(), "missing {key}");
         }
@@ -2536,10 +2903,20 @@ mod tests {
         assert_eq!(selected["identity"]["catalog_key"], "xss");
         assert_eq!(selected["entries"][0]["text"], "<script>alert(1)</script>");
         assert_eq!(selected["entries"][0]["freshness"]["state"], "cached");
-        let generation = selected["projection"]["generation"].as_str().unwrap();
-        assert_eq!(generation.len(), 64);
-        assert!(get("", &format!("&generation={generation}")).starts_with("HTTP/1.1 200"));
-        let stale = get("", &format!("&generation={}", "0".repeat(64)));
+        assert_eq!(selected["projection"], 7);
+        let mut address = selected["entries"][0]["address"].clone();
+        assert!(
+            get(
+                "",
+                &format!("&address={}", percent_encode(&address.to_string()))
+            )
+            .starts_with("HTTP/1.1 200")
+        );
+        address["binding"] = json!("0".repeat(64));
+        let stale = get(
+            "",
+            &format!("&address={}", percent_encode(&address.to_string())),
+        );
         assert!(stale.starts_with("HTTP/1.1 409"));
         assert!(
             !stale.contains("<script>"),
@@ -2547,7 +2924,7 @@ mod tests {
         );
         let refused = http(
             &fixture,
-            "GET /api/session-transcript?machine=local&sid=xss&after=0&limit=1 HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
+            "GET /api/session-transcript?machine=local&sid=xss HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n",
         );
         assert!(refused.starts_with("HTTP/1.1 403"));
     }
@@ -2716,11 +3093,8 @@ mod tests {
         assert_eq!(parsed(), lines + 3);
     }
 
-    /// A process that dies mid-call writes no line, but its running step is
-    /// no longer running: the transcript's mark moves, so the page tails it.
     #[cfg(unix)]
-    #[test]
-    fn a_process_that_dies_mid_call_moves_its_transcripts_mark() {
+    fn claude_running_call() -> (Fixture, PathBuf) {
         let fixture = Fixture::new();
         fixture.write("proc/sys/kernel/hostname", "testbox\n");
         fixture.claude(
@@ -2743,6 +3117,45 @@ mod tests {
             &json!({"pid":100,"sessionId":"lane","procStart":777,"status":"busy","name":"lane"})
                 .to_string(),
         );
+        (fixture, stat)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_keeps_its_runtime_observation_when_the_process_exits_during_read() {
+        let (fixture, stat) = claude_running_call();
+        let viewer = fixture.viewer();
+        publish_native(&viewer);
+        crate::catalog::warehouse::after_transcript_body(move |_| fs::remove_file(stat).unwrap());
+
+        let held = native_selected(&viewer, "lane");
+        assert_eq!(held["session"]["details"]["state"], "work");
+        assert!(
+            held["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["live"] == true)
+        );
+
+        let fresh = native_selected(&viewer, "lane");
+        assert_ne!(fresh["session"]["details"]["state"], "work");
+        assert!(
+            fresh["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["live"] != true)
+        );
+        assert_ne!(held["errors_generation"], fresh["errors_generation"]);
+    }
+
+    /// A process that dies mid-call writes no line, but its running step is
+    /// no longer running: the transcript's mark moves, so the page tails it.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_dies_mid_call_moves_its_transcripts_mark() {
+        let (fixture, stat) = claude_running_call();
         let viewer = fixture.viewer();
         publish_native(&viewer);
         let selected = native_selected(&viewer, "lane");
@@ -2757,19 +3170,35 @@ mod tests {
         fs::remove_file(stat).unwrap();
         publish_native(&viewer);
         let stopped = native_selected(&viewer, "lane");
-        assert_ne!(
-            stopped["projection"]["errors_generation"], selected["projection"]["errors_generation"],
-            "process ending updates the qualified runtime observation"
-        );
         assert_ne!(stopped["session"]["details"]["state"], "work");
-        assert_ne!(
-            stopped["session"]["details"]["content_generation"],
-            selected["session"]["details"]["content_generation"],
-            "runtime projection changed"
-        );
+        assert_eq!(selected["session"]["details"]["errors"], 0);
+        assert_eq!(stopped["session"]["details"]["errors"], 1);
         assert_eq!(
-            stopped["projection"]["generation"], selected["projection"]["generation"],
+            stopped["identity"]["generation"], selected["identity"]["generation"],
             "no source line was written"
+        );
+        assert_ne!(stopped["errors_generation"], selected["errors_generation"]);
+        let prior = selected["errors_generation"].as_str().unwrap();
+        assert_eq!(
+            native_api(
+                &viewer,
+                "/api/session-annotations",
+                &format!("sid=lane&kind=errors&generation={prior}")
+            )
+            .status,
+            409
+        );
+        let errors = native_api(&viewer, "/api/session-annotations", "sid=lane&kind=errors");
+        assert_eq!(errors.status, 200);
+        let errors = body_of(&errors);
+        assert_eq!(errors["total"], 1);
+        assert!(
+            stopped["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["unfinished"] == true
+                    && entry["address"] == errors["entries"][0]["address"])
         );
         assert!(
             stopped["entries"]
@@ -2811,6 +3240,12 @@ mod tests {
         );
         let lock = fixture.write("codex/thread-writer-locks/run.lock", "");
         let (major, minor, ino) = crate::lock_identity(&lock).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[19] = "777";
+        let stat = fixture.write(
+            "proc/1234/stat",
+            &format!("1234 (codex) {}\n", fields.join(" ")),
+        );
         fixture.write(
             "proc/locks",
             &format!("2: FLOCK  ADVISORY  WRITE 1234 {major:02x}:{minor:02x}:{ino} 0 EOF\n"),
@@ -2826,21 +3261,15 @@ mod tests {
             .filter(|entry| entry["live"] == true)
             .collect();
         assert_eq!(running.len(), 1, "one running call or yielded step");
+        fs::remove_file(stat).unwrap();
         fixture.write("proc/locks", "");
         publish_native(&viewer);
         let stopped = native_selected(&viewer, "run");
-        assert_ne!(
-            stopped["projection"]["errors_generation"], selected["projection"]["errors_generation"],
-            "process ending updates the qualified runtime observation"
-        );
         assert_ne!(stopped["session"]["details"]["state"], "work");
-        assert_ne!(
-            stopped["session"]["details"]["content_generation"],
-            selected["session"]["details"]["content_generation"],
-            "runtime projection changed"
-        );
+        assert_eq!(selected["session"]["details"]["errors"], 0);
+        assert_eq!(stopped["session"]["details"]["errors"], 1);
         assert_eq!(
-            stopped["projection"]["generation"], selected["projection"]["generation"],
+            stopped["identity"]["generation"], selected["identity"]["generation"],
             "no source line was written"
         );
         assert!(
@@ -2911,15 +3340,11 @@ mod tests {
         } else {
             let reply = crate::session_transcript_range(
                 viewer.options(),
-                "fixture",
-                "sid=lane&limit=100",
+                "local",
+                "sid=lane&limit=32",
                 None,
             );
-            assert_eq!(
-                reply.status, 409,
-                "an append beyond the accepted publication requires resynchronization"
-            );
-            assert_eq!(body_of(&reply)["resynchronize"], true);
+            assert_eq!(reply.status, 200, "the committed prefix stays readable");
             assert!(!String::from_utf8_lossy(&reply.body).contains("landed mid-build"));
         }
         let next = publish_native(&viewer);
@@ -3071,7 +3496,7 @@ mod tests {
             ("/fonts/jetbrains-mono-latin-ext.woff2", "font/woff2"),
             ("/api/sessions?sid=lane", "application/json; charset=utf-8"),
             (
-                "/api/session-transcript?sid=lane&limit=100",
+                "/api/session-transcript?sid=lane&limit=32",
                 "application/json; charset=utf-8",
             ),
             ("/api/tree", "application/json; charset=utf-8"),
@@ -3274,7 +3699,7 @@ mod tests {
         let fixture = lane_fixture();
         let view = fixture.viewer();
         publish_native(&view);
-        let wire = get(&fixture, "/api/session-transcript?sid=lane&limit=100");
+        let wire = get(&fixture, "/api/session-transcript?sid=lane&limit=32");
         assert!(wire.starts_with("HTTP/1.1 200"));
         let page: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
         let entries = page["entries"].as_array().unwrap();
@@ -3400,7 +3825,7 @@ mod tests {
         let reply = crate::session_transcript_range(
             view.options(),
             &view.evidence.read_key(),
-            &format!("sid={sid}&after=0&limit=100"),
+            &format!("sid={sid}&limit=32"),
             None,
         );
         assert_eq!(
@@ -3431,7 +3856,7 @@ mod tests {
     fn native_image_entries(core: &MachineView, sid: &str) -> (String, Vec<Value>) {
         model::observe_catalog(
             core.options(),
-            &mut EventCache::open_scoped(&core.options().cache).unwrap(),
+            &mut core.evidence.open_index().unwrap(),
             &mut false,
             &mut model::Texts::default(),
             model::now_ms(),
@@ -3440,13 +3865,14 @@ mod tests {
         let reply = crate::session_transcript_range(
             core.options(),
             &core.evidence.read_key(),
-            &format!("sid={sid}&after=0&limit=100"),
+            &format!("sid={sid}&limit=32"),
             None,
         );
         assert_eq!(reply.status, 200);
         let body = String::from_utf8(reply.body).unwrap();
         let page: Value = serde_json::from_str(&body).unwrap();
-        assert!(!page["range"]["has_more"].as_bool().unwrap_or(false));
+        assert_eq!(page["projection"], 7);
+        assert!(page["earlier_cursor"].is_null());
         (body, page["entries"].as_array().unwrap().clone())
     }
 
@@ -3516,8 +3942,7 @@ mod tests {
     }
 
     fn native_image_query(core: &MachineView, sid: &str, offset: u64, block: usize) -> String {
-        let (body, entries) = native_image_entries(core, sid);
-        let page: Value = serde_json::from_str(&body).unwrap();
+        let (_, entries) = native_image_entries(core, sid);
         let (entry, ordinal) = entries
             .iter()
             .find_map(|entry| {
@@ -3531,14 +3956,13 @@ mod tests {
             })
             .expect("the selected native image reference");
         format!(
-            "machine=local&sid={sid}&after={}&limit=1&generation={}&part=attachment&image={ordinal}",
-            entry["slot"],
-            page["projection"]["generation"].as_str().unwrap()
+            "machine=local&sid={sid}&address={}&part=attachment&image={ordinal}",
+            percent_encode(&entry["address"].to_string())
         )
     }
 
     #[test]
-    fn an_attachment_is_served_only_as_a_generation_fenced_native_image() {
+    fn an_attachment_is_served_only_at_its_qualified_native_entry_address() {
         let (fixture, at) = images_fixture();
         let core = fixture.viewer();
         let fetch =
@@ -3571,33 +3995,35 @@ mod tests {
         assert_eq!(fetch(&good.replace("sid=pics", "sid=nobody")).status, 404);
         assert_eq!(fetch(&good.replace("image=0", "image=1")).status, 404);
         // Non-prompt entries, including a tool result beside an image, cannot expose image bytes.
-        let (body, entries) = native_image_entries(&core, "pics");
-        let page: Value = serde_json::from_str(&body).unwrap();
-        let generation = page["projection"]["generation"].as_str().unwrap();
+        let (_, entries) = native_image_entries(&core, "pics");
         for entry in entries.iter().filter(|entry| entry.get("img").is_none()) {
             let query = format!(
-                "sid=pics&after={}&limit=1&generation={generation}&part=attachment&image=0",
-                entry["slot"]
+                "sid=pics&address={}&part=attachment&image=0",
+                percent_encode(&entry["address"].to_string())
             );
             assert_eq!(fetch(&query).status, 404, "{entry}");
         }
         for query in [
             good.replace("sid=pics&", ""),
-            good.replace("after=0&", ""),
-            good.replace("limit=1", "limit=2"),
-            good.replace(&format!("generation={generation}&"), ""),
-            good.replace("after=0", "after=x"),
-            good.replace("after=0", "after=-1"),
-            good.replace("after=0", "after=99999999999999999999999"),
+            "machine=local&sid=pics&part=attachment&image=0".to_owned(),
+            "machine=local&sid=pics&address=invalid&part=attachment&image=0".to_owned(),
+            format!("{good}&limit=2"),
             good.replace("image=0", "image=64"),
             good.replace("image=0", "image=x"),
         ] {
             assert_eq!(fetch(&query).status, 400, "{query}");
         }
-        assert_eq!(
-            fetch(&good.replace(generation, &"0".repeat(64))).status,
-            409
+        let mut address = entries
+            .iter()
+            .find(|entry| entry["img"][0]["o"] == at[0])
+            .unwrap()["address"]
+            .clone();
+        address["binding"] = json!("0".repeat(64));
+        let stale = format!(
+            "sid=pics&address={}&part=attachment&image=0",
+            percent_encode(&address.to_string())
         );
+        assert_eq!(fetch(&stale).status, 409);
         let viewer = ViewerCore::new(fixture.options.clone());
         assert_eq!(
             viewer
@@ -3798,14 +4224,14 @@ mod tests {
         );
         let selected = body_of(&crate::session_catalog_page(
             &fixture.options,
-            "fixture",
+            "local",
             "sid=counted",
         ));
         assert_eq!(selected["items"][0]["details"], *details);
         let annotations = crate::session_annotations(
             &fixture.options,
-            "fixture",
-            "sid=counted&kind=errors&limit=100&scope=retained_history",
+            "local",
+            "sid=counted&kind=errors&limit=100",
         );
         assert_eq!(annotations.status, 200);
         assert_eq!(body_of(&annotations)["total"], details["errors"]);
@@ -3845,11 +4271,8 @@ mod tests {
         fixture
     }
 
-    /// `/api/tx?errors=1` lists exactly the steps the errors badge counts,
-    /// each at a slot whose page (`after=` it, or `before=` one past it)
-    /// holds that failed step, in transcript order across pages.
     #[test]
-    fn signals_have_a_versioned_positional_index_without_a_page_anchor() {
+    fn signals_have_versioned_exact_transcript_addresses() {
         let fixture = Fixture::new();
         fixture.codex("signals", &[
             json!({"timestamp":"2026-09-24T06:00:00Z","type":"session_meta","payload":{"id":"signals","cwd":"/work/proj"}}),
@@ -3858,22 +4281,38 @@ mod tests {
         ]);
         let view = fixture.viewer();
         publish_native(&view);
-        let read = |query: &str| crate::session_annotations(&fixture.options, "fixture", query);
-        let reply = read("sid=signals&kind=signals&limit=100&scope=retained_history");
+        let read = |query: &str| crate::session_annotations(&fixture.options, "local", query);
+        let reply = read("sid=signals&kind=signals&limit=100");
         assert_eq!(reply.status, 200);
         let body = body_of(&reply);
         assert_eq!(body["total"], 1);
         assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+        let expected = &body["entries"][0]["address"];
+        let address = percent_encode(&expected.to_string());
+        let page = crate::session_transcript_range(
+            &fixture.options,
+            "local",
+            &format!("sid=signals&address={address}"),
+            None,
+        );
+        assert_eq!(page.status, 200);
+        assert!(
+            body_of(&page)["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["k"] == "signal" && entry["address"] == *expected)
+        );
         let generation = body["generation"].as_str().unwrap();
         let cached = read(&format!(
-            "sid=signals&kind=signals&limit=100&generation={generation}&scope=retained_history"
+            "sid=signals&kind=signals&limit=100&generation={generation}"
         ));
         assert_eq!(cached.status, 200);
         assert_eq!(body_of(&cached), body);
         for query in [
-            "sid=signals&kind=unknown&scope=retained_history",
-            "sid=signals&kind=signals&limit=0&scope=retained_history",
-            "sid=signals&kind=signals&after=1&scope=retained_history",
+            "sid=signals&kind=unknown",
+            "sid=signals&kind=signals&limit=0",
+            "sid=signals&kind=signals&after=1",
         ] {
             assert_eq!(read(query).status, 400);
         }
@@ -3886,8 +4325,8 @@ mod tests {
         publish_native(&view);
         let reply = crate::session_annotations(
             &fixture.options,
-            "fixture",
-            "sid=faults&kind=errors&limit=100&scope=retained_history",
+            "local",
+            "sid=faults&kind=errors&limit=100",
         );
         assert_eq!(reply.status, 200);
         let annotations = body_of(&reply);
@@ -3896,62 +4335,58 @@ mod tests {
             annotations["total"],
             native_selected(&view, "faults")["session"]["details"]["errors"]
         );
-        assert!(annotations["next_cursor"].is_null());
-        let slots: Vec<_> = annotations["entries"]
+        let addresses: Vec<_> = annotations["entries"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|row| row["slot"].as_u64().unwrap())
+            .map(|row| row["address"].clone())
             .collect();
         let mut failed = Vec::new();
-        let mut after = 0;
-        let mut generation = None;
+        let mut query = "sid=faults&limit=32".to_owned();
+        let mut pages = 0;
         loop {
-            let mut query = format!("sid=faults&after={after}&limit=100");
-            if let Some(ref value) = generation {
-                query.push_str(&format!("&generation={value}"));
-            }
-            let reply = crate::session_transcript_range(&fixture.options, "fixture", &query, None);
+            let reply = crate::session_transcript_range(&fixture.options, "local", &query, None);
             assert_eq!(reply.status, 200);
             let page = body_of(&reply);
-            generation = Some(
-                page["projection"]["generation"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
-            );
+            pages += 1;
+            assert!(pages <= 64, "earlier cursor must make progress");
             failed.extend(
                 page["entries"]
                     .as_array()
                     .unwrap()
                     .iter()
+                    .rev()
                     .filter(|entry| entry["k"] == "tool" && entry["ok"] == false)
-                    .map(|entry| entry["slot"].as_u64().unwrap()),
+                    .map(|entry| entry["address"].clone()),
             );
-            let Some(next) = page["range"]["next"].as_u64() else {
+            let Some(cursor) = page["earlier_cursor"].as_str() else {
                 break;
             };
-            after = next;
+            query = format!("sid=faults&limit=32&cursor={}", percent_encode(cursor));
         }
-        assert_eq!(slots, failed);
-        assert_eq!(slots.len(), 5);
-        assert!(
-            slots.last().unwrap() - slots.first().unwrap() > 400,
-            "failures span pages"
-        );
-        for (index, slot) in slots.into_iter().enumerate() {
+        failed.reverse();
+        assert_eq!(addresses, failed);
+        assert_eq!(addresses.len(), 5);
+        assert!(pages > 3, "failures span a long transcript");
+        for (index, expected) in addresses.into_iter().enumerate() {
+            let address = percent_encode(&expected.to_string());
             let reply = crate::session_transcript_range(
                 &fixture.options,
-                "fixture",
-                &format!("sid=faults&after={slot}&limit=1"),
+                "local",
+                &format!("sid=faults&address={address}"),
                 None,
             );
             assert_eq!(reply.status, 200);
             let page = body_of(&reply);
-            assert_eq!(page["entries"][0]["slot"], slot);
-            assert_eq!(page["entries"][0]["ok"], false);
+            let entry = page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["address"] == expected)
+                .unwrap();
+            assert_eq!(entry["ok"], false);
             if index == 2 {
-                assert_eq!(page["entries"][0]["unfinished"], true);
+                assert_eq!(entry["unfinished"], true);
             }
         }
     }
@@ -3962,34 +4397,29 @@ mod tests {
         let view = fixture.viewer();
         publish_native(&view);
         for query in [
-            "kind=errors&scope=retained_history",
+            "kind=errors",
             "sid=faults&kind=",
-            "sid=faults&kind=unknown&scope=retained_history",
-            "sid=faults&kind=errors&after=3&scope=retained_history",
-            "sid=%zz&kind=errors&scope=retained_history",
-            "sid=faults&kind=errors&generation=%zz&scope=retained_history",
-            "sid=faults&kind=errors&limit=101&scope=retained_history",
+            "sid=faults&kind=unknown",
+            "sid=faults&kind=errors&after=3",
+            "sid=%zz&kind=errors",
+            "sid=faults&kind=errors&generation=%zz",
+            "sid=faults&kind=errors&limit=101",
         ] {
-            let reply = crate::session_annotations(&fixture.options, "fixture", query);
+            let reply = crate::session_annotations(&fixture.options, "local", query);
             assert_eq!((reply.status, reply.etag), (400, None), "{query}");
         }
-        let first = crate::session_annotations(
-            &fixture.options,
-            "fixture",
-            "sid=faults&kind=errors&scope=retained_history",
-        );
+        let first = crate::session_annotations(&fixture.options, "local", "sid=faults&kind=errors");
         assert_eq!(first.status, 200);
         let generation = body_of(&first)["generation"].as_str().unwrap().to_owned();
         let missing = crate::session_annotations(
             &fixture.options,
-            "fixture",
-            &format!("sid=nobody&kind=errors&generation={generation}&scope=retained_history"),
+            "local",
+            &format!("sid=nobody&kind=errors&generation={generation}"),
         );
         assert_eq!(missing.status, 404);
     }
 
-    /// The list carries the model's `ETag`: 304 while it holds (by
-    /// `If-None-Match` or `since=`), a new list once a failure lands.
+    /// A new committed failure changes the annotation generation and fences old pages.
     #[test]
     fn native_error_annotation_generation_changes_only_with_selected_evidence() {
         let fixture = faults_fixture();
@@ -3998,8 +4428,8 @@ mod tests {
         let read = || {
             let reply = crate::session_annotations(
                 &fixture.options,
-                "fixture",
-                "sid=faults&kind=errors&limit=100&scope=retained_history",
+                "local",
+                "sid=faults&kind=errors&limit=100",
             );
             assert_eq!(reply.status, 200);
             body_of(&reply)
@@ -4024,20 +4454,29 @@ mod tests {
         assert_eq!(moved["total"], 6);
         let rows = moved["entries"].as_array().unwrap();
         assert_eq!(rows.len(), 6);
-        let total = native_selected(&view, "faults")["projection"]["total"]
-            .as_u64()
-            .unwrap();
-        assert_eq!(rows[5]["slot"].as_u64().unwrap() + 1, total);
+        let address = percent_encode(&rows[5]["address"].to_string());
+        let latest = crate::session_transcript_range(
+            &fixture.options,
+            "local",
+            &format!("sid=faults&address={address}"),
+            None,
+        );
+        assert_eq!(latest.status, 200);
+        assert!(
+            body_of(&latest)["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["address"] == rows[5]["address"] && entry["ok"] == false })
+        );
         assert_eq!(
             native_selected(&view, "faults")["session"]["details"]["errors"],
             6
         );
         let stale = crate::session_annotations(
             &fixture.options,
-            "fixture",
-            &format!(
-                "sid=faults&kind=errors&limit=100&generation={generation}&scope=retained_history"
-            ),
+            "local",
+            &format!("sid=faults&kind=errors&limit=100&generation={generation}"),
         );
         assert_eq!(stale.status, 409);
     }
@@ -4049,20 +4488,20 @@ mod tests {
         let view = fixture.viewer();
         publish_native(&view);
         let read = |query: &str| {
-            let reply = crate::session_annotations(&fixture.options, "fixture", query);
+            let reply = crate::session_annotations(&fixture.options, "local", query);
             assert_eq!(reply.status, 200);
             body_of(&reply)
         };
-        let whole = read("sid=faults&kind=errors&limit=100&scope=retained_history");
-        let capped = read("sid=faults&kind=errors&limit=2&scope=retained_history");
+        let whole = read("sid=faults&kind=errors&limit=100");
+        let capped = read("sid=faults&kind=errors&limit=2");
         assert_eq!(capped["total"], 5);
         assert_eq!(
             capped["entries"].as_array().unwrap(),
             &whole["entries"].as_array().unwrap()[..2]
         );
-        assert_eq!(capped["next_cursor"], 2);
+        assert_eq!(capped["first"], 0);
         let tail = read(&format!(
-            "sid=faults&kind=errors&limit=100&after=2&generation={}&scope=retained_history",
+            "sid=faults&kind=errors&limit=100&after=2&generation={}",
             capped["generation"].as_str().unwrap()
         ));
         assert_eq!(tail["total"], 5);
@@ -4070,10 +4509,17 @@ mod tests {
             tail["entries"].as_array().unwrap(),
             &whole["entries"].as_array().unwrap()[2..]
         );
-        assert!(tail["next_cursor"].is_null());
-        let exact = read("sid=faults&kind=errors&limit=5&scope=retained_history");
+        assert_eq!(tail["first"], 2);
+        let exact = read("sid=faults&kind=errors&limit=5");
         assert_eq!(exact["entries"], whole["entries"]);
-        assert!(exact["next_cursor"].is_null());
+        assert_eq!(exact["first"], 0);
+        let end = read(&format!(
+            "sid=faults&kind=errors&after=5&generation={}",
+            capped["generation"].as_str().unwrap()
+        ));
+        assert_eq!(end["total"], 5);
+        assert_eq!(end["first"], 5);
+        assert_eq!(end["entries"], json!([]));
     }
 
     /// The core answers without a transport: the same bodies, statuses and
@@ -4090,7 +4536,9 @@ mod tests {
             );
             let reply = core.respond("GET", "/api/session-capabilities", "machine=source-0", None);
             assert_eq!(reply.status, 200);
-            assert_eq!(body_of(&reply)["source_candidates"], count > 1);
+            let capabilities = body_of(&reply);
+            assert_eq!(capabilities["source_candidates"], count > 1);
+            assert_eq!(capabilities["projection"], 7);
             for view in core.machine_views() {
                 assert_eq!(view.hooks.builds(), 0);
                 assert!(lock(&view.evidence.storage.work).events.is_none());
@@ -4121,18 +4569,14 @@ mod tests {
         assert_eq!(catalog.status, 200);
         assert!(catalog.etag.is_none());
         let body = body_of(&catalog);
-        let descriptor = &body["items"][0]["transcript"];
-        let generation = descriptor["generation"].as_str().unwrap();
-        let transcript = core.respond(
-            "GET",
-            "/api/session-transcript",
-            &format!("sid=lane&generation={generation}&after=0&limit=100"),
-            None,
-        );
+        let transcript = core.respond("GET", "/api/session-transcript", "sid=lane", None);
         assert_eq!(transcript.status, 200);
+        let selected = body_of(&transcript);
+        assert_eq!(selected["projection"], 7);
+        assert_eq!(selected["session"]["key"], body["items"][0]["key"]);
         assert_eq!(
-            body_of(&transcript)["projection"]["total"],
-            descriptor["total"]
+            selected["session"]["source_refs"],
+            body["items"][0]["source_refs"]
         );
         assert_eq!(
             core.respond("GET", "/api/session-transcript", "sid=lane&after=x", None)
@@ -4143,11 +4587,11 @@ mod tests {
             core.respond(
                 "GET",
                 "/api/session-transcript",
-                "sid=lane&generation=stale",
+                "sid=lane&cursor=broken",
                 None
             )
             .status,
-            409
+            400
         );
         for retired in [
             "/api/model",
@@ -4252,35 +4696,31 @@ mod tests {
         drop(file);
         let view = fixture.viewer();
         publish_native(&view);
-        let mut after = 0;
-        let mut entries = Vec::new();
-        let mut generation = None;
+        let mut cursor = None;
+        let mut pages = Vec::new();
         loop {
-            let mut query = format!("sid=many&after={after}&limit=100");
-            if let Some(ref value) = generation {
-                query.push_str(&format!("&generation={value}"));
+            let mut query = "sid=many&limit=32".to_owned();
+            if let Some(ref value) = cursor {
+                query.push_str(&format!("&cursor={value}"));
             }
-            let reply = crate::session_transcript_range(&fixture.options, "fixture", &query, None);
-            assert_eq!(reply.status, 200);
+            let reply = crate::session_transcript_range(&fixture.options, "local", &query, None);
             let page = body_of(&reply);
+            assert_eq!(reply.status, 200, "{page}");
+            assert_eq!(page["projection"], 7);
             let rows = page["entries"].as_array().unwrap();
-            assert!(rows.len() <= 100);
             assert!(
-                page["observation"]["source_bytes"].as_u64().unwrap()
-                    <= page["limits"]["source_bytes"].as_u64().unwrap()
+                rows.iter()
+                    .filter(|entry| entry["k"] == "h" || entry["k"] == "u")
+                    .count()
+                    <= 32
             );
-            generation = Some(
-                page["projection"]["generation"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
-            );
-            entries.extend(rows.iter().cloned());
-            let Some(next) = page["range"]["next"].as_u64() else {
+            pages.push(rows.clone());
+            let Some(next) = page["earlier_cursor"].as_str() else {
                 break;
             };
-            after = next;
+            cursor = Some(percent_encode(next));
         }
+        let entries: Vec<_> = pages.into_iter().rev().flatten().collect();
         let texts: Vec<_> = entries
             .iter()
             .filter(|entry| entry["k"] == "u" || entry["k"] == "h")
@@ -4403,7 +4843,7 @@ mod tests {
         let fixture = Fixture::new();
         let mut records = vec![
             json!({"type":"event_msg","payload":{"type":"user_message","message":"<recommended_plugins>injected</recommended_plugins>"}}),
-            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>injected</recommended_plugins>"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_"},{"type":"input_text","text":"plugins>injected</recommended_plugins>"}]}}),
             json!({"type":"event_msg","payload":{"type":"user_message","message":"real prompt"}}),
             json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real prompt"}]}}),
             json!({"type":"event_msg","payload":{"type":"agent_reasoning","text":"summary"}}),
@@ -4422,7 +4862,19 @@ mod tests {
         publish_native(&viewer);
         let page = native_selected(&viewer, "codex");
         let entries = page["entries"].as_array().unwrap();
-        assert!(entries.iter().any(|entry| entry["k"] == "harness"));
+        let harness = entries
+            .iter()
+            .find(|entry| entry["k"] == "harness")
+            .unwrap();
+        assert_eq!(harness["label"], "recommended_plugins");
+        let address = percent_encode(&harness["address"].to_string());
+        let reply = native_api(
+            &viewer,
+            "/api/session-transcript",
+            &format!("sid=codex&address={address}"),
+        );
+        assert_eq!(reply.status, 200);
+        assert_eq!(body_of(&reply)["entries"][0]["address"], harness["address"]);
         assert!(
             entries
                 .iter()
@@ -4470,25 +4922,24 @@ mod tests {
             tool["out"],
             format!("<script>{}…", "x".repeat(tx::PREVIEW_MAX - 8))
         );
-        let slot = tool["slot"].as_u64().unwrap();
-        let generation = page["projection"]["generation"].as_str().unwrap();
+        let address = percent_encode(&tool["address"].to_string());
         let reply = crate::session_entry_field(
             &fixture.options,
-            "fixture",
-            &format!("sid=xss&after={slot}&limit=1&generation={generation}&part=output"),
+            "local",
+            &format!("sid=xss&address={address}&part=output"),
             None,
         );
         assert_eq!(reply.status, 200);
         let expanded = body_of(&reply);
-        let output = expanded["entries"][0]["out"].as_str().unwrap();
+        let output = expanded["entry"]["out"].as_str().unwrap();
         assert!(output.contains("<script>"));
         assert_eq!(output, format!("<script>{long}"));
         assert!(output.len() > tx::PREVIEW_MAX && output.len() <= tx::FULL_MAX);
-        assert_eq!(expanded["entries"][0]["outputTruncated"], false);
+        assert_eq!(expanded["entry"]["outputTruncated"], false);
         assert_eq!(
             crate::session_entry_field(
                 &fixture.options,
-                "fixture",
+                "local",
                 "sid=xss&after=0&limit=101&part=output",
                 None
             )
@@ -4499,7 +4950,7 @@ mod tests {
         let wire = http(
             &fixture,
             &format!(
-                "GET /api/session-transcript?sid=xss&limit=100&t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"
+                "GET /api/session-transcript?sid=xss&limit=32&t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"
             ),
         );
         assert!(wire.starts_with("HTTP/1.1 200"), "{wire}");
@@ -4563,8 +5014,13 @@ mod tests {
         assert!(fs::metadata(&path).unwrap().len() >= 8 * 1024 * 1024);
         let view = fixture.viewer();
         publish_native(&view);
+        let body_budget = Arc::new(std::sync::OnceLock::new());
+        let remaining = body_budget.clone();
+        crate::catalog::warehouse::after_transcript_body(move |bytes_left| {
+            remaining.set(bytes_left).unwrap();
+        });
         let reply =
-            crate::session_transcript_range(&fixture.options, "fixture", "sid=large&limit=1", None);
+            crate::session_transcript_range(&fixture.options, "local", "sid=large&limit=1", None);
         assert_eq!(reply.status, 200);
         let page = body_of(&reply);
         assert_eq!(page["entries"].as_array().unwrap().len(), 1);
@@ -4575,11 +5031,10 @@ mod tests {
                 .unwrap()
                 .starts_with(&format!("line {} ", number - 1))
         );
-        let bytes_read = page["observation"]["source_bytes"].as_u64().unwrap();
-        assert!(bytes_read <= page["limits"]["source_bytes"].as_u64().unwrap());
+        let bytes_read = crate::transcript_range::PAGE_SOURCE_BYTES - body_budget.get().unwrap();
         assert!(
-            bytes_read < 32 * 1024,
-            "one selected native record read {bytes_read} bytes from 8 MB history"
+            (1..32 * 1024).contains(&bytes_read),
+            "one selected native record read {bytes_read} body bytes from 8 MB history"
         );
         assert_retired_routes_absent(&view);
     }
@@ -4887,14 +5342,14 @@ mod tests {
         let single = body_of(&standalone.respond(
             "GET",
             "/api/session-transcript",
-            "sid=lane&limit=100",
+            "sid=lane&limit=32",
             None,
         ));
         for core in [&embedded, &background] {
             let selected = body_of(&core.respond(
                 "GET",
                 "/api/session-transcript",
-                "machine=some-key&sid=lane&limit=100",
+                "machine=some-key&sid=lane&limit=32",
                 None,
             ));
             let canonical_entries = |page: &Value| {
@@ -4908,12 +5363,14 @@ mod tests {
                         assert_eq!(id.len(), 64);
                         assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
                         entry.as_object_mut().unwrap().remove("entry_id");
+                        entry["address"].as_object_mut().unwrap().remove("entry_id");
+                        entry["address"].as_object_mut().unwrap().remove("binding");
                         entry
                     })
                     .collect::<Vec<_>>()
             };
             assert_eq!(canonical_entries(&single), canonical_entries(&selected));
-            assert_eq!(single["range"], selected["range"]);
+            assert_eq!(single["position"], selected["position"]);
             assert_eq!(single["projection"], selected["projection"]);
             assert_eq!(selected["identity"]["source_key"], "some-key");
             assert_eq!(
@@ -5089,7 +5546,7 @@ mod tests {
             let reply = core.respond(
                 "GET",
                 "/api/session-transcript",
-                &format!("machine={source}&sid={sid}&limit=100"),
+                &format!("machine={source}&sid={sid}&limit=32"),
                 None,
             );
             assert_eq!(reply.status, 200);
@@ -5161,7 +5618,7 @@ mod tests {
         publish_core_native(&core);
         assert_eq!(core.session_machine_key("same").unwrap(), None);
         let missing_scope =
-            core.respond("GET", "/api/session-transcript", "sid=same&limit=100", None);
+            core.respond("GET", "/api/session-transcript", "sid=same&limit=32", None);
         assert_eq!(missing_scope.status, 400);
         assert_eq!(
             body_of(&missing_scope)["error"]["code"],
@@ -5171,7 +5628,7 @@ mod tests {
             let selected = core.respond(
                 "GET",
                 "/api/session-transcript",
-                &format!("machine={source}&sid=same&limit=100"),
+                &format!("machine={source}&sid=same&limit=32"),
                 None,
             );
             assert_eq!(selected.status, 200);
@@ -5288,17 +5745,17 @@ mod tests {
         publish_core_native(&core);
         let catalog = body_of(&core.respond("GET", "/api/sessions", "sid=older", None));
         assert_eq!(catalog["items"][0]["key"], "older");
-        let home = body_of(&core.respond("GET", "/api/viewer/home", "", None));
         let day = analytics_of(&core, "range=24h");
         let week = analytics_of(&core, "range=7d");
         let month = analytics_of(&core, "range=30d");
+        let generation = day["version"].as_str().unwrap();
         for (answer, range, started, minutes) in [
             (&day, "24h", 1, 2),
             (&week, "7d", 2, 6),
             (&month, "30d", 4, 14),
         ] {
             assert_eq!(answer["range"], range);
-            assert_eq!(answer["version"], home["version"], "{range}");
+            assert_eq!(answer["version"], generation, "{range}");
             assert_eq!(answer["current"]["started"], started, "{range}");
             assert_eq!(answer["current"]["turns"], started, "{range}");
             assert_eq!(answer["current"]["agent_ms"], minutes * MINUTE, "{range}");
@@ -5389,8 +5846,10 @@ mod tests {
         let answer = analytics_of(&core, "range=7d");
         assert_ne!(answer["version"], version);
         assert_eq!(answer["current"]["agent_ms"], 4 * MINUTE);
-        let home = body_of(&core.respond("GET", "/api/viewer/home", "", None));
-        assert_eq!(answer["version"], home["version"]);
+        assert_eq!(
+            analytics_of(&core, "range=30d")["version"],
+            answer["version"]
+        );
         assert_eq!(
             analytics_of(&core, "range=7d")["version"],
             answer["version"]
@@ -5546,9 +6005,7 @@ mod tests {
             ("b".into(), bravo.options.clone()),
         ]);
         publish_core_native(&core);
-        let home = body_of(&core.respond("GET", "/api/viewer/home", "", None));
         let week = analytics_of(&core, "range=7d");
-        assert_eq!(week["version"], home["version"]);
         assert_eq!(week["current"]["started"], 2);
         assert_eq!(week["facets"]["machine"], json!(["a", "b"]));
         let machines: Vec<&Value> = week["breakdown"]["machine"]
@@ -5562,6 +6019,7 @@ mod tests {
         assert_eq!(bravo_only["current"]["started"], 1);
         assert_eq!(bravo_only["current"]["agent_ms"], 2 * MINUTE);
         let day = analytics_of(&core, "range=24h");
+        assert_eq!(day["version"], week["version"]);
         assert_eq!(day["current"]["started"], 1);
         assert!(day["sessions"].get(selected_id("a", "a-old")).is_none());
         // One machine through `with_machines` answers as it does alone.
@@ -5633,7 +6091,7 @@ mod tests {
         let selected = core.respond(
             "GET",
             "/api/session-transcript",
-            "machine=two&sid=lane-2&limit=100",
+            "machine=two&sid=lane-2&limit=32",
             None,
         );
         assert_eq!(selected.status, 200);
@@ -5882,7 +6340,7 @@ mod tests {
         let tx = core.respond(
             "GET",
             "/api/session-transcript",
-            &format!("machine={}&sid=lane-bravo&limit=100", machine_id("bravo")),
+            &format!("machine={}&sid=lane-bravo&limit=32", machine_id("bravo")),
             None,
         );
         assert_eq!(tx.status, 200);
@@ -5890,7 +6348,7 @@ mod tests {
         let transcript = core.respond(
             "GET",
             "/api/session-transcript",
-            &format!("machine={}&sid=lane-alpha&limit=100", machine_id("alpha")),
+            &format!("machine={}&sid=lane-alpha&limit=32", machine_id("alpha")),
             None,
         );
         assert_eq!(transcript.status, 200);
@@ -6122,7 +6580,7 @@ mod tests {
                 let reply = core.respond(
                     "GET",
                     "/api/session-transcript",
-                    &format!("machine={}&sid={sid}&limit=100", machine_id(machine)),
+                    &format!("machine={}&sid={sid}&limit=32", machine_id(machine)),
                     None,
                 );
                 assert_eq!(reply.status, 404, "{machine}:{sid}");
@@ -6205,6 +6663,12 @@ mod tests {
             received(&receiver, &local.options),
         );
         publish_core_native(&core);
+        // Home schedules a fresh observation. Check ownership while the
+        // synchronous fixture publication still establishes the idle state.
+        assert_eq!(
+            core.session_machine_key("same").unwrap().as_deref(),
+            Some("")
+        );
         let reply = core.respond("GET", "/api/viewer/home", "", None);
         assert_eq!(
             reply.status,
@@ -6216,14 +6680,10 @@ mod tests {
         assert_eq!(machine_ids(&model), ["home", "alpha"]);
         assert_eq!(home_owner(&model, "same").unwrap(), "home");
         assert_eq!(home_owner(&model, "lane-alpha").unwrap(), "alpha");
-        assert_eq!(
-            core.session_machine_key("same").unwrap().as_deref(),
-            Some("")
-        );
         let transcript = core.respond(
             "GET",
             "/api/session-transcript",
-            "machine=local&sid=same&limit=100",
+            "machine=local&sid=same&limit=32",
             None,
         );
         assert_eq!(transcript.status, 200);
@@ -6596,37 +7056,35 @@ mod tests {
     /// Whether `view`'s transcript of `lane` holds `text`, [`at_once`].
     fn serves_at_once(what: &str, view: &Arc<MachineView>, text: &str) -> bool {
         String::from_utf8_lossy(
-            &ask(what, view, "/api/session-transcript", "sid=lane&limit=100").body,
+            &ask(what, view, "/api/session-transcript", "sid=lane&limit=32").body,
         )
         .contains(text)
     }
 
-    /// Background refresh (#29): while a rebuild runs, every read answers
-    /// at once from the model before it, with that model's `ETag`: the
-    /// model, each form of `/api/tx` (a page, `after=`, `turn=`, errors),
-    /// an attachment and the V1 tree. An id that snapshot lacks is the
-    /// usual 404. The rebuilt model answers once it is done, and a poll
-    /// never sees the version before it again.
+    /// A committed prefix stays readable while observation of an append is paused.
     #[test]
-    fn native_reads_during_observation_keep_cached_metadata_and_refuse_stale_bodies() {
+    fn native_reads_during_observation_keep_the_committed_prefix() {
         let fixture = lane_fixture();
-        let (view, v1) = warm_background(&fixture);
-        let before = native_selected(&view, "lane");
-        let projection = before["projection"]["generation"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let errors = before["projection"]["errors_generation"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let (view, _) = warm_background(&fixture);
         assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+        let before_list = body_of(&native_api(&view, "/api/sessions", ""));
+        let v1 = before_list["generation"].as_str().unwrap();
+        let carrier = fixture
+            .options
+            .claude_home
+            .join("projects/project/lane.jsonl");
+        let prefix = committed_carrier_prefix(&fixture.options, &carrier);
+        let before = native_selected(&view, "lane");
+        let expected = &before["entries"][0]["address"];
+        let address = percent_encode(&expected.to_string());
         let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
-        let (starts, release) = view.hooks.hold();
+        // The semantic build hook can run after the Index commits. Hold the
+        // writer's work lock so the queued observer cannot reach ingestion.
+        let work = lock(&view.evidence.storage.work);
         say(&fixture, "lane", 1, "written while the rebuild waits");
-        starts
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the native observer rebuilds the changed log");
+        eventually("the native observer takes the queued check", || {
+            (lock(&view.live.state).slot == Slot::Running).then_some(())
+        });
         let during = ask(
             "cached Catalog during observation",
             &view,
@@ -6634,40 +7092,49 @@ mod tests {
             "",
         );
         assert_eq!(during.status, 200);
-        assert_eq!(body_of(&during)["generation"], v1);
-        for after in [0, 1] {
+        assert_eq!(committed_carrier_prefix(&fixture.options, &carrier), prefix);
+        let during = body_of(&during);
+        assert_eq!(during["items"][0]["key"], "lane");
+        assert_eq!(
+            during["items"][0]["source_refs"],
+            before_list["items"][0]["source_refs"]
+        );
+        for query in ["sid=lane".to_owned(), format!("sid=lane&address={address}")] {
             let reply = ask(
                 "qualified selected prefix during observation",
                 &view,
                 "/api/session-transcript",
-                &format!(
-                    "sid=lane&after={after}&limit=1&generation={projection}&errors_generation={errors}"
-                ),
+                &query,
             );
-            assert_eq!(
-                reply.status, 409,
-                "a rejected local generation never becomes blank accepted content"
+            assert_eq!(reply.status, 200);
+            let page = body_of(&reply);
+            assert!(
+                page["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["address"] == *expected
+                        && entry["text"] == before["entries"][0]["text"])
             );
-            assert_eq!(body_of(&reply)["error"]["retryable"], true);
-            assert_eq!(body_of(&reply)["resynchronize"], true);
             assert!(!String::from_utf8_lossy(&reply.body).contains("while the rebuild waits"));
         }
         let missing = ask(
             "missing selected body during observation",
             &view,
             "/api/session-transcript",
-            "sid=nobody&limit=100",
+            "sid=nobody&limit=32",
         );
         assert_eq!(missing.status, 404);
         let attachment = ask(
             "qualified native attachment during observation",
             &view,
             "/api/session-entry",
-            &format!("sid=lane&after=0&limit=1&generation={projection}&part=attachment&image=0"),
+            &format!("sid=lane&address={address}&part=attachment&image=0"),
         );
+        assert_eq!(attachment.status, 404);
         assert_eq!(
-            attachment.status, 409,
-            "reject the stale selected source before image expansion"
+            body_of(&attachment)["error"]["code"],
+            "attachment_unavailable"
         );
         let tree = ask(
             "cached native tree during observation",
@@ -6677,14 +7144,23 @@ mod tests {
         );
         assert_eq!(tree.status, 200);
         assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), reads);
-        drop(release);
+        drop(work);
         let after = eventually("the next qualified native generation", || {
             let reply = native_api(&view, "/api/sessions", "");
-            (reply.status == 200 && body_of(&reply)["generation"] != v1).then_some(reply)
+            if reply.status != 200 {
+                return None;
+            }
+            let page = body_of(&reply);
+            let offset = page["items"][0]["source_refs"][0]["source"]["offset"].as_u64()?;
+            let committed = committed_carrier_prefix(&fixture.options, &carrier);
+            (committed.0 > prefix.0
+                && offset == committed.1
+                && offset > prefix.1
+                && serves(&view, "while the rebuild waits"))
+            .then_some(reply)
         });
         let v2 = version_of(&after);
         assert_ne!(v1, v2);
-        assert!(serves(&view, "while the rebuild waits"));
         for _ in 0..5 {
             let reply = native_api(&view, "/api/sessions", "");
             assert_eq!(reply.status, 200);
@@ -6721,7 +7197,9 @@ mod tests {
             let reply = native_api(&view, "/api/sessions", "");
             (reply.status == 200 && body_of(&reply)["generation"] != v1).then(|| version_of(&reply))
         });
-        assert_eq!(view.hooks.builds(), 2);
+        eventually("the first build completed", || {
+            (view.hooks.builds() == 2 && native_complete_publication(&view).is_some()).then_some(())
+        });
         // Nineteen more, each its own change, within the second after that
         // rebuild: one rebuild takes them all.
         for number in 1..20 {
@@ -6729,9 +7207,10 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         let page = eventually("the nineteen lines", || {
-            let page = native_api(&view, "/api/session-transcript", "sid=lane&limit=100");
+            let page = native_api(&view, "/api/session-transcript", "sid=lane&limit=32");
             let done = String::from_utf8_lossy(&page.body).contains("\"line 19\"");
-            done.then_some(page)
+            (done && native_complete_publication(&view).is_some() && view.hooks.builds() >= 3)
+                .then_some(page)
         });
         let text = String::from_utf8_lossy(&page.body);
         assert!((1..20).all(|number| text.contains(&format!("\"line {number}\""))));
@@ -6747,13 +7226,10 @@ mod tests {
         view.close();
     }
 
-    /// Background refresh (#29): many threads read one shared core while
-    /// two machines' logs grow. Every answer is one whole snapshot (its
-    /// `ETag` is its version, and a transcript page never has fewer entries
-    /// than the model read before it counted), no thread sees an older
-    /// snapshot after a newer one, and the last lines are served.
+    /// Shared workspace readers see committed source windows in order while
+    /// background refresh admits new records for both configured machines.
     #[test]
-    fn concurrent_native_reads_keep_whole_generation_fenced_pages_while_logs_grow() {
+    fn concurrent_native_reads_keep_whole_committed_pages_while_logs_grow() {
         let (alpha, bravo) = (machine("alpha", "lane-a"), machine("bravo", "lane-b"));
         let mut core = ViewerCore::with_machines(vec![
             ("a".into(), alpha.options.clone()),
@@ -6765,48 +7241,73 @@ mod tests {
         let writing = Arc::new(AtomicBool::new(true));
         let reader_success: Arc<[AtomicBool; 8]> =
             Arc::new(std::array::from_fn(|_| AtomicBool::new(false)));
-        let readers:Vec<_>=(0..8).map(|reader| {
-            let(core,writing,reader_success)=(core.clone(),writing.clone(),reader_success.clone());
-            thread::spawn(move|| {
-                let mut seen=[0_u64;2];
-                let mut reads=0;
-                let mut reported=false;
-                while writing.load(Ordering::SeqCst)||reads<10 {
-                    for (at,(source,sid)) in [("a","lane-a"),("b","lane-b")].into_iter().enumerate() {
-                        let catalog=core.respond("GET","/api/sessions",&format!("machine={source}&sid={sid}"),None);
-                        assert_eq!(catalog.status,200);
-                        let snapshot=body_of(&catalog);
-                        let descriptor=&snapshot["items"][0]["transcript"];
-                        let slots=descriptor["total"].as_u64().unwrap();
-                        assert!(slots>=seen[at],"{sid}: Catalog moved backward");
-                        let generation=descriptor["generation"].as_str().unwrap();
-                        let errors_generation=descriptor["errors_generation"].as_str().unwrap();
-                        let page=core.respond("GET","/api/session-transcript",&format!("machine={source}&sid={sid}&limit=100&generation={generation}&errors_generation={errors_generation}"),None);
-                        if page.status==409 {
-                            assert_eq!(body_of(&page)["error"]["retryable"],true);
-                            continue;
+        let readers: Vec<_> = (0..8)
+            .map(|reader| {
+                let (core, writing, reader_success) =
+                    (core.clone(), writing.clone(), reader_success.clone());
+                thread::spawn(move || {
+                    let mut seen = [None; 2];
+                    let mut reads = 0;
+                    while writing.load(Ordering::SeqCst) || reads < 10 {
+                        for (at, (source, sid)) in
+                            [("a", "lane-a"), ("b", "lane-b")].into_iter().enumerate()
+                        {
+                            let catalog = core.respond(
+                                "GET",
+                                "/api/sessions",
+                                &format!("machine={source}&limit=4"),
+                                None,
+                            );
+                            assert_eq!(
+                                catalog.status,
+                                200,
+                                "{}",
+                                String::from_utf8_lossy(&catalog.body)
+                            );
+                            let catalog = body_of(&catalog);
+                            assert_eq!(catalog["total"], 1);
+                            let rows = catalog["items"].as_array().unwrap();
+                            assert_eq!(rows.len(), 1);
+                            assert_eq!(rows[0]["key"], sid);
+                            assert_eq!(catalog["machine_info"]["key"], source);
+                            let page = core.respond(
+                                "GET",
+                                "/api/session-transcript",
+                                &format!("machine={source}&sid={sid}&limit=8"),
+                                None,
+                            );
+                            assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
+                            let page = body_of(&page);
+                            assert_eq!(page["projection"], 7);
+                            assert_eq!(page["identity"]["source_key"], source);
+                            assert_eq!(page["identity"]["catalog_key"], sid);
+                            let entries = page["entries"].as_array().unwrap();
+                            let mut offsets = entries
+                                .iter()
+                                .filter_map(|entry| entry["address"]["record"]["offset"].as_u64());
+                            let mut newest = offsets.next().expect("a committed transcript entry");
+                            for offset in offsets {
+                                assert!(
+                                    offset >= newest,
+                                    "{sid}: transcript entries are out of order"
+                                );
+                                newest = offset;
+                            }
+                            assert!(
+                                seen[at].is_none_or(|previous| newest >= previous),
+                                "{sid}: transcript moved backward"
+                            );
+                            seen[at] = Some(newest);
                         }
-                        assert_eq!(page.status,200);
-                        let page=body_of(&page);
-                        assert_eq!(page["identity"]["source_key"],source);
-                        assert_eq!(page["identity"]["catalog_key"],sid);
-                        assert_eq!(page["projection"]["generation"],generation);
-                        assert_eq!(page["projection"]["errors_generation"],errors_generation);
-                        let total=page["projection"]["total"].as_u64().unwrap();
-                        assert_eq!(total,slots,"one complete selected generation");
-                        assert!(total>=seen[at]);
-                        assert_eq!(page["entries"].as_array().unwrap().len() as u64,total);
-                        seen[at]=total;
+                        if seen.iter().all(Option::is_some) {
+                            reader_success[reader].store(true, Ordering::SeqCst);
+                        }
+                        reads += 1;
                     }
-                    if !reported && seen.iter().all(|total| *total>0) {
-                        reader_success[reader].store(true,Ordering::SeqCst);
-                        reported=true;
-                    }
-                    reads+=1;
-                }
-                seen
+                    seen
+                })
             })
-        }).collect();
+            .collect();
         for number in 0..40 {
             say(&alpha, "lane-a", number, &format!("line {number}"));
             say(&bravo, "lane-b", number, &format!("line {number}"));
@@ -6827,7 +7328,7 @@ mod tests {
                     .join()
                     .expect("a native reader failed")
                     .iter()
-                    .all(|total| *total > 0)
+                    .all(Option::is_some)
             );
         }
         core.close();
@@ -6859,7 +7360,7 @@ mod tests {
 
     /// A view over `fixture` in `refresh`, checked by `pool`'s workers.
     fn pooled(fixture: &Fixture, refresh: Refresh, pool: &Arc<RefreshPool>) -> Arc<MachineView> {
-        let view = MachineView::new(fixture.options.clone());
+        let view = MachineView::for_source_key("", fixture.options.clone());
         view.set_pool(pool.clone());
         view.set_refresh(refresh);
         view
@@ -6883,7 +7384,7 @@ mod tests {
     }
 
     fn serves(view: &Arc<MachineView>, text: &str) -> bool {
-        let page = native_api(view, "/api/session-transcript", "sid=lane&limit=100");
+        let page = native_api(view, "/api/session-transcript", "sid=lane&limit=32");
         page.status == 200 && String::from_utf8_lossy(&page.body).contains(text)
     }
 
@@ -7043,11 +7544,11 @@ mod tests {
     #[test]
     fn qualified_catalog_interest_avoids_cold_work_and_observes_invalidation() {
         let fixture = lane_fixture();
-        let publisher = MachineView::new(fixture.options.clone());
+        let publisher = MachineView::for_source_key("", fixture.options.clone());
         publish_native(&publisher);
         publisher.close();
         let generation = || {
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             assert_eq!(page.status, 200);
             let body: Value = serde_json::from_slice(&page.body).unwrap();
             body["generation"].clone()
@@ -7087,7 +7588,7 @@ mod tests {
             let view = pooled(&fixture, mode, &pool);
             view.note_catalog_read().unwrap();
             let generation = || {
-                let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
                 let body: Value = serde_json::from_slice(&reply.body).ok()?;
                 (reply.status == 200 && body["completeness"]["state"] == "complete")
                     .then(|| body["generation"].clone())
@@ -7102,8 +7603,8 @@ mod tests {
             });
             let reply = crate::session_transcript_range(
                 &fixture.options,
-                "fixture",
-                "sid=lane&after=0&limit=100",
+                "local",
+                "sid=lane&limit=32",
                 None,
             );
             assert_eq!(reply.status, 200);
@@ -7132,7 +7633,7 @@ mod tests {
                     let id = format!("unrelated-{n:04}");
                     fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated prompt"}})]);
                 }
-                let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+                let mut cache = fixture.open_index();
                 model::observe_catalog(
                     &fixture.options,
                     &mut cache,
@@ -7152,7 +7653,7 @@ mod tests {
                     );
                 }
                 let mut work = Work {
-                    events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                    events: Some(fixture.open_index()),
                     catalog_snapshot: Some(snapshot),
                     ..Default::default()
                 };
@@ -7167,7 +7668,7 @@ mod tests {
                     2,
                     "unrelated={unrelated}"
                 );
-                let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
                 let page: Value = serde_json::from_slice(&reply.body).unwrap();
                 assert_eq!(page["completeness"]["state"], "complete");
                 if change == "sidecar" {
@@ -7223,7 +7724,7 @@ mod tests {
             .unwrap()
         {}
         assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get) - before, 1);
-        let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+        let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
         let page: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(page["completeness"]["state"], "complete");
         assert!(work.catalog_snapshot.is_some());
@@ -7237,7 +7738,9 @@ mod tests {
         let view = fixture.viewer();
         let options = fixture.options.clone();
         *lock(&view.hooks.building) = Some(Arc::new(move || {
-            let mut other = EventCache::open_scoped(&options.cache).unwrap();
+            let mut other =
+                crate::storage::sqlite::open_index(&options, &crate::storage::Namespace::local())
+                    .unwrap();
             model::observe_catalog(
                 &options,
                 &mut other,
@@ -7262,7 +7765,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let mut other = EventCache::open_scoped(&fixture.options.cache).unwrap();
+        let mut other = fixture.open_index();
         model::observe_catalog(
             &fixture.options,
             &mut other,
@@ -7299,7 +7802,7 @@ mod tests {
                 let id = format!("unrelated-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"unrelated"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -7311,7 +7814,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fs::write(&child, record("child", Some("new-parent"))).unwrap();
             let mut work = Work {
-                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                events: Some(fixture.open_index()),
                 catalog_snapshot: Some(snapshot),
                 ..Default::default()
             };
@@ -7330,7 +7833,7 @@ mod tests {
                 rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let parent: String = catalog.query_row("SELECT parent_key FROM session_catalog WHERE session_key='child' AND lifecycle='current'", [], |row| row.get(0)).unwrap();
             assert_eq!(parent, "new-parent");
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             assert_eq!(
                 serde_json::from_slice::<Value>(&page.body).unwrap()["completeness"]["state"],
                 "complete"
@@ -7363,7 +7866,7 @@ mod tests {
                 model::now_ms(),
             )
             .unwrap();
-            let mut competing = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut competing = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut competing,
@@ -7389,7 +7892,7 @@ mod tests {
                 let id = format!("existing-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"existing prompt"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -7401,7 +7904,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fixture.claude("new-isolated", &[json!({"type":"user","sessionId":"new-isolated","uuid":"new-isolated","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-02T00:00:00Z","message":{"role":"user","content":"new prompt"}})]);
             let mut work = Work {
-                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                events: Some(fixture.open_index()),
                 catalog_snapshot: Some(snapshot),
                 ..Default::default()
             };
@@ -7416,7 +7919,7 @@ mod tests {
                 reads <= 1,
                 "unrelated={unrelated}: adding one isolated source loaded {reads} event indexes"
             );
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
             let catalog =
@@ -7449,7 +7952,7 @@ mod tests {
                 let id = format!("isolated-{n:04}");
                 fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"initial prompt"}})]);
             }
-            let mut cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
+            let mut cache = fixture.open_index();
             model::observe_catalog(
                 &fixture.options,
                 &mut cache,
@@ -7461,7 +7964,7 @@ mod tests {
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             say(&fixture, "isolated-0000", 1, "one changed source");
             let mut work = Work {
-                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                events: Some(fixture.open_index()),
                 catalog_snapshot: Some(snapshot),
                 ..Default::default()
             };
@@ -7476,7 +7979,7 @@ mod tests {
                 1,
                 "unrelated={unrelated}: changed-source publication loads only its own event rows"
             );
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
             assert_retired_routes_absent(&view);
@@ -7493,7 +7996,7 @@ mod tests {
         let pool = RefreshPool::new(1);
         let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
         let generation = || {
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let body: Value = serde_json::from_slice(&reply.body).ok()?;
             (reply.status == 200 && body["completeness"]["state"] == "complete")
                 .then(|| body["generation"].clone())
@@ -7517,8 +8020,8 @@ mod tests {
         );
         let reply = crate::session_transcript_range(
             &fixture.options,
-            "fixture",
-            "sid=rewrite&after=0&limit=100",
+            "local",
+            "sid=rewrite&limit=32",
             None,
         );
         assert_eq!(reply.status, 200);
@@ -7566,7 +8069,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
             .unwrap();
         assert_eq!(indexed, 64);
-        let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+        let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
         assert_eq!(page.status, 200);
         assert_eq!(body_of(&page)["completeness"]["state"], "partial");
         assert_eq!(lock(&view.live.state).slot, Slot::Idle);
@@ -7577,7 +8080,7 @@ mod tests {
         assert_eq!(native_api(&view, "/api/sessions", "limit=60").status, 200);
         assert!(lock(&view.live.state).active());
         eventually("the resumed cold observation completes", || {
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             (page.status == 200
                 && body_of(&page)["completeness"]["state"] == "complete"
                 && pool.running() == 0)
@@ -7615,16 +8118,21 @@ mod tests {
             // requeueing a continuation that the worker failed to schedule.
             lock(&view.live.state).idle_after = Duration::from_secs(3600);
             let options = fixture.options.clone();
+            let completeness = if unrelated == 0 {
+                "complete"
+            } else {
+                "partial"
+            };
             let start = Instant::now();
             let (published, first_page) = mpsc::channel::<u64>();
             let (release, released) = mpsc::channel::<()>();
             let released = Mutex::new(released);
             let pool_for_hook = pool.clone();
             *lock(&view.hooks.building) = Some(Arc::new(move || {
-                let page = crate::session_catalog_page(&options, "fixture", "limit=60");
+                let page = crate::session_catalog_page(&options, "local", "limit=60");
                 assert_eq!(page.status, 200);
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
-                assert_eq!(body["completeness"]["state"], "partial");
+                assert_eq!(body["completeness"]["state"], completeness);
                 let items = body["items"].as_array().unwrap();
                 assert_eq!(items.len(), 60);
                 assert!(
@@ -7667,17 +8175,17 @@ mod tests {
                 .recv_timeout(COLD_CATALOG_HANG_AFTER)
                 .expect("cold Catalog hang: foreground page waited on held history");
             assert_eq!(page.status, 200);
-            assert_eq!(body_of(&page)["completeness"]["state"], "partial");
+            assert_eq!(body_of(&page)["completeness"]["state"], completeness);
             assert_eq!(pool.running(), 1);
             let identity =
-                crate::session_catalog_identity(&fixture.options, "fixture", "selected-00000")
+                crate::session_catalog_identity(&fixture.options, "local", "selected-00000")
                     .unwrap()
                     .unwrap();
             assert_eq!(
                 identity.owner_qualification,
-                crate::CatalogOwnerQualification::Provisional
+                crate::CatalogOwnerQualification::Qualified
             );
-            assert!(identity.native_id.is_none());
+            assert_eq!(identity.native_id.as_deref(), Some("selected-00000"));
             assert!(
                 crate::source_projection_ready(
                     &fixture.options,
@@ -7692,9 +8200,9 @@ mod tests {
             let focused = Instant::now();
             let (answered, query) = mpsc::channel();
             thread::spawn(move || {
-                let answer = crate::Query::with_machines(vec![("fixture".into(), options)])
+                let answer = crate::Query::with_machines(vec![("local".into(), options)])
                     .call_selected(
-                        "fixture",
+                        "local",
                         "selected-00000",
                         "read_transcript",
                         &json!({"id":"selected-00000","limit":1}),
@@ -7710,7 +8218,7 @@ mod tests {
             assert!(answer.to_string().contains("selected first page"));
             assert_eq!(pool.running(), 1);
             eprintln!(
-                "progressive-focused-query unrelated={unrelated} elapsed_us={} response_bytes={} background_running=1 completeness=partial owner_qualification=provisional",
+                "progressive-focused-query unrelated={unrelated} elapsed_us={} response_bytes={} background_running=1 completeness=partial owner_qualification=qualified",
                 focused.elapsed().as_micros(),
                 answer.to_string().len()
             );
@@ -7731,6 +8239,12 @@ mod tests {
             loop {
                 assert!(pool.threads() <= 1);
                 assert!(pool.entries_for(&view) <= 1);
+                let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
+                let body: Value = serde_json::from_slice(&page.body).unwrap();
+                let completeness = body["completeness"]["state"].as_str().unwrap_or("invalid");
+                let complete =
+                    page.status == 200 && completeness == "complete" && pool.running() == 0;
+                // Sample the committed count after checking whether the producer finished.
                 let indexed: i64 = connection
                     .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                     .unwrap();
@@ -7741,10 +8255,7 @@ mod tests {
                 if indexed > observed {
                     observed = indexed;
                 }
-                let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
-                let body: Value = serde_json::from_slice(&page.body).unwrap();
-                let completeness = body["completeness"]["state"].as_str().unwrap_or("invalid");
-                if page.status == 200 && completeness == "complete" && pool.running() == 0 {
+                if complete {
                     break;
                 }
                 assert!(
@@ -7764,11 +8275,11 @@ mod tests {
                 background.elapsed().as_micros(),
                 pool.running()
             );
-            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
             let body: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(body["completeness"]["state"], "complete");
             assert!(
-                crate::session_catalog_identity(&fixture.options, "fixture", "selected-00000")
+                crate::session_catalog_identity(&fixture.options, "local", "selected-00000")
                     .unwrap()
                     .is_some()
             );
@@ -7777,9 +8288,8 @@ mod tests {
     }
 
     /// Fifty views read at once are checked by the pool's three threads,
-    /// never more, and each is queued once at most. With no read after the
-    /// first, each is rebuilt by the pool alone (a read can't do it for
-    /// them), and serves the new line.
+    /// never more, and each is queued once at most. The pool alone checks
+    /// every view and advances their shared Index before another read.
     #[test]
     fn fifty_views_are_checked_by_the_pools_threads_alone() {
         let fixture = lane_fixture();
@@ -7788,29 +8298,36 @@ mod tests {
             .map(|_| {
                 let view = pooled(&fixture, Refresh::Background, &pool);
                 publish_native(&view);
-                assert_eq!(native_api(&view, "/api/sessions", "").status, 200);
                 view
             })
             .collect();
-        // A build counts when it starts: the model it shows is what ends it.
-        let shown = |view: &Arc<MachineView>| native_snapshot(view);
-        let before: Vec<_> = views.iter().map(shown).collect();
-        let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
+        let carrier = fixture
+            .options
+            .claude_home
+            .join("projects/project/lane.jsonl");
+        let prefix = committed_carrier_prefix(&fixture.options, &carrier);
+        let checks: Vec<_> = views
+            .iter()
+            .map(|view| view.hooks.stats.load(Ordering::SeqCst))
+            .collect();
+        for view in &views {
+            assert_eq!(native_api(view, "/api/sessions", "").status, 200);
+        }
         say(&fixture, "lane", 1, "seen by fifty views");
-        eventually("a rebuild of every view, with no read", || {
+        eventually("every view checks the shared source, with no read", || {
             assert!(pool.threads() <= 3, "{} threads", pool.threads());
             assert!(pool.queued() <= views.len());
             for view in &views {
                 assert!(pool.entries_for(view) <= 1);
             }
-            views
-                .iter()
-                .zip(builds.iter().zip(&before))
-                .all(|(view, (builds, before))| {
-                    view.hooks.builds() > *builds
-                        && shown(view).is_some_and(|snapshot| Some(&snapshot) != before.as_ref())
-                })
-                .then_some(())
+            let current = committed_carrier_prefix(&fixture.options, &carrier);
+            (current.0 > prefix.0
+                && current.1 > prefix.1
+                && views
+                    .iter()
+                    .zip(&checks)
+                    .all(|(view, before)| view.hooks.stats.load(Ordering::SeqCst) > *before))
+            .then_some(())
         });
         for view in &views {
             assert!(serves(view, "seen by fifty views"));
@@ -8106,57 +8623,37 @@ mod tests {
         view.close();
     }
 
-    /// A cold selected read waits for the first Catalog publication without
-    /// holding Work, and a warm read answers while the later build is held.
+    /// A cold selected request queues observation without waiting for source work.
     #[test]
-    fn a_cold_native_read_waits_for_publication_without_holding_work() {
+    fn a_cold_native_read_queues_publication_without_holding_work() {
         let fixture = lane_fixture();
         let view = fixture.viewer();
         view.set_refresh(Refresh::Background);
         let (starts, release) = view.hooks.hold();
         let observing = lock(&view.evidence.storage.work);
-        let (wait_started_send, wait_started_receive) = mpsc::channel();
-        let (first_send, first_receive) = mpsc::channel();
-        let reader = view.clone();
-        let request = thread::spawn(move || {
-            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
-                *started.borrow_mut() = Some(wait_started_send);
-            });
-            let reply = native_api(&reader, "/api/session-transcript", "sid=lane&limit=100");
-            let _ = first_send.send(reply);
-        });
-        let wait_started = wait_started_receive.recv_timeout(HUNG_AFTER).is_ok();
-        drop(observing);
-        let producer_started = starts.recv_timeout(Duration::from_secs(10)).is_ok();
-        assert!(wait_started, "cold read did not enter its publication wait");
-        assert!(producer_started, "the native producer did not start");
-        assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 0);
-        let during = ask(
-            "cold selected read during observation",
+        let reply = ask(
+            "cold selected read",
             &view,
             "/api/session-transcript",
-            "sid=lane&limit=100",
+            "sid=lane",
         );
+        assert_eq!(reply.status, 503);
+        assert_eq!(body_of(&reply)["error"]["retryable"], true);
+        drop(observing);
+        starts.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 0);
+        drop(release);
+        let published = eventually("the first qualified native read", || {
+            let reply = native_api(&view, "/api/session-transcript", "sid=lane");
+            (reply.status == 200).then(|| body_of(&reply))
+        });
+        assert_eq!(published["identity"]["catalog_key"], "lane");
+        assert_eq!(published["projection"], 7);
+        assert_eq!(published["entries"].as_array().unwrap().len(), 2);
         assert_eq!(
-            during.status, 200,
-            "bounded discovery already published qualified selected evidence"
-        );
-        let selected = body_of(&during);
-        assert_eq!(selected["identity"]["catalog_key"], "lane");
-        assert_eq!(selected["projection"]["total"], 2);
-        assert_eq!(selected["entries"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            selected["entries"][1]["text"],
+            published["entries"][1]["text"],
             "<img src=x onerror=alert(2)>"
         );
-        drop(release);
-        let first = first_receive.recv_timeout(Duration::from_secs(10)).ok();
-        assert_eq!(first.as_ref().map(|reply| reply.status), Some(200));
-        assert!(request.join().is_ok());
-        eventually("the first qualified native read", || {
-            let reply = native_api(&view, "/api/session-transcript", "sid=lane&limit=100");
-            (reply.status == 200).then_some(())
-        });
         assert_eq!(view.hooks.builds(), 1);
         assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 0);
         assert_retired_routes_absent(&view);
@@ -8229,7 +8726,7 @@ mod tests {
             let page = core.respond(
                 "GET",
                 "/api/session-transcript",
-                "machine=a&sid=lane-a&limit=100",
+                "machine=a&sid=lane-a&limit=32",
                 None,
             );
             String::from_utf8_lossy(&page.body)
@@ -8269,7 +8766,7 @@ mod tests {
         let reply = core.respond(
             "GET",
             "/api/session-transcript",
-            &format!("machine={source}&sid={sid}&limit=100"),
+            &format!("machine={source}&sid={sid}&limit=32"),
             None,
         );
         reply.status == 200 && String::from_utf8_lossy(&reply.body).contains(text)
@@ -8377,13 +8874,14 @@ mod tests {
         }
         page("/session/local/lane");
         let api =
-            crate::session_transcript_range(&fixture.options, "local", "sid=lane&limit=100", None);
+            crate::session_transcript_range(&fixture.options, "local", "sid=lane&limit=32", None);
         assert_eq!(api.status, 503);
         assert_eq!(body_of(&api)["error"]["retryable"], true);
         assert_eq!(core.respond("GET", "/viewer.js", "", None).status, 200);
         assert_eq!(refresh_counts(&view), (0, 0, 0), "a page read the logs");
 
-        let generation = warm(&view);
+        warm(&view);
+        let generation = version_of(&native_api(&view, "/api/sessions", "sid=lane"));
         let selected = native_selected(&view, "lane");
         let turn = selected["entries"][0]["turn"].as_str().unwrap().to_owned();
         assert_eq!(view.hooks.builds(), 1);
@@ -8469,8 +8967,7 @@ mod tests {
         };
         shell("/machines/alpha");
         shell("/session/b/lane-b");
-        let api =
-            crate::session_transcript_range(&bravo.options, "b", "sid=lane-b&limit=100", None);
+        let api = crate::session_transcript_range(&bravo.options, "b", "sid=lane-b&limit=32", None);
         assert_eq!(api.status, 503);
         assert_eq!(body_of(&api)["error"]["retryable"], true);
         for view in &views {
@@ -8653,11 +9150,10 @@ mod tests {
                 "/api/session-transcript",
                 &view,
                 "/api/session-transcript",
-                "sid=lane&limit=100",
+                "sid=lane&limit=32",
             );
-            assert_eq!(page.status, 409);
-            assert_eq!(body_of(&page)["error"]["code"], "stale_projection");
-            assert_eq!(body_of(&page)["resynchronize"], true);
+            assert_eq!(page.status, 200);
+            assert!(!String::from_utf8_lossy(&page.body).contains("while builds fail"));
         });
         assert!(inside > 0, "no read inside FAILING_AFTER");
         assert_eq!(
@@ -8665,7 +9161,7 @@ mod tests {
                 "/api/session-transcript",
                 &view,
                 "/api/session-transcript",
-                "sid=lane&limit=100"
+                "sid=lane&limit=32"
             ))["refresh"]["state"],
             "unavailable"
         );
@@ -8945,8 +9441,8 @@ mod tests {
         }
 
         let raw_lock_held_with_waiters = probe_exclusive();
-        let blocked_ready_with_waiters = crate::session_catalog_page_ready(&blocked.options);
-        let available_ready_with_waiters = crate::session_catalog_page_ready(&available.options);
+        let blocked_ready_with_waiters = crate::catalog::sqlite_page_ready(&blocked.options);
+        let available_ready_with_waiters = crate::catalog::sqlite_page_ready(&available.options);
         let (blocked_producer_running, blocked_producer_has_error) =
             match blocked_view.live.state.try_lock() {
                 Ok(state) => (
@@ -9020,203 +9516,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn session_home_waits_for_first_catalog_publication_without_holding_raw_writer() {
-        use sha2::{Digest, Sha256};
-        use std::os::fd::AsRawFd;
-
+    fn cold_session_home_queues_publication_without_waiting_for_raw_writer() {
         let fixture = lane_fixture();
-        let home_generation = |cache: &Path| -> Option<String> {
-            let db = rusqlite::Connection::open_with_flags(
-                EventCache::path(cache),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .ok()?;
-            let encoded: String = db
-                .query_row(
-                    "SELECT summary FROM session_overview WHERE session_key='lane'",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok()?;
-            let summary: crate::overview::Summary = serde_json::from_str(&encoded).ok()?;
-            Some(crate::overview::content_generation(&summary))
-        };
-        let mut warm_options = fixture.options.clone();
-        warm_options.cache = fixture.root.join("warm-cache");
-        let warm_core = ViewerCore::new(warm_options.clone());
-        let warm_view = warm_core.machine_views().into_iter().next().unwrap();
-        let catalog_warmed = warm_view
-            .wait_until_initial_catalog(Instant::now() + Duration::from_secs(15))
-            .is_ok();
-        let expected_generation = home_generation(&warm_options.cache);
-        warm_core.close();
-
-        let mut cold_options = fixture.options.clone();
-        cold_options.cache = fixture.root.join("cold-cache");
         let input = crate::Input {
             root: crate::InputRoot::Claude,
             path: "projects/project/lane.jsonl".into(),
         };
-        let lock_key = crate::source_change::lock_key(&cold_options, &input);
+        let lock_key = crate::source_change::lock_key(&fixture.options, &input);
         let raw_writer =
-            crate::source_change::SourceLock::acquire(&cold_options, &lock_key, true).unwrap();
-        let lock_path = cold_options
-            .cache
-            .with_extension("source-locks")
-            .join(format!("{:x}", Sha256::digest(lock_key.as_bytes())));
-        let probe_shared = || {
-            let file = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .ok()?;
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
-            if result == 0 {
-                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-                Some(false)
-            } else {
-                Some(io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
-            }
-        };
-        let raw_held_before_request = probe_shared();
-        let core = Arc::new(ViewerCore::new(cold_options.clone()));
-        let view = core.machine_views().into_iter().next().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let request_query = expected_generation
-            .as_ref()
-            .map(|generation| format!("sid=lane&generation={generation}&scope=retained_history"));
-        let cold_direct_reply = request_query.as_ref().map(|query| {
-            crate::session_home_details_with_mode(
-                &cold_options,
-                "local",
-                query,
-                None,
-                crate::SessionSourceReadMode::ProviderOnly,
-            )
-        });
-        let (send, receive) = mpsc::channel();
-        let (wait_started_send, wait_started_receive) = mpsc::channel();
-        let waiting_core = core.clone();
-        let first_query = request_query.clone();
-        let request = thread::spawn(move || {
-            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
-                *started.borrow_mut() = Some(wait_started_send);
-            });
-            let reply = first_query.map_or_else(
-                || crate::catalog::error(500, "test_setup", "Home summary unavailable.", false),
-                |query| {
-                    waiting_core.respond_with_deadline(
-                        waiting_core.extras(),
-                        "GET",
-                        "/api/session-home",
-                        &query,
-                        None,
-                        deadline,
-                    )
-                },
-            );
-            let _ = send.send((Instant::now(), reply));
-        });
-        let first_wait_started = wait_started_receive
-            .recv_timeout(Duration::from_secs(4))
-            .is_ok();
-        let first_reply = receive.recv_timeout(Duration::from_secs(6)).ok();
-        let returned_while_raw_held = first_reply.is_some();
-        let raw_held_at_deadline = probe_shared();
-        let catalog_ready_at_deadline = crate::session_catalog_page_ready(&cold_options).ok();
-        let producer_running_at_deadline = view
-            .live
-            .state
-            .try_lock()
-            .is_ok_and(|state| state.slot == Slot::Running);
-
-        let (success_send, success_receive) = mpsc::channel();
-        let (success_wait_send, success_wait_receive) = mpsc::channel();
-        let success_core = core.clone();
-        let success_query = request_query.clone();
-        let success_request = thread::spawn(move || {
-            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
-                *started.borrow_mut() = Some(success_wait_send);
-            });
-            let reply = success_query.map_or_else(
-                || crate::catalog::error(500, "test_setup", "Home summary unavailable.", false),
-                |query| {
-                    success_core.respond_with_deadline(
-                        success_core.extras(),
-                        "GET",
-                        "/api/session-home",
-                        &query,
-                        None,
-                        Instant::now() + Duration::from_secs(10),
-                    )
-                },
-            );
-            let _ = success_send.send(reply);
-        });
-        let success_wait_started = success_wait_receive
-            .recv_timeout(Duration::from_secs(4))
-            .is_ok();
-
-        // Release only after both cold API requests have reached their waiter.
-        drop(raw_writer);
-        let published = view
-            .wait_until_initial_catalog(Instant::now() + Duration::from_secs(10))
-            .is_ok();
-        let first_reply =
-            first_reply.or_else(|| receive.recv_timeout(Duration::from_secs(10)).ok());
-        let success_reply = success_receive.recv_timeout(Duration::from_secs(10)).ok();
-        let request_joined = request.join().is_ok();
-        let success_request_joined = success_request.join().is_ok();
-        core.close();
-
-        assert!(
-            catalog_warmed,
-            "warm source did not publish its test summary"
-        );
-        assert!(
-            expected_generation.is_some(),
-            "warm Home summary was absent"
-        );
-        assert_eq!(
-            cold_direct_reply.as_ref().map(|reply| reply.status),
-            Some(503)
-        );
-        assert_eq!(raw_held_before_request, Some(true));
-        assert!(
-            first_wait_started,
-            "deadline request did not reach catalog wait"
-        );
-        assert!(
-            success_wait_started,
-            "success request did not reach catalog wait"
-        );
-        assert!(
-            returned_while_raw_held,
-            "request remained blocked past its deadline while Raw was held"
-        );
-        let (completed, reply) = first_reply.unwrap();
-        assert!(
-            completed >= deadline,
-            "cold response returned before its deadline"
-        );
-        assert!(
-            completed <= deadline + Duration::from_secs(2),
-            "cold response exceeded the request deadline by more than two seconds"
-        );
+            crate::source_change::SourceLock::acquire(&fixture.options, &lock_key, true).unwrap();
+        let view = fixture.viewer();
+        view.set_refresh(Refresh::Background);
+        let query = format!("sid=lane&generation={}&scope=current", "0".repeat(64));
+        let reply = ask("cold Home read", &view, "/api/session-home", &query);
         assert_eq!(reply.status, 503);
-        let error: Value = serde_json::from_slice(&reply.body).unwrap();
+        let error = body_of(&reply);
         assert_eq!(error["error"]["code"], "catalog_unavailable");
         assert_eq!(error["error"]["retryable"], true);
-        assert_eq!(raw_held_at_deadline, Some(true));
-        assert_eq!(catalog_ready_at_deadline, Some(false));
-        assert!(
-            producer_running_at_deadline,
-            "cold producer was not still blocked"
-        );
-        assert!(request_joined);
-        assert!(success_request_joined);
-        assert!(published, "Catalog did not publish after Raw was released");
-        assert_eq!(success_reply.as_ref().map(|reply| reply.status), Some(200));
+        assert!(!crate::session_catalog_page_ready(&fixture.options).unwrap());
+        drop(raw_writer);
+
+        view.wait_until_initial_catalog(Instant::now() + Duration::from_secs(10))
+            .unwrap();
+        let page = native_selected(&view, "lane");
+        let generation = page["identity"]["generation"].as_str().unwrap();
+        let query = format!("sid=lane&generation={generation}&scope=current");
+        let reply = ask("committed Home read", &view, "/api/session-home", &query);
+        assert_eq!(reply.status, 200);
+        let home = body_of(&reply);
+        assert_eq!(home["identity"]["catalog_key"], "lane");
+        assert_eq!(home["generation"], generation);
+        view.close();
     }
 
     /// A view whose check waits STALLED_AFTER (two seconds here) behind

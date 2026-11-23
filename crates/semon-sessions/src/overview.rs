@@ -43,6 +43,14 @@ pub(crate) struct Summary {
     source_generation: String,
 }
 impl Summary {
+    pub(crate) fn home_feed(home: Value) -> Self {
+        Self {
+            home,
+            activity: None,
+            source_generation: String::new(),
+        }
+    }
+
     pub(crate) fn query_recipe(&self, id: &str) -> Value {
         self.home["content"]["events"][id].clone()
     }
@@ -254,12 +262,12 @@ pub struct OverviewSource {
     pub options: Options,
     pub up: bool,
 }
-struct Saved {
-    id: String,
-    key: String,
-    source: String,
-    summary: Summary,
-    content_generation: String,
+pub(crate) struct Saved {
+    pub(crate) id: String,
+    pub(crate) key: String,
+    pub(crate) source: String,
+    pub(crate) summary: Summary,
+    pub(crate) content_generation: String,
 }
 fn failed(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
@@ -379,7 +387,13 @@ pub fn session_home_details_with_mode(
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
 ) -> ViewerReply {
-    session_home_details_inner(options, source_key, query, provider, mode, true)
+    crate::catalog::warehouse::http::home_with_mode(
+        &crate::catalog::warehouse::host_source(options, source_key),
+        query,
+        provider,
+        provider,
+        mode,
+    )
 }
 
 pub(crate) fn session_home_details_with_gate(
@@ -408,15 +422,26 @@ pub(crate) fn session_home_details_with_gate(
     )
 }
 
-struct SessionHomeSelection {
-    key: String,
-    expected: String,
-    ids: Vec<String>,
-    session_fields: Vec<String>,
-    turns: Vec<String>,
+pub(crate) struct SessionHomeSelection {
+    pub(crate) key: String,
+    pub(crate) expected: String,
+    pub(crate) ids: Vec<String>,
+    pub(crate) session_fields: Vec<String>,
+    pub(crate) turns: Vec<String>,
 }
 
 fn parse_session_home_selection(query: &str) -> io::Result<SessionHomeSelection> {
+    parse_session_home_scope(query, false).map(|(selection, _, _)| selection)
+}
+
+pub(crate) fn parse_session_home_scope(
+    query: &str,
+    allow_current: bool,
+) -> io::Result<(
+    SessionHomeSelection,
+    crate::CatalogReadScope,
+    Option<String>,
+)> {
     let args: Vec<_> = query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
@@ -448,9 +473,18 @@ fn parse_session_home_selection(query: &str) -> io::Result<SessionHomeSelection>
     let expected = value("generation").ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "Supply an overview generation")
     })?;
+    let scope = match value("scope").as_deref() {
+        Some("retained_history") => crate::CatalogReadScope::RetainedHistory,
+        Some("current") if allow_current => crate::CatalogReadScope::Current,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid Home detail scope",
+            ));
+        }
+    };
     if expected.len() != 64
         || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || value("scope").as_deref() != Some("retained_history")
         || args.iter().any(|(name, _)| {
             !matches!(
                 *name,
@@ -499,13 +533,17 @@ fn parse_session_home_selection(query: &str) -> io::Result<SessionHomeSelection>
             "Home detail selection exceeds its bound",
         ));
     }
-    Ok(SessionHomeSelection {
-        key,
-        expected,
-        ids,
-        session_fields,
-        turns,
-    })
+    Ok((
+        SessionHomeSelection {
+            key,
+            expected,
+            ids,
+            session_fields,
+            turns,
+        },
+        scope,
+        value("machine"),
+    ))
 }
 
 pub(crate) fn session_home_details_inner(
@@ -543,11 +581,15 @@ fn session_home_details_with_selection(
         turns,
     } = selection;
     let read = || -> io::Result<Value> {
-        let identity = crate::session_catalog_history_identity(options, source_key, &key)
-            .map_err(failed)?
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "Recorded session unavailable")
-            })?;
+        let identity = crate::catalog::catalog_identity(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            false,
+        )
+        .map_err(failed)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Recorded session unavailable"))?;
         let mut db = Connection::open_with_flags(
             EventCache::path(&options.cache),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -749,8 +791,14 @@ fn session_home_details_with_selection(
                 Ok(())
             },
         )?;
-        let after =
-            crate::session_catalog_history_identity(options, source_key, &key).map_err(failed)?;
+        let after = crate::catalog::catalog_identity(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            false,
+        )
+        .map_err(failed)?;
         if after
             .as_ref()
             .is_none_or(|after| after.generation != generation)
@@ -821,6 +869,26 @@ pub fn session_overview_reply(
     page: &str,
     query: &str,
     now: i64,
+) -> io::Result<ViewerReply> {
+    overview_reply(sources, page, query, now, page == "home")
+}
+
+#[cfg(test)]
+pub(crate) fn slot_overview_reply(
+    sources: &[OverviewSource],
+    page: &str,
+    query: &str,
+    now: i64,
+) -> io::Result<ViewerReply> {
+    overview_reply(sources, page, query, now, false)
+}
+
+fn overview_reply(
+    sources: &[OverviewSource],
+    page: &str,
+    query: &str,
+    now: i64,
+    warehouse_home: bool,
 ) -> io::Result<ViewerReply> {
     if !query.is_empty() && query.split('&').any(str::is_empty) {
         return Err(io::Error::new(
@@ -940,7 +1008,7 @@ pub fn session_overview_reply(
     let mut pending = Vec::new();
     let mut ordered: Vec<_> = sources.iter().collect();
     ordered.sort_by_key(|source| &source.key);
-    for source in &ordered {
+    for source in ordered.iter().filter(|_| !warehouse_home) {
         if pending.len() == 8 {
             break;
         }
@@ -956,7 +1024,7 @@ pub fn session_overview_reply(
             pending.push(json!({"source_key":source.key,"catalog_key":key}));
         }
     }
-    if pending.is_empty() && after.is_some() {
+    if !warehouse_home && pending.is_empty() && after.is_some() {
         for source in &ordered {
             if pending.len() == 8 {
                 break;
@@ -968,12 +1036,14 @@ pub fn session_overview_reply(
             }
         }
     }
+    let since = now.saturating_sub(analytics::KEEP_MS);
     for source in &sources {
-        match read(
-            source,
-            now.saturating_sub(analytics::KEEP_MS),
-            page == "analytics",
-        ) {
+        let observation = if warehouse_home {
+            crate::catalog::warehouse::home_feed::read(source, since)
+        } else {
+            read(source, since, page == "analytics")
+        };
+        match observation {
             Ok((rows, complete, generation)) => {
                 versions.push(json!([source.key, generation, source.up]));
                 records.extend(rows);
@@ -1157,6 +1227,16 @@ pub fn session_overview_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_overview_reply(
+        sources: &[OverviewSource],
+        page: &str,
+        query: &str,
+        now: i64,
+    ) -> io::Result<ViewerReply> {
+        overview_reply(sources, page, query, now, false)
+    }
+
     #[test]
     fn retained_activity_never_joins_old_arguments_to_a_new_observation() {
         let prior = json!({"name":"before","state":"work","activity":["Read","","1s",10],"content":{"activity":{"offset":42},"events":{"edge":{}}}});

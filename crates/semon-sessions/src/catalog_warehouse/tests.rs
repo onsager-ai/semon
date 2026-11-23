@@ -11,6 +11,32 @@ use std::{
     time::Duration,
 };
 
+fn read_list(
+    sources: &[Source<'_>],
+    workspace: &str,
+    request: &Request,
+    cursor: Option<&Continuation>,
+) -> Result<Page, ReadError> {
+    super::read_list(sources, workspace, request, cursor, sources.len() > 1)
+}
+
+fn semantic_transcript(
+    options: &Options,
+    source: &str,
+    query: &str,
+    reader: Option<&dyn crate::SessionSourceReader>,
+    mode: crate::SessionSourceReadMode,
+) -> crate::ViewerReply {
+    crate::transcript_range::session_transcript_range_with_gate(
+        options,
+        source,
+        query,
+        reader,
+        mode,
+        || Ok(()),
+    )
+}
+
 struct Fixture {
     dir: PathBuf,
     options: Options,
@@ -119,7 +145,9 @@ impl Fixture {
                 })
                 .collect(),
             repos: BTreeMap::new(),
+            mode: crate::SessionSourceReadMode::LocalThenProvider,
             current_provider: None,
+            focused: None,
         }
     }
 }
@@ -139,6 +167,33 @@ fn keys(page: &Page) -> Vec<(&str, &str)> {
         .iter()
         .map(|row| (row.position.key.as_str(), row.position.source.as_str()))
         .collect()
+}
+
+#[test]
+fn workspace_catalog_reports_a_cold_source_alongside_committed_rows() {
+    let mut warm = Fixture::new("workspace-warm");
+    let mut cold = Fixture::new("workspace-cold");
+    warm.claude("ready", "Committed title");
+    let mut sources = [
+        super::host_source(&warm.options, warm.namespace.as_str()),
+        super::host_source(&cold.options, cold.namespace.as_str()),
+    ];
+    sources[1].options.cache = cold.dir.join("unopened.json");
+    let reply = crate::session_catalog_union(&sources, "workspace", "limit=10");
+    let json: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{json}");
+    assert_eq!(json["coverage"]["committed"], 1);
+    assert_eq!(json["coverage"]["pending"], 1);
+    assert_eq!(json["completeness"]["state"], "partial");
+    assert_eq!(json["items"][0]["key"], "ready");
+
+    cold.claude("later", "Newly committed title");
+    sources[1].options.cache = cold.options.cache.clone();
+    let reply = crate::session_catalog_union(&sources, "workspace", "limit=10");
+    let json: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{json}");
+    assert_eq!(json["coverage"]["committed"], 2);
+    assert_eq!(json["coverage"]["pending"], 0);
 }
 
 #[test]
@@ -212,6 +267,12 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
     let copilot_id = "01234567-89ab-4cde-8123-456789abcdef";
     let copilot = fixture.copilot(copilot_id);
     let titleless = fixture.titleless_claude("titleless");
+    append_native(
+        &claude,
+        json!({"type":"assistant","uuid":"effort","sessionId":"same","effort":"high",
+        "perTurnEffort":" MAX ","timestamp":"2026-09-24T00:00:02Z",
+        "message":{"role":"assistant","content":[{"type":"text","text":"Response"}]}}),
+    );
     crate::model::observe_catalog(
         &fixture.options,
         &mut fixture.cache,
@@ -239,7 +300,7 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
         )
         .unwrap();
         let expected =
-            crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), query);
+            super::super::read_page(&fixture.options, &fixture.namespace, &request(query)).unwrap();
         assert_eq!(expected.status, 200, "{query}");
         let body: serde_json::Value = serde_json::from_slice(&expected.body).unwrap();
         let oracle: Vec<_> = body["items"]
@@ -255,6 +316,7 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
                     row["repo"].as_str(),
                     row["branch"].as_str(),
                     row["parent"].as_str(),
+                    row["effort"].as_str(),
                 )
             })
             .collect();
@@ -270,10 +332,35 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
                     row.repo.as_deref(),
                     row.branch.as_deref(),
                     row.parent.as_deref(),
+                    row.effort.as_deref(),
                 )
             })
             .collect();
         assert_eq!(observed, oracle, "{query}");
+    }
+    let focused = Source::focused(
+        fixture.namespace.clone(),
+        &fixture.db,
+        &fixture.options,
+        None,
+    )
+    .unwrap();
+    for (harness, native, key) in [
+        ("claude", "same", ":claude:same"),
+        ("claude", "claude:same", "claude:same"),
+        ("codex", "same", "codex:same"),
+        ("copilot", copilot_id, copilot_id),
+    ] {
+        let aliases = resolve_native(&focused, CatalogReadScope::Current, harness, native).unwrap();
+        let resolved = focused_identity(&focused, CatalogReadScope::Current, key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(aliases.as_slice(), std::slice::from_ref(&resolved));
+        assert_eq!(resolved.native_id.as_deref(), Some(native));
+        assert_eq!(resolved.harness, harness);
+        assert_eq!(resolved.source_refs.len(), 1);
+        assert_eq!(resolved.source_refs[0].source.native_id, native);
+        assert_eq!(resolved.generation.len(), 64);
     }
     for key in [":claude:same", "claude:same", "codex:same", copilot_id] {
         let expected =
@@ -355,8 +442,32 @@ fn warehouse_actual_reader_plans_use_indexed_exact_probes_and_local_usage() {
         !detail.contains("CORRELATED SCALAR SUBQUERY") && !detail.contains("SCAN fact_record"),
         "{detail}"
     );
-    let parents = plan(&db, PARENTS, ["[1]", "[]"]);
-    assert!(!parents.contains("CORRELATED SCALAR SUBQUERY"), "{parents}");
+    let parents = plan(
+        &db,
+        include_str!("../events/store/warehouse_parent_offer.sql"),
+        params![1, false],
+    );
+    let children = plan(
+        &db,
+        include_str!("../events/store/warehouse_parent_children.sql"),
+        [1],
+    );
+    assert!(
+        parents.contains("claude_call_identity") && parents.contains("process_capture_pid"),
+        "{parents}"
+    );
+    assert!(
+        children.contains("session_parent_name") && children.contains("agent_storage_parent"),
+        "{children}"
+    );
+    for query in [&parents, &children] {
+        assert!(
+            !query
+                .lines()
+                .any(|line| matches!(line, "SCAN m" | "SCAN g" | "SCAN active" | "SCAN carrier")),
+            "{query}"
+        );
+    }
 }
 
 #[test]
@@ -381,6 +492,108 @@ fn warehouse_search_resumes_at_the_first_unexamined_candidate() {
     assert_eq!(second.rows.len(), 1);
     assert_eq!(second.rows[0].title, "Needle");
     assert!(second.next.is_none());
+}
+
+#[test]
+fn warehouse_list_transport_uses_committed_index_while_publication_is_absent() {
+    let mut fixture = Fixture::new("warehouse-list-transport");
+    fixture.claude("first", "First title");
+    fixture.claude("second", "Second title");
+    let db = Connection::open(&fixture.db).unwrap();
+    let semantic_rows: i64 = db
+        .query_row("SELECT count(*) FROM session_catalog", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(semantic_rows, 0);
+    let configured = [crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    }];
+    let get = |query| {
+        let reply = http::list(&configured, "fixture", query, false);
+        (
+            reply.status,
+            serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap(),
+        )
+    };
+    let (status, first) = get("limit=1");
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["coverage"]["committed"], 2);
+    assert_eq!(first["items"][0]["key"], "first");
+    assert_eq!(
+        first["items"][0]["source_refs"][0]["source"]["native_id"],
+        "first"
+    );
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let query = crate::native_html::query(&[("limit", "1"), ("cursor", cursor)]);
+    let (status, second) = get(&query);
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second["items"][0]["key"], "second");
+    assert!(second["next_cursor"].is_null());
+    fixture.claude("third", "Third title");
+    let (status, stale) = get(&query);
+    assert_eq!(status, 409, "{stale}");
+    assert_eq!(stale["error"]["code"], "stale_cursor");
+}
+
+#[test]
+fn warehouse_list_transport_reads_one_commit_while_ingestion_advances() {
+    use std::sync::mpsc::sync_channel;
+
+    let mut fixture = Fixture::new("list-transport-concurrent");
+    fixture.claude("first", "First title");
+    let pending = fixture
+        .options
+        .claude_home
+        .join("projects/proj/second.jsonl");
+    fs::write(
+        &pending,
+        format!("{}\n", prompt("second", 1, "Second title")),
+    )
+    .unwrap();
+    let configured = [crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    }];
+    let (opened, snapshot) = sync_channel(0);
+    let (committed, continue_read) = sync_channel(0);
+    let old = std::thread::scope(|scope| {
+        let configured = &configured;
+        let reader = scope.spawn(move || {
+            AFTER_LIST_SNAPSHOT.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    opened.send(()).unwrap();
+                    continue_read.recv_timeout(Duration::from_secs(5)).unwrap();
+                }));
+            });
+            http::list(configured, "fixture", "limit=10", false)
+        });
+        snapshot.recv_timeout(Duration::from_secs(5)).unwrap();
+        scan_file(&pending, "claude", &mut fixture.cache, &mut false).unwrap();
+        committed.send(()).unwrap();
+        reader.join().unwrap()
+    });
+    let first: serde_json::Value = serde_json::from_slice(&old.body).unwrap();
+    assert_eq!(old.status, 200, "{first}");
+    assert_eq!(first["total"], 1);
+    assert_eq!(
+        first["coverage"],
+        json!({"committed":1,"pending":1,"unavailable":0})
+    );
+    assert_eq!(first["items"][0]["key"], "first");
+    let fresh = http::list(&configured, "fixture", "limit=10", false);
+    let second: serde_json::Value = serde_json::from_slice(&fresh.body).unwrap();
+    assert_eq!(fresh.status, 200, "{second}");
+    assert_eq!(second["total"], 2);
+    assert_eq!(
+        second["coverage"],
+        json!({"committed":2,"pending":0,"unavailable":0})
+    );
+    assert_eq!(second["items"][0]["key"], "second");
 }
 
 #[test]
@@ -479,6 +692,309 @@ fn selected_page(
 }
 
 #[test]
+fn warehouse_focused_reads_require_only_the_selected_committed_component() {
+    let mut fixture = Fixture::new("focused-authority");
+    let path = fixture.claude("selected", "Selected prompt");
+    let unrelated = fixture.claude("unrelated", "Unrelated prompt");
+    fs::remove_file(unrelated).unwrap();
+    let source = Source::focused(
+        fixture.namespace.clone(),
+        &fixture.db,
+        &fixture.options,
+        None,
+    )
+    .unwrap();
+    assert!(source.inventory.is_empty());
+    let identity = identity(&source, CatalogReadScope::Current, "selected")
+        .unwrap()
+        .unwrap();
+    assert_eq!(identity.2, "selected");
+    let page = selected::latest_page(&fixture.options, &source, "selected", 10, None)
+        .unwrap()
+        .unwrap();
+    let prompts = page
+        .records
+        .iter()
+        .filter_map(selected::Record::text)
+        .collect::<Vec<_>>();
+    assert_eq!(prompts, ["Selected prompt"]);
+    let replacement = path.with_extension("replacement");
+    fs::write(&replacement, fs::read(&path).unwrap()).unwrap();
+    fs::rename(replacement, path).unwrap();
+    assert!(
+        super::identity(&source, CatalogReadScope::Current, "selected")
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        selected::latest_page(&fixture.options, &source, "selected", 10, None),
+        Err(ReadError::Restart)
+    ));
+}
+
+#[test]
+fn warehouse_latest_window_pages_earlier_with_the_same_committed_prefix() {
+    let mut fixture = Fixture::new("latest-window");
+    let path = fixture.claude("native", "Oldest prompt");
+    for second in 1..=4 {
+        append_native(&path, prompt("native", second, &format!("Prompt {second}")));
+    }
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let text = |page: selected::Component| {
+        page.records
+            .iter()
+            .filter_map(selected::Record::text)
+            .collect::<Vec<_>>()
+    };
+    let latest = |fixture: &Fixture, cursor: Option<&selected::Cursor>| {
+        selected::latest_page(
+            &fixture.options,
+            &fixture.source(&[&path]),
+            "native",
+            2,
+            cursor,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let mut tail = latest(&fixture, None);
+    let tail_cursor = tail.next.take().unwrap();
+    assert_eq!(text(tail), ["Prompt 3", "Prompt 4"]);
+    append_native(&path, prompt("native", 5, "Newly committed"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    assert_eq!(
+        text(latest(&fixture, Some(&tail_cursor))),
+        ["Prompt 1", "Prompt 2"]
+    );
+    assert_eq!(
+        text(latest(&fixture, None)),
+        ["Prompt 4", "Newly committed"]
+    );
+    assert!(matches!(
+        selected_page(&fixture, &[&path], "native", 2, Some(&tail_cursor)),
+        Err(ReadError::Restart)
+    ));
+}
+
+#[test]
+fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_across_appends() {
+    let mut fixture = Fixture::new("transcript-transport");
+    let path = fixture.claude("native", "Oldest prompt");
+    for second in 1..=4 {
+        append_native(&path, prompt("native", second, &format!("Prompt {second}")));
+    }
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let read = |parameters: &[(&str, &str)]| {
+        let query = crate::native_html::query(parameters);
+        let reply = http::transcript(&configured, &query, None, None);
+        (
+            reply.status,
+            serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap(),
+        )
+    };
+    let latest = || {
+        let (status, page) = read(&[("sid", "native"), ("limit", "2")]);
+        assert_eq!(status, 200, "{page}");
+        page
+    };
+    let tail = latest();
+    assert_eq!(tail["projection"], 7);
+    let exact = http::identity(&configured, "sid=native");
+    assert_eq!(exact.status, 200);
+    let exact: serde_json::Value = serde_json::from_slice(&exact.body).unwrap();
+    assert_eq!(
+        tail["identity"]["generation"],
+        exact["identity"]["generation"]
+    );
+    assert_eq!(tail["entries"][0]["text"], "Prompt 3");
+    assert_eq!(tail["entries"][1]["text"], "Prompt 4");
+    assert!(tail["entries"][1].get("slot").is_none());
+    let address = tail["entries"][1]["address"].to_string();
+    let turn = tail["entries"][1]["turn"].as_str().unwrap();
+    let anchor = http::anchor(
+        &configured,
+        &crate::native_html::query(&[("sid", "native"), ("turn", turn)]),
+        None,
+        None,
+    );
+    let body: serde_json::Value = serde_json::from_slice(&anchor.body).unwrap();
+    assert_eq!(anchor.status, 200, "{body}");
+    assert_eq!(body["address"], tail["entries"][1]["address"]);
+
+    for second in 5..=7 {
+        append_native(&path, prompt("native", second, &format!("Prompt {second}")));
+        assert_eq!(
+            latest()["entries"][1]["text"],
+            format!("Prompt {}", second - 1)
+        );
+        scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+        assert_eq!(latest()["entries"][1]["text"], format!("Prompt {second}"));
+    }
+    let (status, earlier) = read(&[
+        ("sid", "native"),
+        ("limit", "2"),
+        ("cursor", tail["earlier_cursor"].as_str().unwrap()),
+    ]);
+    assert_eq!(status, 200, "{earlier}");
+    assert_eq!(earlier["position"], "earlier");
+    assert!(tail["session"].is_object());
+    assert!(earlier["session"].is_null());
+    assert_eq!(earlier["entries"][0]["text"], "Prompt 1");
+    assert_eq!(earlier["entries"][1]["text"], "Prompt 2");
+    let (status, exact) = read(&[("sid", "native"), ("address", &address)]);
+    assert_eq!(status, 200, "{exact}");
+    assert_eq!(exact["position"], "address");
+    assert_eq!(
+        exact["entries"][0]["entry_id"],
+        tail["entries"][1]["entry_id"]
+    );
+
+    let mut text = "π🗺".repeat(25_000);
+    text.push_str(" end");
+    let image = b"\x89PNG\r\n\x1a\nexample";
+    let mut record = prompt("native", 8, &text);
+    record["message"]["content"] = json!([
+        {"type":"text","text":text},
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(image)}},
+    ]);
+    append_native(&path, record);
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let page = latest();
+    let long = &page["entries"][1];
+    let chunks = long["field"]["chunks"].as_u64().unwrap();
+    assert!(chunks > 1);
+    assert!(long.get("img").is_some());
+    let long_address = long["address"].to_string();
+    let expand = |arguments: &[(&str, &str)]| {
+        let mut params = vec![("sid", "native"), ("address", long_address.as_str())];
+        params.extend_from_slice(arguments);
+        http::entry(&configured, &crate::native_html::query(&params), None, None)
+    };
+    let mut reconstructed = String::new();
+    for chunk in 0..chunks {
+        let reply = expand(&[("field_chunk", &chunk.to_string())]);
+        let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200, "{value}");
+        reconstructed.push_str(value["entry"]["text"].as_str().unwrap());
+    }
+    assert_eq!(reconstructed, text);
+    let attachment = expand(&[("part", "attachment"), ("image", "0")]);
+    assert_eq!(attachment.status, 200);
+    assert_eq!(attachment.content_type, "image/png");
+    assert_eq!(attachment.body, image);
+
+    let mut oversized_image = image.to_vec();
+    oversized_image.resize(1024 * 1024, 0);
+    let long_text = "x".repeat(768 * 1024 + 1) + "verified tail";
+    let mut mixed = prompt("native", 9, &long_text);
+    mixed["message"]["content"] = json!([
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(&oversized_image)}},
+        {"type":"text","text":long_text},
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(image)}},
+    ]);
+    append_native(&path, mixed);
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let page = latest();
+    let mixed = &page["entries"][1];
+    assert_eq!(mixed["img"].as_array().unwrap().len(), 2);
+    let last_chunk = (mixed["field"]["chunks"].as_u64().unwrap() - 1).to_string();
+    let mixed_address = mixed["address"].to_string();
+    let expand_mixed = |arguments: &[(&str, &str)]| {
+        let mut params = vec![("sid", "native"), ("address", mixed_address.as_str())];
+        params.extend_from_slice(arguments);
+        http::entry(&configured, &crate::native_html::query(&params), None, None)
+    };
+    let last = expand_mixed(&[("field_chunk", &last_chunk)]);
+    let value: serde_json::Value = serde_json::from_slice(&last.body).unwrap();
+    assert_eq!(last.status, 200, "{value}");
+    assert_eq!(value["entry"]["text"], "xverified tail");
+    for (index, expected) in [("0", oversized_image.as_slice()), ("1", image.as_slice())] {
+        let attachment = expand_mixed(&[("part", "attachment"), ("image", index)]);
+        assert_eq!(attachment.status, 200);
+        assert_eq!(attachment.content_type, "image/png");
+        assert_eq!(attachment.body.as_slice(), expected);
+    }
+
+    let replacement = path.with_extension("replacement");
+    fs::write(
+        &replacement,
+        format!("{}\n", prompt("native", 0, "Replacement")),
+    )
+    .unwrap();
+    fs::rename(replacement, &path).unwrap();
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    assert_eq!(read(&[("sid", "native"), ("address", &address)]).0, 409);
+}
+
+#[test]
+fn warehouse_failed_tool_marker_opens_the_rendered_entry() {
+    let mut fixture = Fixture::new("native-failure-marker");
+    let path = fixture.claude("native", "Original prompt");
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"call","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Checking the result"},
+            {"type":"tool_use","id":"command","name":"Bash","input":{"command":"pwd"}}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"reply","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"command","content":"failure","is_error":true}
+        ]}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let parse = |reply: crate::viewer::ViewerReply| {
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200, "{body}");
+        body
+    };
+    let page = parse(http::transcript(&configured, "sid=native", None, None));
+    let tool = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["k"] == "tool")
+        .unwrap();
+    assert_eq!(tool["ok"], false);
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("kind", "errors"),
+        ("generation", page["errors_generation"].as_str().unwrap()),
+    ]);
+    let markers = parse(http::annotations(&configured, &query, None, None));
+    assert_eq!(markers["total"], 1);
+    assert_eq!(markers["entries"][0]["address"], tool["address"]);
+    let address = markers["entries"][0]["address"].to_string();
+    let query = crate::native_html::query(&[("sid", "native"), ("address", &address)]);
+    let exact = parse(http::transcript(&configured, &query, None, None));
+    assert!(
+        exact["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == tool["address"])
+    );
+}
+
+#[test]
 fn warehouse_component_cursor_pages_members_and_pins_unvisited_prefixes() {
     let mut fixture = Fixture::new("component-cursor");
     let mut paths = Vec::new();
@@ -528,7 +1044,7 @@ fn warehouse_component_cursor_pages_members_and_pins_unvisited_prefixes() {
     let path = paths[1].clone();
     let cache = fixture.options.cache.clone();
     selected::AFTER_BODY.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
             append_native(&path, prompt("member-01", 72, "during body fetch"));
             let mut cache = EventCache::open_scoped(&cache).unwrap();
             scan_file(&path, "claude", &mut cache, &mut false).unwrap();
@@ -789,7 +1305,7 @@ fn warehouse_component_refuses_rewrites_replacements_and_truncation() {
             "during-body" => {
                 let path = path.clone();
                 selected::AFTER_BODY.with(|hook| {
-                    *hook.borrow_mut() = Some(Box::new(move || {
+                    *hook.borrow_mut() = Some(Box::new(move |_| {
                         let raw = fs::read_to_string(&path).unwrap();
                         fs::write(&path, raw.replace("Original", "Modified")).unwrap();
                         append_native(&path, prompt("native", 3, "unqualified growth"));
@@ -898,7 +1414,7 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             assert!(actual.model.is_none());
         }
         let mode = crate::SessionSourceReadMode::LocalOrPinnedProvider;
-        let oracle = crate::session_transcript_range_with_mode(
+        let oracle = semantic_transcript(
             &fixture.options,
             fixture.namespace.as_str(),
             &format!("sid={key}&after=0&limit=100"),
@@ -944,7 +1460,7 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             )
             .unwrap()
             .unwrap();
-            let reply = crate::session_entry_field_with_mode(
+            let reply = crate::transcript_range::session_entry_field_with_gate(
                 &fixture.options,
                 fixture.namespace.as_str(),
                 &format!(
@@ -954,6 +1470,7 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
                 ),
                 None,
                 mode,
+                || Ok(()),
             );
             assert_eq!(
                 reply.status,
@@ -965,10 +1482,11 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             assert_eq!(field["text"].as_str(), expanded.text().as_deref());
         }
         let turn = expected[0]["turn"].as_str().unwrap();
-        let reply = crate::session_turn_anchor(
+        let reply = crate::transcript_range::session_turn_anchor_with_gate(
             &fixture.options,
             fixture.namespace.as_str(),
             &format!("sid={key}&turn={}", crate::viewer::percent_encode(turn)),
+            || Ok(()),
         );
         assert_eq!(reply.status, 200);
         let anchor: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
@@ -1010,6 +1528,12 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         "usage":{"input_tokens":100,"output_tokens":10}}}),
     );
     let codex = fixture.codex("codex-native");
+    let turn_offset = fs::metadata(&codex).unwrap().len();
+    append_native(
+        &codex,
+        json!({"type":"event_msg","timestamp":"2026-09-24T00:00:00Z",
+        "payload":{"type":"task_started","turn_id":"owned-turn"}}),
+    );
     let call = fs::metadata(&codex).unwrap().len();
     append_native(
         &codex,
@@ -1051,12 +1575,13 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         id: ActivityStepId::Claude("activity-message".into()),
     };
     let source = fixture.source(&[&claude, &codex]);
-    let found = selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+    let component = selected::activity_anchor(&source, "native", &anchor)
         .unwrap()
         .unwrap();
+    let found = &component.records[0];
     assert_eq!(found.text().as_deref(), Some("Review complete"));
     let oracle = |key| {
-        let reply = crate::session_transcript_range_with_mode(
+        let reply = semantic_transcript(
             &fixture.options,
             fixture.namespace.as_str(),
             &format!("sid={key}&after=0&limit=100"),
@@ -1076,14 +1601,14 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
     assert_eq!(found.entry_anchor.as_deref(), entry["entry_id"].as_str());
     anchor.ordinal = 1;
     assert!(
-        selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+        selected::activity_anchor(&source, "native", &anchor)
             .unwrap()
             .is_none()
     );
     anchor.ordinal = 0;
     anchor.generation.push_str("-stale");
     assert!(
-        selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+        selected::activity_anchor(&source, "native", &anchor)
             .unwrap()
             .is_none()
     );
@@ -1096,7 +1621,17 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         .iter()
         .find(|record| record.address.offset == operation)
         .unwrap();
-    assert_eq!(found.operation_parent, Some(call));
+    assert_eq!(found.operation.unwrap().parent, call);
+    let (row, _) = focused_metadata(&source, "codex-native").unwrap().unwrap();
+    let details = row.details.unwrap();
+    assert_eq!(details["calls"], 1);
+    assert_eq!(details["errors"], 1);
+    assert_eq!(details["tool_calls"], json!({"exec_command":1}));
+    let lifecycle = &details["turn_lifecycle"];
+    assert_eq!(lifecycle["phase"], "active");
+    assert_eq!(lifecycle["turn_id"], "owned-turn");
+    assert_eq!(lifecycle["offset"], turn_offset);
+    assert_eq!(lifecycle["source_generation"].as_str().unwrap().len(), 64);
     let transcript = oracle("codex-native");
     let entry = transcript["entries"]
         .as_array()
@@ -1105,6 +1640,101 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         .find(|entry| entry["script"] == call)
         .unwrap();
     assert_eq!(found.entry_anchor.as_deref(), entry["entry_id"].as_str());
+
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let body = |reply: crate::viewer::ViewerReply| {
+        let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200, "{value}");
+        value
+    };
+    let page = body(http::transcript(&configured, "sid=native", None, None));
+    let turn = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "Review this")
+        .unwrap()["turn"]
+        .as_str()
+        .unwrap();
+    let home_query = |generation: &str| {
+        crate::native_html::query(&[
+            ("sid", "native"),
+            ("scope", "current"),
+            ("generation", generation),
+            ("session_fields", "[\"detail\"]"),
+            ("turns", &json!([turn]).to_string()),
+        ])
+    };
+    let generation = page["identity"]["generation"].as_str().unwrap();
+    let home = body(http::home(&configured, &home_query(generation), None, None));
+    assert_eq!(home["turns"][turn], "Review this");
+    assert_eq!(home["session"]["detail"], "Review this");
+    assert_eq!(home["session"]["detail_from"], "you");
+    assert_eq!(home["incomplete"], false);
+    assert_eq!(
+        http::home(&configured, &home_query(&"0".repeat(64)), None, None).status,
+        409
+    );
+    let usage_entry = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "Review complete")
+        .unwrap();
+    let activity = |generation: &str| {
+        let step = json!(anchor.id).to_string();
+        let query = crate::native_html::query(&[
+            ("sid", "native"),
+            ("generation", generation),
+            ("ordinal", "0"),
+            ("step", &step),
+        ]);
+        body(http::activity_anchor(&configured, &query, None, None))
+    };
+    assert_eq!(activity(&anchor.generation)["available"], false);
+    let generation = anchor.generation.strip_suffix("-stale").unwrap();
+    let evidence = activity(generation);
+    assert_eq!(evidence["available"], true);
+    assert_eq!(evidence["address"], usage_entry["address"]);
+
+    let page = body(http::transcript(
+        &configured,
+        "sid=codex-native",
+        None,
+        None,
+    ));
+    let operation = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["script"] == call)
+        .unwrap();
+    assert_eq!(operation["ok"], false);
+    assert_eq!(operation["entry_id"], entry["entry_id"]);
+    let markers = body(http::annotations(
+        &configured,
+        "sid=codex-native&kind=errors",
+        None,
+        None,
+    ));
+    assert_eq!(markers["total"], 1);
+    assert_eq!(markers["entries"][0]["address"], operation["address"]);
+    let address = operation["address"].to_string();
+    let query = crate::native_html::query(&[
+        ("sid", "codex-native"),
+        ("address", &address),
+        ("part", "script"),
+    ]);
+    let script = body(http::entry(&configured, &query, None, None));
+    assert_eq!(
+        script["entry"]["scriptText"],
+        "tools.exec_command({cmd:'false'})"
+    );
 }
 
 #[test]
@@ -1281,6 +1911,23 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
         "qualified result"
     );
     assert_eq!(fresh.causal.calls[0].replies.len(), 1);
+    let latest = selected::latest_page(&fixture.options, &source, "native", 10, None)
+        .unwrap()
+        .unwrap();
+    let rendered = selected::render::entries(
+        &latest,
+        fixture.namespace.as_str(),
+        "native",
+        crate::model::now_ms(),
+    );
+    let tool = rendered
+        .iter()
+        .find(|entry| entry["name"] == "SendMessage")
+        .unwrap();
+    assert_eq!(tool["address"]["record"], json!(call));
+    assert_eq!(tool["ok"], true);
+    assert!(tool.to_string().contains("qualified result"));
+
     assert_eq!(fresh.causal.turn, previously_committed.causal.turn);
     assert!(fresh.causal.turn.is_some());
     let latest = selected::tool_results(&fixture.options, &source, "native", &call, None)
@@ -1326,7 +1973,7 @@ fn warehouse_relay_turn_carries_across_pages_at_the_selected_prefix() {
         crate::model::now_ms(),
     )
     .unwrap();
-    let oracle = crate::session_transcript_range_with_mode(
+    let oracle = semantic_transcript(
         &fixture.options,
         fixture.namespace.as_str(),
         "sid=receiver&after=0&limit=100",
@@ -1357,6 +2004,46 @@ fn warehouse_relay_turn_carries_across_pages_at_the_selected_prefix() {
     let turn = page.records[0].causal.turn.as_ref().unwrap();
     assert_eq!(turn.address, relay.address);
     assert_eq!(Some(turn.id.as_str()), reply["turn"].as_str());
+}
+
+struct RelayFixtureProvider(BTreeMap<String, Vec<u8>>);
+impl crate::SessionSourceReader for RelayFixtureProvider {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> std::io::Result<crate::SessionSourceRange> {
+        use std::io::ErrorKind::PermissionDenied;
+        let bytes = self.0.get(&source.path).ok_or(PermissionDenied)?;
+        let prefix = bytes
+            .get(..source.offset as usize)
+            .ok_or(PermissionDenied)?;
+        let generation = format!("fixture-{}-{}", source.native_id, source.offset);
+        let expected_root = if source.path.starts_with("projects/") {
+            "claude"
+        } else {
+            "codex"
+        };
+        if source.root != expected_root
+            || <[u8; 32]>::from(Sha256::digest(prefix)) != source.prefix_sha256
+            || expected.is_some_and(|expected| expected != generation)
+        {
+            return Err(PermissionDenied.into());
+        }
+        let start = offset as usize;
+        let part = prefix
+            .get(start..start + max.min(32))
+            .ok_or(PermissionDenied)?;
+        Ok(crate::SessionSourceRange {
+            generation,
+            length: source.offset,
+            offset,
+            bytes: part.into(),
+            cached: false,
+        })
+    }
 }
 
 #[test]
@@ -1429,41 +2116,7 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
         call_addresses.push(call.address);
     }
 
-    struct Provider(BTreeMap<String, Vec<u8>>);
-    impl crate::SessionSourceReader for Provider {
-        fn read_range(
-            &self,
-            source: &crate::SessionSourceRef,
-            expected: Option<&str>,
-            offset: u64,
-            max: usize,
-        ) -> std::io::Result<crate::SessionSourceRange> {
-            use std::io::ErrorKind::PermissionDenied;
-            let bytes = self.0.get(&source.path).ok_or(PermissionDenied)?;
-            let prefix = bytes
-                .get(..source.offset as usize)
-                .ok_or(PermissionDenied)?;
-            let generation = format!("fixture-{}-{}", source.native_id, source.offset);
-            if source.root != "claude"
-                || <[u8; 32]>::from(Sha256::digest(prefix)) != source.prefix_sha256
-                || expected.is_some_and(|expected| expected != generation)
-            {
-                return Err(PermissionDenied.into());
-            }
-            let start = offset as usize;
-            let part = prefix
-                .get(start..start + max.min(32))
-                .ok_or(PermissionDenied)?;
-            Ok(crate::SessionSourceRange {
-                generation,
-                length: source.offset,
-                offset,
-                bytes: part.into(),
-                cached: false,
-            })
-        }
-    }
-    let provider = Provider(BTreeMap::from([
+    let provider = RelayFixtureProvider(BTreeMap::from([
         ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
         (
             "projects/proj/root/subagents/agent-worker.jsonl".into(),
@@ -1488,8 +2141,250 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
 }
 
 #[test]
-fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
-    let mut fixture = Fixture::new("legacy-relay-detail");
+fn warehouse_trace_follows_a_send_from_a_continuation_and_a_peer_reply() {
+    let mut fixture = Fixture::new("trace-cross-member-relay");
+    let original = fixture.claude("original", "Begin work");
+    let resumed = original.with_file_name("resumed.jsonl");
+    let mut copied: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(&original)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    copied["sessionId"] = json!("resumed");
+    fs::write(&resumed, format!("{copied}\n")).unwrap();
+    append_native(
+        &original,
+        json!({"type":"continued-in","sessionId":"original",
+        "continuedInSessionId":"resumed","timestamp":"2026-09-24T00:00:01Z"}),
+    );
+    let peer = fixture.claude("peer", "Peer prompt");
+    let last = fixture.claude("last", "Last prompt");
+    let append_relay = |sender: &Path, native, receiver: &Path, target, correlation, at: usize| {
+        append_native(
+            sender,
+            json!({"type":"assistant","uuid":correlation,"sessionId":native,
+            "timestamp":format!("2026-09-24T00:00:{at:02}Z"),"message":{"role":"assistant","content":[
+                {"type":"tool_use","id":correlation,"name":"SendMessage","input":{"to":target,"message":"hello"}}
+            ]}}),
+        );
+        append_native(
+            sender,
+            json!({"type":"user","sessionId":native,
+            "timestamp":format!("2026-09-24T00:00:{:02}Z",at+1),"toolUseResult":{"success":true,"msg_id":correlation},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":correlation,"content":"sent"}]}}),
+        );
+        append_native(
+            receiver,
+            json!({"type":"user","sessionId":target,
+            "timestamp":format!("2026-09-24T00:00:{:02}Z",at+2),"origin":{"kind":"peer",
+                "from":"uds:/run/user/1000/cc-socks/111.sock","name":native,"fromMode":"prompting",
+                "msg_id":correlation,"body":"hello","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+            "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\">hello</cross-session-message>"}}),
+        );
+    };
+    append_relay(&resumed, "resumed", &peer, "peer", "delivery-one", 2);
+    append_relay(&peer, "peer", &last, "last", "delivery-two", 5);
+    append_native(
+        &last,
+        json!({"type":"assistant","uuid":"last-reply","sessionId":"last",
+        "timestamp":"2026-09-24T00:00:08Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Finished"}
+        ]}}),
+    );
+    let paths = [
+        original.as_path(),
+        resumed.as_path(),
+        peer.as_path(),
+        last.as_path(),
+    ];
+    for path in paths {
+        scan_file(path, "claude", &mut fixture.cache, &mut false).unwrap();
+    }
+    let component = selected_page(&fixture, &paths, "original", 20, None)
+        .unwrap()
+        .unwrap();
+    let record = component
+        .records
+        .iter()
+        .find(|record| record.text().as_deref() == Some("Begin work"))
+        .unwrap();
+    let turn = &record.causal.turn.as_ref().unwrap().id;
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let query = crate::native_html::query(&[("sid", "original"), ("turn", turn)]);
+    let reply = http::trace(&configured, &query, None, None);
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    assert!(
+        trace["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["from"] == "original"
+                && edge["to"] == "peer"
+                && edge["status"] == "done"),
+        "{trace}"
+    );
+    assert!(
+        trace["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["from"] == "peer" && edge["to"] == "last" && edge["status"] == "done"),
+        "{trace}"
+    );
+    let turns = trace["turns"].as_array().unwrap();
+    assert_eq!(turns[0]["last"], true, "{trace}");
+    let receiving = turns.iter().find(|turn| turn["sid"] == "last").unwrap();
+    assert_eq!(receiving["last"], true, "{trace}");
+    assert_eq!(receiving["end"]["why"], "replied", "{trace}");
+}
+
+#[test]
+fn warehouse_trace_codex_end_belongs_to_selected_turn() {
+    let mut fixture = Fixture::new("trace-codex-end");
+    let path = fixture.codex("trace-codex");
+    for (second, kind, id) in [
+        (1, "task_started", "first"),
+        (3, "task_complete", "first"),
+        (4, "task_started", "second"),
+        (6, "turn_aborted", "second"),
+    ] {
+        append_native(
+            &path,
+            json!({"type":"event_msg","timestamp":format!("2026-09-24T00:00:{second:02}Z"),
+            "payload":{"type":kind,"turn_id":id,"reason":"interrupted"}}),
+        );
+        if kind == "task_started" {
+            append_native(
+                &path,
+                json!({"type":"response_item","timestamp":format!("2026-09-24T00:00:{:02}Z", second + 1),
+                "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":id}]}}),
+            );
+        }
+    }
+    scan_file(&path, "codex", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let component = selected_page(&fixture, &[&path], "trace-codex", 20, None)
+        .unwrap()
+        .unwrap();
+    for (prompt, expected, last) in [
+        ("first", "completed", false),
+        ("second", "interrupted", true),
+    ] {
+        let record = component
+            .records
+            .iter()
+            .find(|record| record.text().as_deref() == Some(prompt))
+            .unwrap();
+        let turn = &record.causal.turn.as_ref().unwrap().id;
+        let query = crate::native_html::query(&[("sid", "trace-codex"), ("turn", turn)]);
+        let response = http::trace(&configured, &query, None, None);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.status, 200, "{body}");
+        assert_eq!(body["turns"][0]["end"]["why"], expected, "{body}");
+        assert_eq!(body["turns"][0]["last"], last);
+    }
+}
+
+#[test]
+fn warehouse_trace_copilot_pairs_the_terminal_and_prioritizes_abort() {
+    let mut fixture = Fixture::new("trace-copilot-end");
+    let key = "01234567-89ab-4cde-8123-456789abcdef";
+    let path = fixture.copilot(key);
+    let event = |second: u32, kind, data| {
+        append_native(
+            &path,
+            json!({"type":kind,"id":format!("event-{second}"),
+                "timestamp":format!("2026-09-24T00:00:{second:02}Z"),"data":data}),
+        );
+    };
+    // Copilot 1.0.90 cancellation records omit turnId on abort. The surrounding
+    // native start and end records must establish its owner.
+    event(
+        1,
+        "user.message",
+        json!({"content":"First","messageId":"prompt-1","turnId":"0","interactionId":"one"}),
+    );
+    event(
+        2,
+        "assistant.turn_start",
+        json!({"turnId":"0","interactionId":"one"}),
+    );
+    event(
+        3,
+        "assistant.message",
+        json!({"content":"Partial","turnId":"0","originatingMessageId":"prompt-1"}),
+    );
+    event(4, "abort", json!({"reason":"user"}));
+    event(5, "assistant.turn_end", json!({"turnId":"0"}));
+    event(
+        6,
+        "user.message",
+        json!({"content":"Second","messageId":"prompt-2","turnId":"1","interactionId":"two"}),
+    );
+    event(
+        7,
+        "assistant.turn_start",
+        json!({"turnId":"1","interactionId":"two"}),
+    );
+    event(
+        8,
+        "assistant.message",
+        json!({"content":"Second answer","turnId":"1","originatingMessageId":"prompt-2"}),
+    );
+    event(9, "assistant.turn_end", json!({"turnId":"0"}));
+    scan_file(&path, "copilot", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let component = selected_page(&fixture, &[&path], key, 20, None)
+        .unwrap()
+        .unwrap();
+    let read = |prompt| {
+        let record = component
+            .records
+            .iter()
+            .find(|record| record.text().as_deref() == Some(prompt))
+            .unwrap();
+        let turn = &record.causal.turn.as_ref().unwrap().id;
+        let query = crate::native_html::query(&[("sid", key), ("turn", turn)]);
+        let response = http::trace(&configured, &query, None, None);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.status, 200, "{body}");
+        body
+    };
+    let interrupted = read("First");
+    assert_eq!(interrupted["turns"][0]["end"]["why"], "interrupted");
+    assert_eq!(interrupted["incomplete"], false);
+    let unpaired = read("Second");
+    assert_eq!(unpaired["turns"][0]["end"]["why"], "unavailable");
+    assert_eq!(unpaired["incomplete"], true);
+    event(10, "assistant.turn_end", json!({"turnId":"1"}));
+    scan_file(&path, "copilot", &mut fixture.cache, &mut false).unwrap();
+    let replied = read("Second");
+    assert_eq!(replied["turns"][0]["end"]["why"], "replied");
+    assert_eq!(replied["incomplete"], false);
+}
+
+#[test]
+fn warehouse_trace_uses_the_latest_completed_claude_run() {
+    let mut fixture = Fixture::new("claude-trace-runs");
     let root = fixture.claude("root", "Delegate");
     append_native(
         &root,
@@ -1507,6 +2402,79 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     append_native(
         &child,
         json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"handback","name":"SubagentHandback","input":{"message":"First return"}}]}}),
+    );
+    append_native(&child, prompt("root", 4, "Resume"));
+    for (at, status, summary) in [
+        (5, "completed", "Late first notification"),
+        (6, "failed", "Second run failed"),
+    ] {
+        append_native(
+            &root,
+            prompt(
+                "root",
+                at,
+                &format!(
+                    "<task-notification><tool-use-id>agent</tool-use-id><status>{status}</status><summary>{summary}</summary></task-notification>"
+                ),
+            ),
+        );
+    }
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let launch = crate::model::spawn_turn_id("claude", "worker");
+    let query = crate::native_html::query(&[("sid", "worker"), ("turn", &launch)]);
+    let reply = http::trace(&configured, &query, None, None);
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    assert_eq!(trace["handoffs"][0]["status"], "err", "{trace}");
+    assert_eq!(trace["handoffs"][0]["result"], "Second run failed");
+    assert_eq!(trace["turns"][0]["end"]["why"], "handoff_failed");
+    assert!(
+        trace["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["role"] == "return"
+                && row["catalog_key"] == "root"
+                && row["reason"].is_string())
+    );
+}
+
+#[test]
+fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
+    let mut fixture = Fixture::new("legacy-relay-detail");
+    let root = fixture.claude("root", "Delegate");
+    let spawn_offset = fs::metadata(&root).unwrap().len();
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:01Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"prompt":"Work"}}]}}),
+    );
+    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(
+        child.with_extension("meta.json"),
+        json!({"agentType":"general-purpose","toolUseId":"agent"}).to_string(),
+    )
+    .unwrap();
+    fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
+    let send_offset = fs::metadata(&child).unwrap().len();
+    append_native(
+        &child,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
         "message":{"role":"assistant","content":[{"type":"tool_use","id":"progress","name":"SendMessage",
         "input":{"to":"main","message":"Still working"}}]}}),
     );
@@ -1514,6 +2482,12 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         &child,
         json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:05Z",
         "toolUseResult":{"success":true},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"progress","content":"queued"}]}}),
+    );
+    let old_call_offset = fs::metadata(&root).unwrap().len();
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:02Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"before-relay","name":"Read","input":{"file_path":"/work/before"}}]}}),
     );
     let mut offsets = Vec::new();
     for (time, body) in [(4, "Still working"), (7, "Work finished")] {
@@ -1561,7 +2535,7 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         .unwrap();
     let turn = reply.causal.turn.as_ref().unwrap();
     assert_eq!(turn.address.offset, offsets[0]);
-    let oracle = crate::session_transcript_range_with_mode(
+    let oracle = semantic_transcript(
         &fixture.options,
         fixture.namespace.as_str(),
         "sid=root&after=0&limit=100",
@@ -1585,6 +2559,93 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let state: String = db.query_row("SELECT json_extract(metadata,'$.state') FROM session_trace_headers WHERE session_key='worker'",
         [], |row| row.get(0)).unwrap();
     assert_eq!(state, "done");
+
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let launch = crate::model::spawn_turn_id("claude", "worker");
+    let query = crate::native_html::query(&[("sid", "worker"), ("turn", &launch)]);
+    let reply = http::trace(&configured, &query, None, None);
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    assert_eq!(trace["handoffs"][0]["from"], "root");
+    assert_eq!(trace["handoffs"][0]["result"], "Work finished");
+    assert!(
+        trace["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["role"] == "return" && row["catalog_key"] == "root")
+    );
+    let address = &trace["evidence"][1]["address"];
+    assert_eq!(address["record"]["path"], "projects/proj/root.jsonl");
+    let query = crate::native_html::query(&[("sid", "root"), ("address", &address.to_string())]);
+    let reply = http::transcript(&configured, &query, None, None);
+    let transcript: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{transcript}");
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == *address && entry["name"] == "Agent")
+    );
+
+    // The first receipt starts a turn because its body matches the child's send.
+    // The Agent launch and Read have no tool results and precede the turn.
+    // The Glob in the current turn is still live.
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:09Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"after-relay","name":"Glob","input":{"pattern":"*.rs"}}]}}),
+    );
+    fs::write(
+        pid_home.join("42.json"),
+        json!({"pid":42,"sessionId":"root","procStart":777,"status":"busy"}).to_string(),
+    )
+    .unwrap();
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let (row, _) = focused_metadata(&fixture.source(&paths), "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, Some("work"));
+    assert_eq!(row.details.unwrap()["errors"], 2);
+    let reply = http::annotations(&configured, "sid=root&kind=errors", None, None);
+    let errors: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{errors}");
+    assert_eq!(errors["total"], 2, "{errors}");
+    let error_offsets: Vec<_> = errors["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["address"]["record"]["offset"].as_u64().unwrap())
+        .collect();
+    assert_eq!(error_offsets, [spawn_offset, old_call_offset]);
+    let identity = http::identity(&configured, "sid=root");
+    assert_eq!(identity.status, 200);
+    let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+    let generation = identity["identity"]["generation"].as_str().unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("session_fields", "[\"detail\"]"),
+    ]);
+    let home = http::home(&configured, &query, None, None);
+    let detail: serde_json::Value = serde_json::from_slice(&home.body).unwrap();
+    assert_eq!(home.status, 200, "{detail}");
+    assert_eq!(detail["session"]["detail"], "Still working");
+    assert_eq!(detail["session"]["detail_from"], "worker");
 
     // Removing the selected proof blocks prevents native result reads, but
     // the list still derives its child status from process and metadata only.
@@ -1618,6 +2679,165 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
             .status,
         Some("work")
     );
+
+    let child_relative = "projects/proj/root/subagents/agent-worker.jsonl";
+    let provider = RelayFixtureProvider(BTreeMap::from([
+        ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
+        (child_relative.into(), fs::read(&child).unwrap()),
+    ]));
+    fs::rename(&child, child.with_extension("fixture-original")).unwrap();
+    fs::write(
+        &child,
+        format!("{}\n", prompt("root", 10, "Replacement work")),
+    )
+    .unwrap();
+    scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
+    let identity = warehouse::retained_identity(&db, &fixture.namespace, "worker").unwrap();
+    let source = fixture.source(&paths);
+    let retained = selected::retained_turn(&source, "worker", &launch, &provider).unwrap();
+    let address: crate::session_route::NativeEntryAddress = serde_json::from_value(
+        selected::render::turn_address(&retained, source.namespace.as_str(), "worker", &launch)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(address.record.offset, 0);
+    let opened = selected::retained_addressed_window(
+        &source,
+        "worker",
+        &address.record,
+        &address.binding,
+        &provider,
+    )
+    .unwrap();
+    assert_eq!(
+        selected::render::turn_address(&opened, source.namespace.as_str(), "worker", &launch),
+        Some(json!(address)),
+    );
+    let sent = selected::Address {
+        path: child_relative.into(),
+        offset: send_offset,
+        block: 0,
+        occurrence: 0,
+    };
+    let relay = selected::retained_peer_relay_address(
+        &source,
+        "worker",
+        &identity.witness,
+        "root",
+        (&sent, 0),
+        Some(&provider),
+    )
+    .unwrap();
+    assert_eq!(relay.record.offset, offsets[0]);
+    let query = crate::native_html::query(&[
+        ("sid", "worker"),
+        ("scope", "retained_history"),
+        ("turn", &launch),
+    ]);
+    let reply = http::trace(&configured, &query, None, Some(&provider));
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    assert_eq!(trace["handoffs"][0]["status"], "done");
+    assert_eq!(trace["handoffs"][0]["result"], "Work finished");
+    assert_eq!(trace["turns"][0]["end"]["why"], "returned");
+    let relay_turn = crate::model::legacy_relay_turn_id("progress");
+    assert_eq!(trace["turns"][0]["sent"], json!([relay_turn]));
+    let evidence = trace["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["turn"] == relay_turn)
+        .unwrap();
+    assert_eq!(evidence["address"], json!(relay));
+    assert_eq!(evidence["peer"]["witness"], identity.witness);
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("address", &evidence["address"].to_string()),
+        ("peer", &evidence["peer"].to_string()),
+    ]);
+    let reply = http::transcript(&configured, &query, None, Some(&provider));
+    let transcript: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{transcript}");
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == evidence["address"] && entry["turn"] == relay_turn)
+    );
+    let preview = |generation: &str, address: &serde_json::Value| {
+        let query = crate::native_html::query(&[
+            ("sid", "root"),
+            ("scope", "retained_history"),
+            ("generation", generation),
+            ("session_fields", "[]"),
+            ("events", &json!([relay_turn]).to_string()),
+            ("address", &address.to_string()),
+            ("peer", &evidence["peer"].to_string()),
+        ]);
+        http::home(&configured, &query, None, Some(&provider))
+    };
+    let generation = trace["previews"]["root"].as_str().unwrap();
+    let response = preview(generation, &evidence["address"]);
+    let home: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response.status, 200, "{home}");
+    assert_eq!(
+        home["events"][relay_turn.as_str()]["brief"],
+        "Still working"
+    );
+    assert_eq!(home["incomplete"], false);
+    let mut wrong_entry = evidence["address"].clone();
+    wrong_entry["block"] = json!(1);
+    assert_eq!(preview(generation, &wrong_entry).status, 409);
+    assert_eq!(preview(&"0".repeat(64), &evidence["address"]).status, 409);
+    let opened = selected::retained_peer_window(
+        &source,
+        "root",
+        selected::PeerBinding {
+            trace: "worker",
+            witness: &identity.witness,
+        },
+        16,
+        None,
+        Some((&relay.record, &relay.binding)),
+        Some(&provider),
+    )
+    .unwrap();
+    let rendered = selected::render::entries(&opened, source.namespace.as_str(), "root", 0);
+    assert!(
+        rendered
+            .iter()
+            .any(|entry| entry["entry_id"] == relay.entry_id)
+    );
+    assert!(matches!(
+        selected::retained_peer_relay_address(
+            &source,
+            "worker",
+            &identity.witness,
+            "root",
+            (&sent, 1),
+            Some(&provider),
+        ),
+        Err(ReadError::PeerUnavailable(_))
+    ));
+    fs::rename(&root, root.with_extension("fixture-original")).unwrap();
+    fixture.claude("root", "Replacement parent");
+    let identity = http::identity(&configured, "sid=root&scope=retained_history");
+    let metadata: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+    assert_eq!(identity.status, 200, "{metadata}");
+    let generation = metadata["identity"]["generation"].as_str().unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("generation", generation),
+        ("session_fields", "[\"detail\"]"),
+    ]);
+    let reply = http::home(&configured, &query, None, Some(&provider));
+    let detail: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{detail}");
+    assert_eq!(detail["session"]["detail"], "Still working");
+    assert_eq!(detail["session"]["detail_from"], "worker");
 }
 
 #[test]
@@ -1751,21 +2971,24 @@ fn warehouse_current_provider_pins_the_selected_original_across_pages() {
 
     let restored = path.clone();
     selected::AFTER_BODY.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || fs::rename(original, restored).unwrap()));
+        *hook.borrow_mut() = Some(Box::new(move |_| fs::rename(original, restored).unwrap()));
     });
     assert!(matches!(page(&hosted, 10, None), Err(ReadError::Restart)));
 }
 
 #[test]
-fn warehouse_retained_address_reads_only_the_certified_original_from_provider() {
+fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
     use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
-    use std::io;
+    use std::{
+        io,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
-    struct Original {
-        data: Vec<u8>,
-        calls: std::sync::atomic::AtomicUsize,
+    struct PeerProvider {
+        bytes: Vec<u8>,
+        calls: AtomicUsize,
     }
-    impl SessionSourceReader for Original {
+    impl SessionSourceReader for PeerProvider {
         fn read_range(
             &self,
             source: &SessionSourceRef,
@@ -1773,35 +2996,373 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
             offset: u64,
             max: usize,
         ) -> io::Result<SessionSourceRange> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.calls.fetch_add(1, Ordering::Relaxed);
             if source.root != "claude"
-                || source.path != "projects/proj/native.jsonl"
-                || source.native_id != "native"
-                || source.offset != self.data.len() as u64
-                || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.data))
-                || expected.is_some_and(|generation| generation != "fixture-original")
+                || source.path != "projects/proj/peer.jsonl"
+                || source.native_id != "peer"
+                || source.offset != self.bytes.len() as u64
+                || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.bytes))
+                || expected.is_some_and(|generation| generation != "fixture-peer")
             {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
-            let start = offset as usize;
-            let end = (start + max).min(self.data.len());
+            let start = usize::try_from(offset).map_err(io::Error::other)?;
+            let end = (start + max).min(self.bytes.len());
             Ok(SessionSourceRange {
-                generation: "fixture-original".into(),
+                generation: "fixture-peer".into(),
                 length: source.offset,
                 offset,
-                bytes: self.data[start..end].into(),
+                bytes: self.bytes[start..end].into(),
                 cached: false,
             })
         }
     }
 
+    let mut fixture = Fixture::new("retained-trace-peer");
+    let root = fixture.claude("root", "Original trace");
+    let peer = fixture.claude("peer", "Original peer");
+    let sent = selected::Address {
+        path: "projects/proj/root.jsonl".into(),
+        offset: fs::metadata(&root).unwrap().len(),
+        block: 0,
+        occurrence: 0,
+    };
+    let receipt_offset = fs::metadata(&peer).unwrap().len();
+    append_native(
+        &root,
+        json!({"type":"assistant","uuid":"call","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"send","name":"SendMessage","input":{"to":"peer","message":"hello"}}
+        ]}}),
+    );
+    append_native(
+        &root,
+        json!({"type":"user","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:02Z","toolUseResult":{"success":true,"msg_id":"delivery"},
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]}}),
+    );
+    append_native(
+        &peer,
+        json!({"type":"user","sessionId":"peer","timestamp":"2026-09-24T00:00:03Z",
+        "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/111.sock","name":"root",
+            "fromMode":"prompting","msg_id":"delivery","body":"hello","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+        "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\" from-name=\"root\">hello</cross-session-message>"}}),
+    );
+    append_native(
+        &peer,
+        json!({"type":"assistant","uuid":"reply-call","sessionId":"peer",
+        "timestamp":"2026-09-24T00:00:04Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"reply","name":"SendMessage","input":{"to":"root","message":"reply"}}
+        ]}}),
+    );
+    append_native(
+        &peer,
+        json!({"type":"user","sessionId":"peer",
+        "timestamp":"2026-09-24T00:00:05Z","toolUseResult":{"success":true,"msg_id":"return-delivery"},
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"reply","content":"sent"}]}}),
+    );
+    append_native(
+        &root,
+        json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:06Z",
+        "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/111.sock","name":"peer",
+            "fromMode":"prompting","msg_id":"return-delivery","body":"reply","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+        "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\" from-name=\"peer\">reply</cross-session-message>"}}),
+    );
+    let publish = |fixture: &mut Fixture| {
+        crate::model::observe_catalog(
+            &fixture.options,
+            &mut fixture.cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+    };
+    publish(&mut fixture);
+    let original = RelayFixtureProvider(BTreeMap::from([
+        ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
+        ("projects/proj/peer.jsonl".into(), fs::read(&peer).unwrap()),
+    ]));
+    let component = selected_page(&fixture, &[&root, &peer], "root", 20, None)
+        .unwrap()
+        .unwrap();
+    let turn = component
+        .records
+        .iter()
+        .find(|record| record.text().as_deref() == Some("Original trace"))
+        .and_then(|record| record.causal.turn.as_ref())
+        .unwrap()
+        .id
+        .clone();
+    let provider = PeerProvider {
+        bytes: fs::read(&peer).unwrap(),
+        calls: AtomicUsize::new(0),
+    };
+    let address = selected::Address {
+        path: "projects/proj/peer.jsonl".into(),
+        offset: 0,
+        block: 0,
+        occurrence: 0,
+    };
+    fixture.claude("root", "Replacement trace");
+    let db = Connection::open(&fixture.db).unwrap();
+    let root_identity = warehouse::retained_identity(&db, &fixture.namespace, "root").unwrap();
+    let source = fixture.source(&[&root, &peer]);
+    assert!(matches!(
+        selected::retained_record_at(&fixture.options, &source, "peer", &address, &provider),
+        Err(ReadError::RetainedUnverified)
+    ));
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    let open = |fixture: &Fixture, witness: &str, key: &str| {
+        selected::retained_peer_record_at(
+            &fixture.source(&[&root, &peer]),
+            "root",
+            witness,
+            key,
+            &address,
+            Some(&provider),
+        )
+    };
+    assert!(matches!(
+        open(&fixture, "replacement", "peer"),
+        Err(ReadError::PeerUnavailable(_))
+    ));
+    assert!(matches!(
+        open(&fixture, &root_identity.witness, "other"),
+        Err(ReadError::PeerUnavailable(_))
+    ));
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        open(&fixture, &root_identity.witness, "peer")
+            .unwrap()
+            .unwrap()
+            .text()
+            .as_deref(),
+        Some("Original peer")
+    );
+
+    append_native(&peer, prompt("peer", 4, "After the trace"));
+    publish(&mut fixture);
+    assert_eq!(
+        open(&fixture, &root_identity.witness, "peer")
+            .unwrap()
+            .unwrap()
+            .text()
+            .as_deref(),
+        Some("Original peer")
+    );
+    let locally_proven = selected::retained_peer_record_at(
+        &fixture.source(&[&root, &peer]),
+        "root",
+        &root_identity.witness,
+        "peer",
+        &address,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(locally_proven.text().as_deref(), Some("Original peer"));
+    assert_eq!(locally_proven.reference.offset, provider.bytes.len() as u64);
+    let relay = |fixture: &Fixture, block, provider: Option<&dyn SessionSourceReader>| {
+        selected::retained_peer_relay_address(
+            &fixture.source(&[&root, &peer]),
+            "root",
+            &root_identity.witness,
+            "peer",
+            (&sent, block),
+            provider,
+        )
+    };
+    let observed = relay(&fixture, 0, None).unwrap();
+    assert_eq!(observed.record.path, address.path);
+    assert_eq!(observed.record.offset, receipt_offset);
+    assert!(matches!(
+        relay(&fixture, 1, None),
+        Err(ReadError::PeerUnavailable(_))
+    ));
+    fixture.claude("peer", "Replacement peer");
+    let archived = relay(&fixture, 0, Some(&provider)).unwrap();
+    assert_eq!(archived.record, observed.record);
+    assert_eq!(archived.binding, observed.binding);
+    assert_eq!(archived.entry_id, observed.entry_id);
+    let source = fixture.source(&[&root, &peer]);
+    let binding = selected::PeerBinding {
+        trace: "root",
+        witness: &root_identity.witness,
+    };
+    let opened = selected::retained_peer_window(
+        &source,
+        "peer",
+        binding,
+        32,
+        None,
+        Some((&archived.record, &archived.binding)),
+        Some(&provider),
+    )
+    .unwrap();
+    assert_eq!(opened.binding, archived.binding);
+    let entries = selected::render::entries(&opened, source.namespace.as_str(), "peer", 0);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["entry_id"] == archived.entry_id)
+    );
+    let earlier = selected::retained_peer_window(
+        &source,
+        "peer",
+        binding,
+        32,
+        opened.next.as_ref(),
+        None,
+        Some(&provider),
+    )
+    .unwrap();
+    assert!(
+        earlier
+            .records
+            .iter()
+            .any(|record| record.text().as_deref() == Some("Original peer"))
+    );
+    assert!(
+        earlier
+            .records
+            .iter()
+            .all(|record| record.text().as_deref() != Some("Replacement peer"))
+    );
+
+    assert_eq!(
+        open(&fixture, &root_identity.witness, "peer")
+            .unwrap()
+            .unwrap()
+            .text()
+            .as_deref(),
+        Some("Original peer")
+    );
+
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("turn", &turn),
+    ]);
+    let reply = http::trace(&configured, &query, None, Some(&original));
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    let peer_evidence = trace["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["catalog_key"] == "peer" && row["address"].is_object())
+        .unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "peer"),
+        ("scope", "retained_history"),
+        ("turn", peer_evidence["turn"].as_str().unwrap()),
+        ("address", &peer_evidence["address"].to_string()),
+        ("peer", &peer_evidence["peer"].to_string()),
+    ]);
+    let reply = http::trace(&configured, &query, None, Some(&original));
+    let continuation: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{continuation}");
+    assert_eq!(&continuation["evidence"][0], peer_evidence);
+    let return_edge = trace["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["from"] == "peer" && edge["to"] == "root" && edge["status"] == "done")
+        .unwrap_or_else(|| panic!("Missing return edge: {trace}"));
+    let evidence = trace["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["catalog_key"] == "root" && row["turn"] == return_edge["target_turn"])
+        .unwrap();
+    assert!(evidence["peer"].is_null());
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("address", &evidence["address"].to_string()),
+    ]);
+    let reply = http::transcript(&configured, &query, None, Some(&original));
+    let transcript: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{transcript}");
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == evidence["address"])
+    );
+
+    db.execute(
+        "UPDATE warehouse_identity SET witness='' WHERE catalog_key='peer' AND retained=1",
+        [],
+    )
+    .unwrap();
+    let calls = provider.calls.load(Ordering::Relaxed);
+    assert!(
+        matches!(open(&fixture, &root_identity.witness, "peer"), Err(ReadError::PeerUnavailable(reason)) if reason.contains("custody"))
+    );
+    assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
+}
+
+struct OriginalNativeProvider {
+    data: Vec<u8>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl crate::SessionSourceReader for OriginalNativeProvider {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> std::io::Result<crate::SessionSourceRange> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if source.root != "claude"
+            || source.path != "projects/proj/native.jsonl"
+            || source.native_id != "native"
+            || source.offset != self.data.len() as u64
+            || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.data))
+            || expected.is_some_and(|generation| generation != "fixture-original")
+        {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let start = offset as usize;
+        let end = (start + max).min(self.data.len());
+        Ok(crate::SessionSourceRange {
+            generation: "fixture-original".into(),
+            length: source.offset,
+            offset,
+            bytes: self.data[start..end].into(),
+            cached: false,
+        })
+    }
+}
+
+#[test]
+fn warehouse_retained_address_reads_only_the_certified_original_from_provider() {
     let mut fixture = Fixture::new("retained-component-provider");
     let path = fixture.claude("native", "Original native prompt");
-    let provider = Original {
+    let provider = OriginalNativeProvider {
         data: fs::read(&path).unwrap(),
         calls: Default::default(),
     };
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut provider.data.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
     let address = selected::Address {
         path: "projects/proj/native.jsonl".into(),
         offset: 0,
@@ -1828,6 +3389,14 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
     ));
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     fixture.claude("native", "Replacement prompt");
+    let replacement = fs::read(&path).unwrap();
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut replacement.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
     let retained = selected::retained_record_at(
         &fixture.options,
         &fixture.source(&[&path]),
@@ -1853,8 +3422,120 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         .unwrap()
         .is_none()
     );
-    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     let source = fixture.source(&[&path]);
+    let retained_identity = focused_identity(&source, CatalogReadScope::RetainedHistory, "native")
+        .unwrap()
+        .unwrap();
+    let current_alias =
+        resolve_native(&source, CatalogReadScope::Current, "claude", "native").unwrap();
+    let retained_alias = resolve_native(
+        &source,
+        CatalogReadScope::RetainedHistory,
+        "claude",
+        "native",
+    )
+    .unwrap();
+    assert_eq!(
+        retained_alias.as_slice(),
+        std::slice::from_ref(&retained_identity)
+    );
+    assert_eq!(current_alias.len(), 1);
+    assert_eq!(current_alias[0].catalog_key, retained_identity.catalog_key);
+    assert_ne!(current_alias[0].generation, retained_identity.generation);
+    assert_ne!(
+        current_alias[0].source_refs[0].source.prefix_sha256,
+        retained_identity.source_refs[0].source.prefix_sha256
+    );
+    assert_eq!(
+        retained_identity.source_refs[0].source.offset,
+        provider.data.len() as u64
+    );
+    assert_eq!(
+        retained_identity.source_refs[0].source.prefix_sha256,
+        <[u8; 32]>::from(Sha256::digest(&provider.data))
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    let latest = selected::retained_latest_page(&source, "native", 1, None, &provider).unwrap();
+    assert_eq!(
+        latest.records[0].text().as_deref(),
+        Some("Original native prompt")
+    );
+    let entries = selected::render::entries(&latest, fixture.namespace.as_str(), "native", 0);
+    let address = entries[0]["address"].to_string();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    for (scope, alias) in [
+        ("current", &current_alias[0]),
+        ("retained_history", &retained_identity),
+    ] {
+        let query = crate::native_html::query(&[
+            ("machine", &configured.key),
+            ("harness", "claude"),
+            ("native_id", "native"),
+            ("scope", scope),
+        ]);
+        let response = http::resolve_native(&configured, &query);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.status, 200, "{body}");
+        assert_eq!(body["resolution"]["state"], "resolved");
+        assert_eq!(body["resolution"]["generation"], alias.generation);
+        assert_eq!(body["resolution"]["catalog_key"], alias.catalog_key);
+    }
+    for (scope, alias) in [
+        ("current", &current_alias[0]),
+        ("retained_history", &retained_identity),
+    ] {
+        let query = crate::native_html::query(&[("sid", "native"), ("scope", scope)]);
+        let metadata = http::list(std::slice::from_ref(&configured), "fixture", &query, false);
+        let identity = http::identity(&configured, &query);
+        let locate = http::locate(&configured, &query);
+        assert_eq!(
+            (metadata.status, identity.status, locate.status),
+            (200, 200, 200)
+        );
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.body).unwrap();
+        let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+        let locate: serde_json::Value = serde_json::from_slice(&locate.body).unwrap();
+        assert_eq!(identity["identity"]["generation"], alias.generation);
+        assert_eq!(metadata["generation"], alias.generation);
+        assert_eq!(locate["matches"][0]["catalog_key"], alias.catalog_key);
+    }
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "retained_history"),
+        ("address", &address),
+    ]);
+    let reply = http::transcript(&configured, &query, None, Some(&provider));
+    let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{body}");
+    assert_eq!(body["entries"][0]["entry_id"], entries[0]["entry_id"]);
+    assert_eq!(body["entries"][0]["text"], "Original native prompt");
+    assert_eq!(body["session"]["name"], "Original native prompt");
+    for query in [
+        "scope=retained_history",
+        "scope=retained_history&sid=native",
+    ] {
+        let listed = http::list(std::slice::from_ref(&configured), "fixture", query, false);
+        let listed_body: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
+        assert_eq!(listed.status, 200, "{listed_body}");
+        assert_eq!(listed_body["items"][0]["name"], "Original native prompt");
+        assert_eq!(listed_body["items"][0]["lifecycle"], "retained");
+    }
+    let pending = http::transcript(&configured, &query, None, None);
+    assert_eq!(pending.status, 503);
+    let pending: serde_json::Value = serde_json::from_slice(&pending.body).unwrap();
+    assert_eq!(pending["error"]["code"], "retained_source_preparing");
+    crate::archive::seekable::prepare(&archive, &path, &retained_identity.source_refs[0].source)
+        .unwrap();
+    let local = http::transcript(&configured, &query, None, None);
+    let local_body: serde_json::Value = serde_json::from_slice(&local.body).unwrap();
+    assert_eq!(local.status, 200, "{local_body}");
+    assert_eq!(local_body["entries"][0]["text"], "Original native prompt");
     let first = selected::retained_page(&source, "native", 1, None, &provider).unwrap();
     assert_eq!(first.member_count, 1);
     let cursor = first.next.unwrap();
@@ -1864,14 +3545,292 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         Some("Original native prompt")
     );
     assert!(next.next.is_none());
-    let denied = Original {
+    let denied = OriginalNativeProvider {
         data: vec![],
         calls: Default::default(),
     };
+    assert_eq!(
+        http::transcript(&configured, &query, None, Some(&denied)).status,
+        503
+    );
     assert!(matches!(
         selected::retained_page(&source, "native", 1, Some(&cursor), &denied),
         Err(ReadError::Restart)
     ));
+}
+
+#[test]
+fn warehouse_sparse_fields_use_exact_provider_prefixes_in_both_read_scopes() {
+    let mut fixture = Fixture::new("sparse-fields-provider");
+    let path = fixture.claude("native", "Original prompt");
+    let mut image = b"\x89PNG\r\n\x1a\nexample".to_vec();
+    image.resize(1024 * 1024, 0);
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"read-call","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"large-read","name":"Read","input":{"file_path":"/work/note"}}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"read-result","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"large-read","content":[
+                {"type":"text","text":"y".repeat(1152 * 1024 + 1) + "result tail"}
+            ]}
+        ]}}),
+    );
+    let mut mixed = prompt("native", 3, "");
+    mixed["message"]["content"] = json!([
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(&image)}},
+        {"type":"text","text":"x".repeat(768 * 1024 + 1) + "verified tail"},
+    ]);
+    append_native(&path, mixed);
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let provider = OriginalNativeProvider {
+        data: fs::read(&path).unwrap(),
+        calls: Default::default(),
+    };
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut provider.data.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    let admit = |fixture: &mut Fixture| {
+        crate::model::observe_catalog(
+            &fixture.options,
+            &mut fixture.cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+    };
+    admit(&mut fixture);
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let mode = crate::SessionSourceReadMode::ProviderOnly;
+    let read = |scope: &str, params: &[(&str, &str)], expanded, reader: &OriginalNativeProvider| {
+        let mut fields = vec![("sid", "native"), ("scope", scope)];
+        fields.extend_from_slice(params);
+        http::transcript_with_mode(
+            &configured,
+            &crate::native_html::query(&fields),
+            Some(reader),
+            mode,
+            expanded,
+        )
+    };
+    let check = |scope| {
+        let page = read(scope, &[("limit", "4")], false, &provider);
+        let body: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+        assert_eq!(page.status, 200, "{body}");
+        let entries = body["entries"].as_array().unwrap();
+        let output = entries
+            .iter()
+            .find(|entry| entry["field"]["name"] == "out")
+            .unwrap_or_else(|| panic!("missing sparse output: {body}"));
+        let result_address = output["address"].to_string();
+        let result_last = (output["field"]["chunks"].as_u64().unwrap() - 1).to_string();
+        let chunk = read(
+            scope,
+            &[("address", &result_address), ("field_chunk", &result_last)],
+            true,
+            &provider,
+        );
+        let result: serde_json::Value = serde_json::from_slice(&chunk.body).unwrap();
+        assert_eq!(chunk.status, 200, "{result}");
+        assert_eq!(result["entry"]["field"]["name"], "out");
+        assert!(
+            result["entry"]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("yresult tail")
+        );
+        let entry = entries
+            .iter()
+            .find(|entry| entry["field"]["name"] == "text")
+            .unwrap_or_else(|| panic!("missing sparse prompt: {body}"));
+        let mut encoded = entry["address"].clone();
+        let address = encoded.to_string();
+        let last = (entry["field"]["chunks"].as_u64().unwrap() - 1).to_string();
+        let chunk = read(
+            scope,
+            &[("address", &address), ("field_chunk", &last)],
+            true,
+            &provider,
+        );
+        let body: serde_json::Value = serde_json::from_slice(&chunk.body).unwrap();
+        assert_eq!(chunk.status, 200, "{body}");
+        assert_eq!(body["entry"]["text"], "xverified tail");
+        let attachment = read(
+            scope,
+            &[
+                ("address", &address),
+                ("part", "attachment"),
+                ("image", "0"),
+            ],
+            true,
+            &provider,
+        );
+        assert_eq!(
+            (attachment.status, attachment.content_type),
+            (200, "image/png")
+        );
+        assert_eq!(attachment.body, image);
+        encoded["entry_id"] = json!("wrong-entry");
+        let refused = read(
+            scope,
+            &[("address", &encoded.to_string()), ("field_chunk", &last)],
+            true,
+            &provider,
+        );
+        assert!((400..500).contains(&refused.status));
+        let mut changed = provider.data.clone();
+        *changed.last_mut().unwrap() = b' ';
+        let changed = OriginalNativeProvider {
+            data: changed,
+            calls: Default::default(),
+        };
+        let refused = read(
+            scope,
+            &[("address", &address), ("field_chunk", &last)],
+            true,
+            &changed,
+        );
+        assert!(refused.status >= 400);
+        let body: serde_json::Value = serde_json::from_slice(&refused.body).unwrap();
+        assert!(body.get("entry").is_none());
+    };
+    check("current");
+    assert!(provider.calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    let replacement = fixture.claude("native", "Replacement prompt");
+    let bytes = fs::read(&replacement).unwrap();
+    archive
+        .preserve(
+            replacement.to_str().unwrap(),
+            &mut bytes.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    check("retained_history");
+}
+
+#[test]
+fn warehouse_retained_tool_expansion_reads_the_frozen_reply() {
+    let mut fixture = Fixture::new("retained-tool-reply");
+    let path = fixture.claude("native", "Original prompt");
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"call","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"command","name":"Bash","input":{"command":"pwd"}}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"reply","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"command","content":"original output"}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"stopped","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:03Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"incomplete","name":"Bash","input":{"command":"ls"}}
+        ]}}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut fs::File::open(&path).unwrap(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    fixture.claude("native", "Replacement prompt");
+    let source = fixture.source(&[&path]);
+    let identity = focused_identity(&source, CatalogReadScope::RetainedHistory, "native")
+        .unwrap()
+        .unwrap();
+    crate::archive::seekable::prepare(&archive, &path, &identity.source_refs[0].source).unwrap();
+    let reader = ArchiveReader::new(&fixture.options);
+    let component = selected::retained_latest_page(&source, "native", 32, None, &reader).unwrap();
+    let call = component
+        .records
+        .iter()
+        .find(|record| !record.causal.calls.is_empty())
+        .unwrap();
+    let reply = call.causal.calls[0].replies.first().unwrap();
+    assert_eq!(
+        component.reply_records[&(call.address.path.clone(), reply.o)]["message"]["content"][0]["content"],
+        "original output"
+    );
+    let entries = selected::render::entries(&component, source.namespace.as_str(), "native", 0);
+    let pending = entries
+        .iter()
+        .find(|entry| entry["unfinished"] == true)
+        .unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let reply = http::annotations(
+        &configured,
+        "sid=native&scope=retained_history&kind=errors",
+        None,
+        None,
+    );
+    let markers: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{markers}");
+    assert_eq!(markers["total"], 1);
+    assert_eq!(markers["entries"][0]["address"], pending["address"]);
+    let call = entries
+        .iter()
+        .find(|entry| entry["k"] == "tool" && entry["ok"] == true)
+        .unwrap();
+    let address: crate::session_route::NativeEntryAddress =
+        serde_json::from_value(call["address"].clone()).unwrap();
+    let addressed = selected::retained_addressed_window(
+        &source,
+        "native",
+        &address.record,
+        &address.binding,
+        &reader,
+    )
+    .unwrap();
+    let Some(selected::render::Expansion::Json(entry)) = selected::render::expand(
+        &addressed,
+        source.namespace.as_str(),
+        "native",
+        &address,
+        selected::render::Part::Output,
+    ) else {
+        panic!("frozen tool reply did not expand");
+    };
+    assert_eq!(entry["out"], "original output");
 }
 
 #[test]
@@ -1957,6 +3916,30 @@ fn warehouse_selected_family_prices_descendants_and_deduplicates_shared_steps() 
         ).unwrap()
     };
     observe(&mut fixture);
+    let source = Source::focused(
+        fixture.namespace.clone(),
+        &fixture.db,
+        &fixture.options,
+        None,
+    )
+    .unwrap();
+    let (metadata, _) = focused_metadata(&source, "child").unwrap().unwrap();
+    assert_eq!(metadata.parent.as_deref(), Some("root"));
+    let details = metadata.details.unwrap();
+    assert_eq!(details["family"]["state"], "complete");
+    assert_eq!(details["family"]["ancestors"][0]["key"], "root");
+    assert_eq!(details["family"]["runs"][0]["key"], "leaf");
+    let child_family = family_price(&fixture.source(&paths), "child")
+        .unwrap()
+        .unwrap();
+    assert_eq!(details["family"]["usd"], json!(child_family.usd));
+    assert_eq!(details["family"]["shared_usd"], json!(child_family.shared));
+    assert!(
+        details["family"]["runs"][0]["cost"]["usd"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
     let family = family_price(&fixture.source(&paths), "root")
         .unwrap()
         .unwrap();
@@ -2070,8 +4053,21 @@ fn warehouse_list_qualifies_codex_prompt_title_for_search() {
         actual.rows[0].title,
         "Check the parsing and result correlation"
     );
+    let ordinary = read_list(
+        &[fixture.source(&[&path, &parent])],
+        "workspace",
+        &request("limit=10"),
+        None,
+    )
+    .unwrap();
+    let child = ordinary
+        .rows
+        .iter()
+        .find(|row| row.position.key == "child")
+        .unwrap();
+    assert_ne!(child.title, actual.rows[0].title);
     let expected =
-        crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), "limit=10");
+        crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), "sid=child");
     assert_eq!(expected.status, 200);
     let oracle: serde_json::Value = serde_json::from_slice(&expected.body).unwrap();
     let expected = oracle["items"]
@@ -2088,9 +4084,257 @@ fn warehouse_list_qualifies_codex_prompt_title_for_search() {
 }
 
 #[test]
+fn warehouse_home_previews_a_native_human_ask() {
+    let mut fixture = Fixture::new("home-ask");
+    let path = fixture.claude("native", "Initial prompt");
+    let offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"human-followup","sessionId":"native",
+            "timestamp":"2026-09-24T00:00:01Z","origin":{"kind":"human"},
+            "message":{"role":"user","content":"Review the second file"}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let page = http::transcript(&configured, "sid=native", None, None);
+    assert_eq!(page.status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+    let ask = crate::model::ask_id("native", offset);
+    let generation = page["identity"]["generation"].as_str().unwrap();
+    let context = &page["relationship_context"];
+    assert_eq!(context["state"], "complete");
+    assert_eq!(context["handoffs"][0]["id"], ask);
+    assert_eq!(context["previews"]["native"], generation);
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("events", &json!([ask]).to_string()),
+    ]);
+    let home = http::home(&configured, &query, None, None);
+    assert_eq!(home.status, 200);
+    let home: serde_json::Value = serde_json::from_slice(&home.body).unwrap();
+    assert_eq!(home["events"][&ask]["brief"], "Review the second file");
+    assert_eq!(home["session"]["detail_from"], "you");
+    assert_eq!(home["incomplete"], false);
+}
+
+#[test]
+fn warehouse_home_question_origin_uses_the_call_turn() {
+    let mut fixture = Fixture::new("home-question-origin");
+    let path = fixture.claude("native", "First prompt");
+    append_native(&path, prompt("native", 1, "Review the fixture"));
+    let offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"question","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"question-tool","name":"AskUserQuestion","input":{"questions":[
+                {"question":"Which file?","header":"File","multiSelect":false,"options":[
+                    {"label":"First","description":"Review the first file"},
+                    {"label":"Second","description":"Review the second file"}]}
+            ]}}
+        ]}}),
+    );
+    append_native(&path, prompt("native", 3, "Latest prompt"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let identity = http::identity(&configured, "sid=native");
+    assert_eq!(identity.status, 200);
+    let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+    let generation = identity["identity"]["generation"].as_str().unwrap();
+    let question = crate::model::question_id("native", offset, Some("question-tool"));
+    let feed = crate::session_overview_reply(
+        std::slice::from_ref(&configured),
+        "home",
+        "",
+        1_790_208_004_000,
+    )
+    .unwrap();
+    let feed: serde_json::Value = serde_json::from_slice(&feed.body).unwrap();
+    let event = &feed["answered"][0];
+    assert_eq!(event["event"]["id"], question, "{feed}");
+    assert_eq!(event["session"]["content_generation"], generation);
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("events", &json!([question]).to_string()),
+    ]);
+    let home = http::home(&configured, &query, None, None);
+    let value: serde_json::Value = serde_json::from_slice(&home.body).unwrap();
+    assert_eq!(home.status, 200, "{value}");
+    assert_eq!(value["events"][&question]["brief"], "Which file?");
+    assert_eq!(value["events"][&question]["origin"], "Review the fixture");
+}
+
+#[test]
+fn warehouse_home_completes_codex_questions_on_the_next_prompt_and_previews_results() {
+    let mut fixture = Fixture::new("home-codex-events");
+    let path = fixture.codex("native");
+    let codex = |second, payload| {
+        json!({"type":"response_item",
+        "timestamp":format!("2026-09-24T00:00:{second:02}Z"),"payload":payload})
+    };
+    let user = |second, text| {
+        codex(
+            second,
+            json!({"type":"message","role":"user",
+        "content":[{"type":"input_text","text":text}]}),
+        )
+    };
+    append_native(&path, user(1, "Review the fixture"));
+    let question_offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        codex(
+            2,
+            json!({"type":"function_call","name":"request_user_input",
+        "call_id":"ask","arguments":json!({"questions":[{"question":"Which file?"}]}).to_string()}),
+        ),
+    );
+    append_native(
+        &path,
+        codex(
+            3,
+            json!({"type":"function_call_output","call_id":"ask",
+        "output":"{\"accepted\":true}"}),
+        ),
+    );
+    append_native(&path, user(4, "Use the first file"));
+    let result_offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        codex(
+            5,
+            json!({"type":"message","role":"assistant",
+        "content":[{"type":"output_text","text":"Review complete"}]}),
+        ),
+    );
+    scan_file(&path, "codex", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let question = crate::model::question_id("native", question_offset, Some("ask"));
+    let result = crate::model::result_id("native", result_offset, 0);
+    let home = |query| {
+        let reply = crate::session_overview_reply(
+            std::slice::from_ref(&configured),
+            "home",
+            query,
+            1_790_208_006_000,
+        )
+        .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()
+    };
+    let feed = home("");
+    assert_eq!(feed["answered"][0]["event"]["id"], question, "{feed}");
+    assert_eq!(feed["answered"][0]["event"]["done"], 1_790_208_004_000_i64);
+    assert_eq!(feed["inbox"][0]["event"]["id"], result, "{feed}");
+    let generation = feed["inbox"][0]["session"]["content_generation"]
+        .as_str()
+        .unwrap();
+    let events = json!([question, result]).to_string();
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("events", &events),
+    ]);
+    let reply = http::home(&configured, &query, None, None);
+    let detail: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{detail}");
+    assert_eq!(detail["events"][&question]["brief"], "Which file?");
+    assert_eq!(detail["events"][&question]["origin"], "Review the fixture");
+    assert_eq!(detail["events"][&result]["brief"], "Review complete");
+    assert_eq!(detail["events"][&result]["origin"], "Use the first file");
+    let seen = json!([json!([configured.key, result]).to_string()]).to_string();
+    let filtered = home(&crate::native_html::query(&[("seen", &seen)]));
+    assert_eq!(filtered["inbox"], json!([]));
+    assert_eq!(filtered["answered"][0]["event"]["id"], question);
+}
+
+#[test]
+fn warehouse_home_result_preserves_the_human_turn_through_its_spawn_notification() {
+    let mut fixture = Fixture::new("home-result-boundary");
+    let case = |fixture: &mut Fixture, key: &str, origin: &str, content: &str| {
+        let path = fixture.claude(key, "Review the fixture");
+        let mut ask = prompt(key, 1, "Review the second file");
+        ask["origin"] = json!({"kind":"human"});
+        append_native(&path, ask);
+        append_native(
+            &path,
+            json!({"type":"assistant","uuid":"spawn-call","sessionId":key,
+            "timestamp":"2026-09-24T00:00:02Z","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"spawn","name":"Agent","input":{"prompt":"Review"}}
+            ]}}),
+        );
+        append_native(
+            &path,
+            json!({"type":"user","uuid":"incoming","sessionId":key,
+            "timestamp":"2026-09-24T00:00:03Z","origin":{"kind":origin},
+            "message":{"role":"user","content":content}}),
+        );
+        let offset = fs::metadata(&path).unwrap().len();
+        append_native(
+            &path,
+            json!({"type":"assistant","uuid":"result","sessionId":key,
+            "timestamp":"2026-09-24T00:00:04Z","message":{"role":"assistant","content":[
+                {"type":"text","text":"Review complete"}
+            ]}}),
+        );
+        scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+        let db = Connection::open(&fixture.db).unwrap();
+        let owner: i64 = db
+            .query_row(
+                "SELECT source FROM dim_session WHERE native_id=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let actual = db
+            .query_row(
+                include_str!("home_result_feed.sql"),
+                params![owner, 0, crate::events::AGM_FINAL],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .unwrap();
+        (actual, (key.to_owned(), i64::try_from(offset).unwrap()))
+    };
+    let notification = "<task-notification><tool-use-id>spawn</tool-use-id><status>completed</status></task-notification>";
+    let (actual, expected) = case(&mut fixture, "own", "task-notification", notification);
+    assert_eq!(actual, Some(expected));
+    let unrelated = notification.replace(">spawn<", ">other<");
+    let (actual, _) = case(&mut fixture, "unrelated", "task-notification", &unrelated);
+    assert!(actual.is_none());
+}
+
+#[test]
 fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
     let mut fixture = Fixture::new("list-runtime");
     let path = fixture.claude("native", "Runtime fixture");
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"pending","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"pending-tool","name":"Read","input":{"file_path":"/work/note"}}
+        ]}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
     let pids = fixture.options.claude_home.join("sessions");
     fs::create_dir_all(&pids).unwrap();
     let stat = fixture.options.proc_root.join("42/stat");
@@ -2121,14 +4365,54 @@ fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
     };
     write_pid("busy");
     assert_eq!(read(), Some("work"));
+    let selected = || {
+        focused_metadata(&fixture.source(&[&path]), "native")
+            .unwrap()
+            .unwrap()
+            .0
+    };
+    assert_eq!(selected().details.unwrap()["activity"]["tool"], "Read");
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let page = http::transcript(&configured, "sid=native", None, None);
+    assert_eq!(page.status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        (
+            "generation",
+            page["identity"]["generation"].as_str().unwrap(),
+        ),
+        ("session_fields", "[\"activity\"]"),
+    ]);
+    let home_activity = || {
+        let reply = http::home(&configured, &query, None, None);
+        assert_eq!(reply.status, 200);
+        serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()["session"]["activity"]
+            .clone()
+    };
+    let activity = home_activity();
+    assert_eq!(activity[0], "Read");
+    assert_eq!(activity[1], "/work/note");
+    assert_eq!(
+        activity[3],
+        selected().details.unwrap()["activity"]["since"]
+    );
     write_pid("waiting");
+    assert!(home_activity().is_null());
+    assert!(selected().details.unwrap()["activity"].is_null());
     assert_eq!(read(), Some("wait"));
     write_start(778);
     assert_eq!(read(), Some("done"));
 }
 
 #[test]
-fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
+fn warehouse_selected_runtime_uses_qualified_parent_and_child_run_evidence() {
     let mut fixture = Fixture::new("child-runtime");
     let root = fixture.claude("root", "Delegate work");
     append_native(
@@ -2166,7 +4450,7 @@ fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
     )
     .unwrap();
 
-    let read = |fixture: &mut Fixture, expected: &str| {
+    let read = |fixture: &mut Fixture, list: &str, detail: &str| {
         crate::model::observe_catalog(
             &fixture.options,
             &mut fixture.cache,
@@ -2188,23 +4472,26 @@ fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
             .find(|row| row.position.key == "worker")
             .unwrap();
         assert_eq!(row.parent.as_deref(), Some("root"));
-        assert_eq!(row.status, Some(expected));
+        assert_eq!(row.status, Some(list));
+        let source = fixture.source(&[&root, &child]);
+        let (row, _) = focused_metadata(&source, "worker").unwrap().unwrap();
+        assert_eq!(row.status, Some(detail));
         let oracle: String = Connection::open(&fixture.db).unwrap().query_row(
             "SELECT json_extract(metadata,'$.state') FROM session_trace_headers WHERE session_key='worker'",
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(row.status, Some(oracle.as_str()));
     };
-    read(&mut fixture, "work");
+    read(&mut fixture, "work", "work");
     append_native(
         &root,
         json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
         "origin":{"kind":"task-notification"},"message":{"role":"user","content":
         "<task-notification><task-id>worker</task-id><tool-use-id>agent-call</tool-use-id><status>failed</status><result>failed</result></task-notification>"}}),
     );
-    read(&mut fixture, "err");
+    read(&mut fixture, "work", "err");
     append_native(&child, prompt("root", 4, "Try again"));
-    read(&mut fixture, "work");
+    read(&mut fixture, "work", "work");
     let mut missing_parent = fixture.source(&[&root, &child]);
     missing_parent
         .inventory
@@ -2219,7 +4506,7 @@ fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
         None
     );
     write_start(778);
-    read(&mut fixture, "done");
+    read(&mut fixture, "done", "done");
 }
 
 #[test]
@@ -2307,13 +4594,204 @@ fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
                 .as_ref()
                 .is_some_and(|turn| turn.handoff && turn.address == record.address)
     }));
-    let launch = selected::launch_call(&source, "child").unwrap().unwrap();
+    let launch = selected::launch_call(
+        &selected::ReadView::open(&source).unwrap(),
+        &source,
+        "child",
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(launch.id, "launch");
     assert_eq!(launch.name, "Bash");
     source
         .inventory
         .insert(parent.to_str().unwrap().into(), Availability::Unavailable);
-    assert!(selected::launch_call(&source, "child").unwrap().is_none());
+    assert!(
+        selected::launch_call(
+            &selected::ReadView::open(&source).unwrap(),
+            &source,
+            "child"
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let provider = RelayFixtureProvider(BTreeMap::from([
+        (
+            "projects/proj/parent.jsonl".into(),
+            fs::read(&parent).unwrap(),
+        ),
+        (
+            "sessions/2026/09/24/rollout-child.jsonl".into(),
+            fs::read(&child).unwrap(),
+        ),
+    ]));
+    append_native(
+        &parent,
+        json!({"type":"assistant","uuid":"later-launcher","sessionId":"parent",
+          "timestamp":"2026-09-24T00:00:03Z","message":{"role":"assistant","content":[
+          {"type":"tool_use","id":"later-launch","name":"Bash","input":{"command":"codex exec /work/synthetic/prompt.txt"}}
+        ]}}),
+    );
+    scan_file(&parent, "claude", &mut fixture.cache, &mut false).unwrap();
+    fixture.codex("child");
+    let db = Connection::open(&fixture.db).unwrap();
+    let identity = warehouse::retained_identity(&db, &fixture.namespace, "child").unwrap();
+    let source = fixture.source(&[&parent, &child]);
+    let (address, block, retained) = selected::retained_peer_launch_call(
+        &source,
+        "child",
+        &identity.witness,
+        "parent",
+        Some(&provider),
+    )
+    .unwrap();
+    assert_eq!(retained, launch);
+    assert_eq!(address.path, "projects/proj/parent.jsonl");
+    assert_eq!(block, 0);
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let query = crate::native_html::query(&[
+        ("sid", "child"),
+        ("scope", "retained_history"),
+        ("turn", &expected),
+    ]);
+    let response = http::trace(&configured, &query, None, Some(&provider));
+    let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response.status, 200, "{body}");
+    assert_eq!(body["projection"], 7);
+    assert_eq!(body["turns"][0]["id"], expected);
+    assert_eq!(body["handoffs"][0]["from"], "parent");
+    let peer = &body["evidence"][1];
+    assert_eq!(peer["address"]["record"], json!(address));
+    assert_eq!(peer["peer"]["witness"], identity.witness);
+    let address = peer["address"].to_string();
+    let peer = peer["peer"].to_string();
+    let query = crate::native_html::query(&[
+        ("sid", "parent"),
+        ("scope", "retained_history"),
+        ("address", &address),
+        ("peer", &peer),
+    ]);
+    let response = http::transcript(&configured, &query, None, Some(&provider));
+    let reopened: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(response.status, 200, "{reopened}");
+    assert!(
+        reopened["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["address"] == body["evidence"][1]["address"] })
+    );
+    assert!(matches!(
+        selected::retained_peer_launch_call(
+            &source,
+            "child",
+            &"0".repeat(64),
+            "parent",
+            Some(&provider)
+        ),
+        Err(ReadError::PeerUnavailable(_))
+    ));
+}
+
+#[test]
+fn warehouse_retained_signal_survives_append_and_prefix_expiry() {
+    let mut fixture = Fixture::new("retained-signal-expiry");
+    let path = fixture.claude("native", "Original prompt");
+    let offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"system","subtype":"compact_boundary",
+        "sessionId":"native","timestamp":"2026-09-24T00:00:01Z"}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut fs::File::open(&path).unwrap(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    let db = Connection::open(&fixture.db).unwrap();
+    let (source_id, revision): (i64, i64) = db
+        .query_row(
+            "SELECT m.source,m.revision FROM warehouse_identity i
+         JOIN warehouse_identity_member m ON m.identity=i.id WHERE i.catalog_key='native'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    db.execute(
+        "UPDATE warehouse_prefix SET committed_at=?1 WHERE source=?2",
+        params![
+            crate::model::now_ms() - warehouse::PREFIX_WINDOW_MS - 1,
+            source_id
+        ],
+    )
+    .unwrap();
+    append_native(
+        &path,
+        json!({"type":"system","subtype":"compact_boundary",
+        "sessionId":"native","timestamp":"2026-09-24T00:00:02Z",
+        "compactMetadata":{"trigger":"auto","preTokens":123}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let expired: bool = db
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM warehouse_prefix WHERE revision=?1)",
+            [revision],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(expired);
+    fixture.claude("native", "Replacement prompt");
+    let source = fixture.source(&[&path]);
+    let identity = focused_identity(&source, CatalogReadScope::RetainedHistory, "native")
+        .unwrap()
+        .unwrap();
+    crate::archive::seekable::prepare(&archive, &path, &identity.source_refs[0].source).unwrap();
+    let page = selected::retained_latest_page(
+        &source,
+        "native",
+        32,
+        None,
+        &ArchiveReader::new(&fixture.options),
+    )
+    .unwrap();
+    let signal = page
+        .records
+        .iter()
+        .find(|record| record.address.offset == offset)
+        .unwrap()
+        .causal
+        .signals
+        .iter()
+        .find(|slot| slot.signal.k == crate::events::SignalKind::Compact)
+        .unwrap();
+    assert_eq!(signal.signal.n, None);
+    assert_eq!(signal.signal.v, None);
 }
 
 #[test]

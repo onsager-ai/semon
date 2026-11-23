@@ -26,15 +26,15 @@ use serde::{Deserialize, Serialize};
 
 mod native_text;
 mod relay_match;
+pub(crate) use relay_match::{ClaudeRunStep, group_claude_runs};
 mod turns;
+pub(crate) use native_text::notification_result;
 pub(crate) use native_text::{
     assistant_text, content_text, prompt_text, tool_input, tool_result_text,
 };
-use native_text::{coordinator_body, down_target, notification_result};
+use native_text::{coordinator_body, down_target};
 pub(crate) use native_text::{input_string, received_body};
-#[cfg(test)]
 pub(crate) use relay_match::pair_up;
-#[cfg(test)]
 pub(crate) use turns::native_id as native_turn_id;
 
 pub(crate) mod relation_stage;
@@ -475,16 +475,30 @@ fn stable_id(prefix: &str, source: &str) -> String {
     format!("{prefix}{:016x}", fnv(source))
 }
 
+pub(crate) fn result_id(native_id: &str, offset: u64, block: u32) -> String {
+    stable_id("q", &format!("toyou:result:{native_id}:{offset}:{block}"))
+}
+
+pub(crate) fn question_id(native_id: &str, offset: u64, call: Option<&str>) -> String {
+    let fallback;
+    let source = match call {
+        Some(call) => call,
+        None => {
+            fallback = format!("{native_id}:{offset}");
+            &fallback
+        }
+    };
+    stable_id("q", &format!("toyou:{source}"))
+}
+
 pub(crate) fn spawn_turn_id(harness: &str, key: &str) -> String {
     stable_id("s", &format!("spawn:{harness}:{key}"))
 }
 
-#[cfg(test)]
 pub(crate) fn legacy_relay_turn_id(call: &str) -> String {
     stable_id("r", &format!("relay:tool:{call}"))
 }
 
-#[cfg(test)]
 pub(crate) fn incoming_relay_turn_id(
     correlation: Option<&str>,
     native_id: &str,
@@ -906,7 +920,6 @@ impl PidFile {
         self.status.as_deref() == Some("waiting") || self.waiting_for.is_some()
     }
 
-    #[cfg(test)]
     pub(crate) fn observed_state(&self) -> &'static str {
         if self.waiting() {
             "wait"
@@ -1679,22 +1692,31 @@ struct DownMessage {
 type Deliveries = HashMap<usize, Vec<(Ref, Option<String>, String)>>;
 
 /// One run of a Claude subagent ([`Builder::claude_runs`]): how it ended.
-#[derive(Default)]
-struct Run {
+pub(crate) struct Run<A = Ref> {
     /// Its hand-back as the parent received it (the latest, if several).
-    fin: Option<Ref>,
+    pub(crate) fin: Option<A>,
     /// Its agent-end task notification in the parent.
-    tn: Option<Ref>,
+    pub(crate) tn: Option<A>,
     /// Its `SubagentHandback` call in the child.
-    handback: Option<Ref>,
+    pub(crate) handback: Option<A>,
 }
 
-impl Run {
+impl<A> Default for Run<A> {
+    fn default() -> Self {
+        Self {
+            fin: None,
+            tn: None,
+            handback: None,
+        }
+    }
+}
+
+impl<A> Run<A> {
     fn handed_back(&self) -> bool {
         self.fin.is_some() || self.handback.is_some()
     }
 
-    fn ended(&self) -> bool {
+    pub(crate) fn ended(&self) -> bool {
         self.handed_back() || self.tn.is_some()
     }
 }
@@ -4598,14 +4620,10 @@ impl<'a> Builder<'a> {
                     .map(|question| question.question.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                let source = found
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("{}:{}", self.files[at.0].id, found.o));
                 let mut handoff = Handoff {
                     ask: Some("question"),
                     ..Handoff::new(
-                        stable_id("q", &format!("toyou:{source}")),
+                        question_id(&self.files[at.0].id, found.o, found.id.as_deref()),
                         "toyou",
                         (self.sessions[index].key.clone(), "you".into()),
                         found.t.unwrap_or(self.sessions[index].out.last),
@@ -4718,10 +4736,7 @@ impl<'a> Builder<'a> {
                     let handoff = Handoff {
                         ask: Some("result"),
                         ..Handoff::new(
-                            stable_id(
-                                "q",
-                                &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
-                            ),
+                            result_id(&file.id, found.o, found.b),
                             "toyou",
                             (self.sessions[index].key.clone(), "you".into()),
                             found.t.unwrap_or(self.sessions[index].out.last),
@@ -4775,10 +4790,7 @@ impl<'a> Builder<'a> {
                         let handoff = Handoff {
                             ask: Some("result"),
                             ..Handoff::new(
-                                stable_id(
-                                    "q",
-                                    &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
-                                ),
+                                result_id(&file.id, found.o, found.b),
                                 "toyou",
                                 (self.sessions[index].key.clone(), "you".into()),
                                 found.t.unwrap_or(self.sessions[index].out.last),
