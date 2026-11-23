@@ -733,6 +733,7 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "read_transcript",
         "stalls",
         "sql",
+        "context_growth",
         "search",
         "view",
         "schema",
