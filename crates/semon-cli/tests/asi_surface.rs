@@ -671,9 +671,11 @@ fn context_fixture(
 #[test]
 fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
     let home = fixture::Fixture::new();
+    // Fixture::new seeds a complete Codex rollout with the native ID ending in 02.
+    // Reuse that ID for Claude so both harnesses publish it in this origin.
     let base = context_fixture(
         &home,
-        10,
+        2,
         &[
             (0, 150_000, None),
             (1, 105_000, Some("auto")),
@@ -708,10 +710,6 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
             (2, 55_000, None),
         ],
     );
-    home.write(
-        "configured-codex/sessions/2026/11/10/rollout-duplicate.jsonl",
-        format!("{}\n", json!({"timestamp":"2026-11-10T00:00:00Z","type":"session_meta","payload":{"id":base,"cwd":"/fixture"}})).as_bytes(),
-    );
 
     let cache = home.root.join("state/index.json");
     let output = home
@@ -731,28 +729,21 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
         &std::fs::read(home.root.join("state/analytics-namespace")).unwrap(),
     )
     .unwrap();
-    let uid = |native_id: &str| {
-        format!(
-            "{}/claude/{native_id}",
-            namespace["namespace"].as_str().unwrap()
-        )
-    };
+    let namespace = namespace["namespace"].as_str().unwrap();
+    let uid = |native_id: &str| format!("{namespace}/claude/{native_id}");
+    let codex_uid = format!("{namespace}/codex/{base}");
     let timestamp = |minute: u8| 1_794_268_800_000_i64 + i64::from(minute) * 60_000;
     let ambiguous = cli(&["query", "context_growth", &base], cache.clone());
-    assert!(!ambiguous.status.success());
+    assert!(
+        !ambiguous.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ambiguous.stdout)
+    );
     let ambiguous: Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
     assert_eq!(ambiguous["error"]["code"], "invalid_argument");
-    assert!(
-        ambiguous["error"]["detail"]
-            .as_str()
-            .unwrap()
-            .contains("/claude/")
-    );
-    assert!(
-        ambiguous["error"]["detail"]
-            .as_str()
-            .unwrap()
-            .contains("/codex/")
+    assert_eq!(
+        ambiguous["error"]["detail"],
+        format!("{base}: {}, {codex_uid}", uid(&base))
     );
     let query_id = |session_id: &str, flags: &[&str]| {
         let mut arguments = vec!["query", "context_growth"];
@@ -883,7 +874,7 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
 
     let mut server = Server::start(cache);
     let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "name":"context_growth","arguments":{"session_uid":uid(&storm),"since":timestamp(1),"until":timestamp(1)}
+        "name":"context_growth","arguments":{"session_uid":storm,"since":timestamp(1),"until":timestamp(1)}
     }}));
     let (result, failed) = content(&reply);
     assert!(!failed, "{result}");
