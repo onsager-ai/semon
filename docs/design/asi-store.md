@@ -466,7 +466,8 @@ The writer's pure transition table is the authority for chain ownership:
   Explicit operator custody export includes and hashes it, verifies its one-to-one
   live binding, and compares it before guarded reset. Reset removes it with the
   analytics store; coverage continues to read only `fact_session`.
-  ASI schema version 4 requires this contract. Older stores are refused with the
+  ASI schema version 5 keeps this contract and adds recorded `trigger` and
+  `pre_tokens` columns to `fact_compaction`. Older stores are refused with the
   existing export/reset guidance, without migration or dual readers. Export and
   reset also require the current schema: preserve an unsupported store intact and
   use its matching older binary for explicit custody export/reset before rebuilding

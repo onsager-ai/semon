@@ -60,7 +60,7 @@ work. The runnable setup below still needs separate push and Viewer commands.
 | Goal | Current command family |
 | --- | --- |
 | Browse stored native history | `semon sessions --serve` |
-| Read analytics or local evidence | `semon query sql`, `schema`, `search`, `view` (`asi-query` required) |
+| Read analytics or local evidence | `semon query sql`, `schema`, `context_growth`, `search`, `view` (`asi-query` required) |
 | Produce and inspect analytics snapshots | `semon analytics materialize`, `coverage` |
 | Preserve a published analytics snapshot | `semon analytics export DESTINATION` |
 | Author or back up durable labels/work records | `semon asi add`, `backup` |
@@ -253,11 +253,22 @@ The focused native tools read a window of recent logs: only the log files modifi
 | `read_transcript` | `id`, one of `before` / `after` / `turn`, `limit` | a source-backed native transcript page, sharing Viewer slot ordering and rendering |
 | `stalls` | `idle_minutes`, `since` | sessions quiet for that long that are working, wait on a question, or whose process died while its pid file said busy, each with a `stall_reason` |
 | `sql` | `query`, `params`, `limit`, `timeout_ms` | read-only DuckDB SQL over the current local analytics snapshot (build with `--features asi-query`) |
+| `context_growth` | `session_uid`, `since`, `until`, `limit` | assistant-step context sizes and compaction markers from the local snapshot (build with `--features asi-query`) |
 | `search` | `query`, `repo`, `harness`, `part`, `since`, `until`, `limit` | origin-local FTS5 hits with untrusted snippets (build with `--features asi-query`) |
 | `view` | `uid`, `part` | focused origin-local body, step or turn text by full ASI UID (build with `--features asi-query`) |
 | `schema` | `table` | generated ASI analytics schema reference (build with `--features asi-query`) |
 
 `sql` and `schema` read the current local analytics snapshot or generated schema rather than the native-log window; they return compact JSON by default (`--json` is accepted but redundant). `sql --format tsv` prints a tab-delimited header and rows; tabs, newlines and carriage returns in column names and values become spaces. Typed query failures print `{"error":{"code","message","detail"}}` on stdout and exit 1; successful commands exit 0. MCP exposes the generated JSON reference at `semon://asi/schema`. `search` and `view` also default to compact JSON and require materialization; their text is wrapped as untrusted data. Search time filters use inclusive UTC milliseconds (`--since` and `--until`). Remote body queries are refused.
+
+Use `semon query context_growth SESSION_UID [--since MS] [--until MS] [--limit N]`
+with a full ASI `session_uid` from `dim_session`. The MCP tool is also named
+`context_growth`. The result uses the SQL column and row format. Context size
+includes uncached input, cache reads, and cache creation. Each compaction shows
+its recorded trigger, pre-compaction context, and the first measured refill.
+An automatic compaction below half the session peak is early. Each compaction in
+an inclusive 15-minute window containing at least three compactions is part of a
+storm. The time bounds filter returned points using inclusive UTC milliseconds.
+The flags and refill use the full published session. See the [query contract](docs/design/asi-query.md#context_growth).
 
 Session summaries add nullable `activity_analytics`: ownership/context totals, compactions and per-session thrash, waste and empty-search signals, typed change counts and cost completeness. It measures wait time from exact interval unions and reports exclusive waste time and list cost by kind and category. Exact parent families receive aggregate totals only; wait measurements sum each physical session's union. Measurements retain known amounts and unknown-step coverage. See [session activity analytics](docs/design/session-activity-analytics.md) for fields and roll-up semantics. Activity pages contain no raw bytes, source paths, commands or output bodies.
 

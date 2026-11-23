@@ -353,6 +353,8 @@ pub struct Compaction {
     pub compaction_uid: String,
     pub step_uid: Option<String>,
     pub timestamp: Option<i64>,
+    pub trigger: Option<String>,
+    pub pre_tokens: Option<u64>,
 }
 
 /// One immutable rate in the exact table used by an admitted generation.
