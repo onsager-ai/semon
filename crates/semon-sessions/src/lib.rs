@@ -34,7 +34,8 @@ pub use analytics_writer::{
 };
 
 /// Refresh the complete local Catalog and activity through the native producer.
-/// The producer propagates Index and recovery failures.
+/// The producer propagates Index and recovery failures. Local runtime is
+/// captured once for this refresh, including any resumable Catalog batches.
 /// The caller owns the analytics writer lock before invoking this operation.
 pub fn refresh_analytics_catalog(
     options: &Options,
@@ -45,7 +46,7 @@ pub fn refresh_analytics_catalog(
         scan_window: false,
         ..options.clone()
     };
-    let evidence = native_evidence::NativeEvidence::for_source_key("local", options);
+    let evidence = native_evidence::NativeEvidence::for_materialization(options)?;
     evidence
         .catalog_demand
         .store(true, std::sync::atomic::Ordering::Relaxed);

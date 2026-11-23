@@ -27,4 +27,5 @@ libc.workspace = true
 parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }
 rusqlite.workspace = true
 semon-asi = { path = "../semon-asi" }
+semon-sessions = { path = "../semon-sessions", features = ["test-hooks"] }
 tempfile = "3.27.0"

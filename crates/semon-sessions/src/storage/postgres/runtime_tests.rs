@@ -43,7 +43,7 @@ pub(super) fn lifecycle(dsn: &str) {
         .unwrap();
     let namespace = Namespace::new("injected-runtime").unwrap();
     let storage = RuntimeStore::postgres(&options, namespace.clone(), dsn).unwrap();
-    let evidence = NativeEvidence::with_storage(options.clone(), storage);
+    let evidence = NativeEvidence::with_storage(options.clone(), storage, None);
     let sources = Arc::new(SessionSources::from_evidence(vec![(
         namespace.to_string(),
         evidence.clone(),
@@ -405,7 +405,7 @@ pub(super) fn lifecycle(dsn: &str) {
     .unwrap();
     let local_sources = SessionSources::from_evidence(vec![(
         "local-collection".into(),
-        NativeEvidence::with_storage(local_options, local_storage),
+        NativeEvidence::with_storage(local_options, local_storage, None),
     )]);
     let collected = crate::local_facts_in(&local_sources, "local-collection").unwrap();
     assert_eq!(collected.version, crate::FACTS_VERSION);

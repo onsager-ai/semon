@@ -665,9 +665,14 @@ const PUT_CODEX_USAGE: &str = "INSERT OR REPLACE INTO codex_usage (file_id, seq,
 const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool_duration, \
      lines_added, lines_removed, model_usage, capture_at";
 
-const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, cost, duration, \
+const PUT_RUN: &str = "INSERT INTO reported_runs (session_id, start, cost, duration, \
      api_duration, tool_duration, lines_added, lines_removed, model_usage, capture_at) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+     ON CONFLICT(session_id, start) DO UPDATE SET cost=excluded.cost, duration=excluded.duration, \
+     api_duration=excluded.api_duration, tool_duration=excluded.tool_duration, \
+     lines_added=excluded.lines_added, lines_removed=excluded.lines_removed, \
+     model_usage=excluded.model_usage, capture_at=excluded.capture_at \
+     WHERE excluded.capture_at > reported_runs.capture_at";
 
 /// Read the incarnation and journal high-water mark, then let the adapter
 /// select its bounded page and evidence from that same SQLite snapshot.
@@ -928,11 +933,18 @@ pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
-    _runtime: &str,
+    local_runtime: Option<&crate::facts::LocalRuntime>,
 ) -> io::Result<Option<String>> {
     let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let observations = crate::native_evidence::RuntimeObservations::new(options);
+    let observations = match local_runtime {
+        Some(runtime) => crate::native_evidence::RuntimeObservations::from_local_capture(
+            options,
+            runtime,
+            &mut crate::native_timing::Measurements::default(),
+        ),
+        None => crate::native_evidence::RuntimeObservations::new(options),
+    };
     let machine = crate::facts::MachineFacts::of(options);
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -5869,6 +5881,7 @@ pub(crate) fn committed_claude_agent(
 }
 
 const CATALOG_NAMES: &str = "warehouse_codex_names";
+const CATALOG_NAMES_CAPTURE: &str = "warehouse_codex_names_capture";
 
 pub(crate) fn catalog_names_json(db: &Connection) -> rusqlite::Result<Option<String>> {
     db.prepare_cached("SELECT value FROM meta WHERE key=?1")?
@@ -5879,13 +5892,20 @@ pub(crate) fn catalog_names_json(db: &Connection) -> rusqlite::Result<Option<Str
 pub(crate) fn publish_catalog_names(
     options: &crate::Options,
     namespace: &crate::storage::Namespace,
+    local_runtime: Option<&crate::facts::LocalRuntime>,
 ) -> io::Result<()> {
     let _facts_fence = options
         .facts
         .as_ref()
         .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
         .transpose()?;
-    let names = if let Some(path) = options.facts.as_ref() {
+    let captured_at = local_runtime
+        .map_or_else(crate::facts::native_name_capture_time, |runtime| {
+            runtime.native_names_captured_at
+        });
+    let names = if let Some(runtime) = local_runtime {
+        runtime.facts.native_names.clone()
+    } else if let Some(path) = options.facts.as_ref() {
         let Ok(authority) = crate::facts::source_authority::CurrentSources::open(path) else {
             // Offline or unavailable Facts cannot publish a new name observation.
             return Ok(());
@@ -5906,11 +5926,14 @@ pub(crate) fn publish_catalog_names(
         .collect::<BTreeMap<_, _>>();
     let encoded = serde_json::to_string(&names).map_err(io::Error::other)?;
     let path = super::EventCache::path(&options.cache);
-    let db = focused_connection(&path)?;
-    crate::storage::sqlite::qualify(&db, namespace).map_err(io::Error::other)?;
-    let previous = catalog_names_json(&db).map_err(io::Error::other)?;
-    if previous.as_ref() == Some(&encoded) || (previous.is_none() && names.is_empty()) {
-        return Ok(());
+    // A source that has never published names has no name row to clear.
+    // Keep its steady-state refresh read-only so it needs no writer lock.
+    if names.is_empty() {
+        let db = focused_connection(&path)?;
+        crate::storage::sqlite::qualify(&db, namespace).map_err(io::Error::other)?;
+        if catalog_names_json(&db).map_err(io::Error::other)?.is_none() {
+            return Ok(());
+        }
     }
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(io::Error::other)?;
@@ -5918,7 +5941,25 @@ pub(crate) fn publish_catalog_names(
         .map_err(io::Error::other)?;
     require_current(&tx)?;
     crate::storage::sqlite::qualify(&tx, namespace).map_err(io::Error::other)?;
-    tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES, encoded])
+    let previous_capture = tx
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1",
+            [CATALOG_NAMES_CAPTURE],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(io::Error::other)?;
+    if previous_capture.is_some_and(|previous| previous >= captured_at) {
+        return Ok(());
+    }
+    let previous = catalog_names_json(&tx).map_err(io::Error::other)?;
+    if previous.as_ref() != Some(&encoded) {
+        tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES, encoded])
+            .map_err(io::Error::other)?;
+    }
+    // Once a source has published names, even an unchanged observation or
+    // a withdrawal must fence an older in-flight capture.
+    tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES_CAPTURE, captured_at.to_string()])
         .map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
 }
@@ -7217,6 +7258,90 @@ mod tests {
         assert_eq!(saved.len(), 3);
         assert!(saved.iter().all(|run| run.last_session_id == "selected"));
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn older_reported_run_cannot_replace_a_newer_capture() {
+        let root = scratch("reported-run-capture-order");
+        let path = root.join("index.sqlite3");
+        let (mut delayed, _) = opened(&path);
+        let (mut observer, _) = opened(&path);
+        let older = run();
+        let newer = ReportedRunSnapshot {
+            last_cost: Some(2.5),
+            capture_at: older.capture_at + 1,
+            ..older.clone()
+        };
+        observer
+            .write_runs(std::slice::from_ref(&newer), &stamp())
+            .unwrap();
+        assert_eq!(
+            delayed.write_runs(&[older], &stamp()).unwrap().unwrap(),
+            [newer]
+        );
+        drop(observer);
+        drop(delayed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn older_catalog_names_cannot_replace_a_newer_observation() {
+        let root = scratch("catalog-name-capture-order");
+        let options = crate::Options {
+            cache: root.join("index.json"),
+            claude_home: root.join("claude"),
+            claude_json: root.join("claude.json"),
+            codex_home: root.join("codex"),
+            proc_root: root.join("proc"),
+            ..Default::default()
+        };
+        fs::create_dir_all(&options.codex_home).unwrap();
+        let names_path = options.codex_home.join("session_index.jsonl");
+        let id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let set_name = |name: &str| {
+            let row =
+                serde_json::json!({"id":id,"thread_name":name,"updated_at":"2026-09-24T00:00:00Z"});
+            fs::write(&names_path, format!("{row}\n")).unwrap();
+        };
+        let namespace = crate::storage::Namespace::new("local").unwrap();
+        drop(crate::storage::sqlite::open_index(&options, &namespace).unwrap());
+        set_name("older");
+        let mut delayed = crate::facts::LocalRuntime::capture(&options).unwrap();
+        delayed.native_names_captured_at = 1;
+        assert_eq!(delayed.facts.native_names[0].name, "older");
+
+        // Use the ordinary Catalog observer path, then complete the delayed refresh.
+        set_name("newer");
+        publish_catalog_names(&options, &namespace, None).unwrap();
+        publish_catalog_names(&options, &namespace, Some(&delayed)).unwrap();
+        let db = focused_connection(&crate::events::EventCache::path(&options.cache)).unwrap();
+        let saved = catalog_names_json(&db).unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()[id],
+            "newer"
+        );
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_without_published_names_needs_no_writer_lock() {
+        let root = scratch("catalog-empty-names-lock");
+        let options = crate::Options {
+            cache: root.join("index.json"),
+            codex_home: root.join("codex"),
+            ..Default::default()
+        };
+        let namespace = crate::storage::Namespace::new("local").unwrap();
+        drop(crate::storage::sqlite::open_index(&options, &namespace).unwrap());
+        let path = crate::events::EventCache::path(&options.cache);
+        let db = Connection::open(&path).unwrap();
+        let writer = Transaction::new_unchecked(&db, TransactionBehavior::Immediate).unwrap();
+        publish_catalog_names(&options, &namespace, None).unwrap();
+        assert_eq!(catalog_names_json(&writer).unwrap(), None);
+        drop(writer);
+        drop(db);
         fs::remove_dir_all(root).unwrap();
     }
 
