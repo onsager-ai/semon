@@ -4,7 +4,7 @@ use std::{
     fs::{self, File, TryLockError},
     io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
 };
 
 /// An exclusive OS advisory lock on `<state>.lock`, beside a push's state
@@ -28,6 +28,7 @@ use std::{
 pub struct StateLock {
     file: File,
     path: PathBuf,
+    released: Option<mpsc::Sender<()>>,
 }
 
 /// What the lock file says about its holder.
@@ -92,7 +93,11 @@ impl StateLock {
         let file = options.open(&path).map_err(failed)?;
         match file.try_lock() {
             Ok(()) => {
-                let lock = Self { file, path };
+                let lock = Self {
+                    file,
+                    path,
+                    released: None,
+                };
                 lock.describe_holder(false);
                 Ok(lock)
             }
@@ -122,6 +127,13 @@ impl StateLock {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The channel disconnects after the last owner drops the lock and closes the file.
+    pub(crate) fn notify_on_release(&mut self) -> mpsc::Receiver<()> {
+        let (released, wait) = mpsc::channel();
+        self.released = Some(released);
+        wait
     }
 
     /// Writes who holds the lock, and whether its push has returned with
@@ -225,13 +237,17 @@ mod tests {
     #[test]
     fn a_hold_shared_with_running_work_keeps_the_lock_and_says_so() {
         let state = state_path("hold");
-        let hold = Hold::new(StateLock::acquire(&state).unwrap());
+        let mut lock = StateLock::acquire(&state).unwrap();
+        let released = lock.notify_on_release();
+        let hold = Hold::new(lock);
         let work = hold.share();
         drop(hold);
         let error = StateLock::acquire(&state).unwrap_err();
         #[cfg(unix)]
         assert!(error.contains("still finishing"), "{error}");
+        assert_eq!(released.try_recv(), Err(mpsc::TryRecvError::Empty));
         drop(work);
+        assert_eq!(released.try_recv(), Err(mpsc::TryRecvError::Disconnected));
         drop(StateLock::acquire(&state).unwrap());
         let _ = fs::remove_dir_all(state.parent().unwrap().parent().unwrap());
     }

@@ -61,8 +61,11 @@ use super::{
 use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
+type BeforeFreshWal = Box<dyn FnOnce(&Connection)>;
+
+#[cfg(test)]
 std::thread_local! {
-    static BEFORE_FRESH_WAL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_FRESH_WAL: std::cell::RefCell<Option<BeforeFreshWal>> = const { std::cell::RefCell::new(None) };
     static BEFORE_STORAGE_INIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_SOURCE_INVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -4240,10 +4243,18 @@ impl SqliteStore {
             .map_err(classify)?;
             db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
             let read = db.unchecked_transaction().map_err(classify)?;
-            if let Init::Unsupported(reason) = qualify_producer(&read).map_err(classify)? {
-                return Err(Unopened::Unsupported(unsupported_message(&read, reason)));
+            match qualify_producer(&read) {
+                Ok(Init::Unsupported(reason)) => {
+                    return Err(Unopened::Unsupported(unsupported_message(&read, reason)));
+                }
+                Ok(_) => read.commit().map_err(classify)?,
+                // An interrupted rollback-journal write needs a writable pager
+                // before it can expose the committed state. init qualifies that
+                // state again before changing the journal mode or schema.
+                Err(rusqlite::Error::SqliteFailure(code, _))
+                    if code.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK => {}
+                Err(error) => return Err(classify(error)),
             }
-            read.commit().map_err(classify)?;
         }
         #[cfg(test)]
         if let Some(hook) = BEFORE_STORAGE_INIT.with(|hook| hook.borrow_mut().take()) {
@@ -5094,16 +5105,65 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.set_prepared_statement_cache_capacity(32);
     let read = connection.transaction()?;
     let found = qualify_producer(&read)?;
-    read.commit()?;
     if matches!(found, Init::Unsupported(_)) {
         return Ok(found);
     }
-    let fresh = matches!(found, Init::Fresh);
-    let mut initialized = false;
-    if fresh {
-        // Cold initialization retains exclusion through the first WAL switch.
+    let mode: String = read.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    read.commit()?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        if !matches!(found, Init::Fresh) {
+            return Ok(Init::Unsupported("unsupported session index: journal mode"));
+        }
+        // SQLite changes journal mode outside a transaction. Retain the
+        // exclusive lock from qualification through the switch so another
+        // writer cannot install a schema in between.
         connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        let found = qualify_producer(&transaction)?;
+        transaction.commit()?;
+        let mode: String = match found {
+            Init::Fresh => {
+                #[cfg(test)]
+                if let Some(hook) = BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
+                    hook(connection);
+                }
+                connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?
+            }
+            Init::Ready => connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?,
+            unsupported => return Ok(unsupported),
+        };
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Ok(if matches!(found, Init::Fresh) {
+                Init::NoWal
+            } else {
+                Init::Unsupported("unsupported session index: journal mode")
+            });
+        }
+        let Some(path) = connection
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            return Ok(Init::NoWal);
+        };
+        let old = std::mem::replace(connection, Connection::open_in_memory()?);
+        drop(old);
+        *connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        return init(connection);
+    }
+    if matches!(found, Init::Fresh) {
+        // A stop before this commit leaves a blank WAL database. The next
+        // producer can initialize it, and concurrent producers serialize here.
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mode: String = transaction.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Ok(Init::Unsupported("unsupported session index: journal mode"));
+        }
         match qualify_producer(&transaction)? {
             Init::Fresh => {
                 for ddl in storage_ddl() {
@@ -5114,43 +5174,11 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     [CACHE_VERSION.to_string(), crate::storage::sqlite::stamp()],
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-                initialized = true;
             }
             Init::Ready => {}
             unsupported => return Ok(unsupported),
         }
         transaction.commit()?;
-    }
-    #[cfg(test)]
-    if initialized && let Some(hook) = BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
-        hook();
-    }
-    let mut mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
-    if initialized && !mode.eq_ignore_ascii_case("wal") {
-        mode = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
-    }
-    if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(if fresh {
-            Init::NoWal
-        } else {
-            Init::Unsupported("unsupported session index: journal mode")
-        });
-    }
-    if fresh
-        && let Some(path) = connection
-            .path()
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-    {
-        let old = std::mem::replace(connection, Connection::open_in_memory()?);
-        drop(old);
-        *connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        return init(connection);
     }
     let _: i64 = connection.query_row(
         &format!("PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}"),
@@ -11571,7 +11599,11 @@ mod tests {
         let path = root.join("index.sqlite3");
         let other_path = path.clone();
         BEFORE_FRESH_WAL.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
+            *slot.borrow_mut() = Some(Box::new(move |initializing| {
+                assert!(matches!(
+                    qualify_producer(initializing).unwrap(),
+                    Init::Fresh
+                ));
                 let other = Connection::open(&other_path).unwrap();
                 other.busy_timeout(Duration::ZERO).unwrap();
                 let error = other
@@ -11588,6 +11620,70 @@ mod tests {
         assert_eq!(mode, "normal");
         assert!(current(&store.connection).unwrap());
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_initialization_resumes_from_blank_wal_and_refuses_populated_delete_mode() {
+        let root = scratch("first-wal-reopen");
+        let path = root.join("index.sqlite3");
+        let db = Connection::open(&path).unwrap();
+        let mode: String = db
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        drop(db);
+
+        let (store, _) = opened(&path);
+        assert!(current(&store.connection).unwrap());
+        let mode: String = store
+            .connection
+            .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(store);
+        let before = fs::read(&path).unwrap();
+        match SqliteStore::attempt(&path) {
+            Err(Unopened::Unsupported(error)) => assert!(error.contains("journal mode")),
+            _ => panic!("a populated DELETE-mode Index must be refused"),
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn storage_initialization_recovers_an_interrupted_rollback_journal() {
+        let root = scratch("first-wal-rollback");
+        let live_path = root.join("live.sqlite3");
+        let path = root.join("index.sqlite3");
+        let db = Connection::open(&live_path).unwrap();
+        // Spill uncommitted pages to disk, then snapshot the files while
+        // the writer is still live to model a process exit before rollback.
+        db.execute_batch(
+            "PRAGMA user_version = 0;
+             PRAGMA cache_size = 2;
+             BEGIN IMMEDIATE;
+             CREATE TABLE transient (payload BLOB);
+             WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<16)
+             INSERT INTO transient SELECT randomblob(4096) FROM rows;",
+        )
+        .unwrap();
+        fs::copy(&live_path, &path).unwrap();
+        fs::copy(sibling(&live_path, "-journal"), sibling(&path, "-journal")).unwrap();
+        drop(db);
+
+        let ro = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let error = ro
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap_err();
+        assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _)
+            if code.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK));
+        drop(ro);
+
+        let (store, _) = opened(&path);
+        assert!(current(&store.connection).unwrap());
+        drop(store);
+        assert!(!sibling(&path, "-journal").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

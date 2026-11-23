@@ -702,18 +702,22 @@ fn push_watch_stops_on(name: &str, number: i32) {
         .status()
         .unwrap();
     assert!(interrupted.success());
-    let status = watch.wait().unwrap();
-    assert_eq!(status.signal(), Some(number), "{status:?}");
-    let mut stopped = false;
-    while let Ok(line) = said.recv_timeout(Duration::from_secs(5)) {
-        stopped |= line == "semon push: stopped";
+    // The stop message is the handoff point, even before reaping the process.
+    loop {
+        let line = said
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the watch didn't stop through its stop");
+        if line == "semon push: stopped" {
+            break;
+        }
     }
-    assert!(stopped, "the watch didn't stop through its stop");
-
     fixture.append(&log, claude("after the stop").as_bytes());
     let pushed = fixture.push(&url);
     assert_ok(&pushed, "a push after the watch stopped");
     assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
+
+    let status = watch.wait().unwrap();
+    assert_eq!(status.signal(), Some(number), "{status:?}");
 }
 
 #[test]
