@@ -1606,7 +1606,7 @@ fn run_unpair(args: &[String]) -> Result<(), String> {
 fn run_push(args: &PushArgs) -> Result<(), String> {
     let stop = semon_push::Stop::new();
     interrupt::stop_on_signal(&stop);
-    let result = semon_push::push_until(&args.options, args.watch, &stop);
+    let result = semon_push::push_until_drained(&args.options, args.watch, &stop);
     if interrupt::received()
         && let Err(error) = &result
     {

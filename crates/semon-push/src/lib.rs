@@ -1605,9 +1605,25 @@ pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
 /// `reqwest::blocking`, which panics inside a tokio runtime (in an async
 /// Tauri command, say; use `spawn_blocking` or `std::thread::spawn`).
 pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()> {
-    // Declared first, so it is dropped last, after the client and the
-    // facts worker have let go of their shares.
-    let hold = Hold::new(StateLock::acquire(&options.state)?);
+    push_locked(options, watch, stop, StateLock::acquire(&options.state)?)
+}
+
+/// Like [`push_until`], but waits for all work holding the state lock to finish.
+/// A CLI must use this before reporting it has stopped or exiting on a signal.
+/// The wait includes any in-flight request and Index collection.
+pub fn push_until_drained(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()> {
+    let mut lock = StateLock::acquire(&options.state)?;
+    let released = lock.notify_on_release();
+    let result = push_locked(options, watch, stop, lock);
+    // The last owner closes the lock file and disconnects the channel.
+    let _ = released.recv();
+    result
+}
+
+fn push_locked(options: &PushOptions, watch: bool, stop: &Stop, lock: StateLock) -> Result<()> {
+    // Declared first, so it can mark the lock as finishing if a worker
+    // still holds a share after the foreground work returns.
+    let hold = Hold::new(lock);
     let mut client = Client::new(options)?
         .with_stop(stop.clone())
         .with_lock(hold.share());
