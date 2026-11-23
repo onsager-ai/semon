@@ -458,7 +458,7 @@ where
     start_thread(config, clock, None)
 }
 
-/// Ownership acquired before namespace creation or native Catalog mutation.
+/// Ownership of the local analytics store and its publication lock.
 pub struct Owner {
     lock: WriterLock,
     clock: Arc<semon_asi::SystemClock>,

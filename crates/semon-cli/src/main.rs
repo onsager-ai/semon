@@ -180,7 +180,7 @@ enum AsiFormat {
 
 /// Explicit local origin analytics publication over one native Event Index.
 struct MaterializeArgs {
-    home: HomeArgs,
+    cache: PathBuf,
     watch: bool,
     input_budget: semon_sessions::InputBudget,
 }
@@ -409,7 +409,7 @@ fn parse_analytics_args(mut arguments: impl Iterator<Item = String>) -> Result<C
 fn parse_materialize_args(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<MaterializeArgs, String> {
-    let mut home = HomeArgs::default();
+    let mut cache = semon_sessions::Options::default().cache;
     let mut watch = false;
     let mut input_budget = semon_sessions::InputBudget::default();
     while let Some(argument) = arguments.next() {
@@ -418,11 +418,15 @@ fn parse_materialize_args(
                 .next()
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
-        if home.take(&argument, &mut value)? {
-            continue;
-        }
         match argument.as_str() {
             "--watch" => watch = true,
+            "--cache" => cache = value()?.into(),
+            "--machine" => {
+                return Err(
+                    "analytics materialize requires one local Event Index; --machine is not supported"
+                        .into(),
+                );
+            }
             "--batch-sessions" | "--batch-steps" => {
                 let limit = value()?
                     .parse::<usize>()
@@ -448,15 +452,8 @@ fn parse_materialize_args(
             }
         }
     }
-    home.check()?;
-    if !home.machines.is_empty() {
-        return Err(
-            "analytics materialize requires one local Event Index; --machine is not supported"
-                .into(),
-        );
-    }
     Ok(MaterializeArgs {
-        home,
+        cache,
         watch,
         input_budget,
     })
@@ -1459,22 +1456,16 @@ fn publish_materialization(
     }
 }
 
-/// Materialize the local Analytics Store from the native Event Index. The
-/// Catalog refresh drains the strict native producer used by the Viewer;
-/// analytics only opens its successfully published SQLite result.
+/// Materialize the local Analytics Store from committed native evidence.
 fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
-    let options = semon_sessions::Options {
-        since: args.home.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
-        ..args.home.options
-    };
-    let index_path = semon_sessions::analytics_index_path(&options.cache);
+    let index_path = semon_sessions::analytics_index_path(&args.cache);
     let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
         format!(
             "analytics materialize requires an Event Index path with a parent: {}",
             index_path.display()
         )
     })?;
-    let initialized = semon_sessions::analytics::initialize(&index_path, None, || false)
+    let initialized = semon_sessions::analytics::initialize_from_catalog(&index_path, || false)
         .map_err(|error| error.to_string())?;
     println!("{}", initialized.disposition.message());
     let namespace = initialized.binding.namespace;
@@ -1486,7 +1477,7 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
     );
     config.input_budget = args.input_budget;
     // One-shot materialization drains bounded chunks immediately. Watch keeps
-    // the default spacing so each continuation yields to native discovery.
+    // the default spacing between publication attempts.
     if !args.watch {
         config.interval = std::time::Duration::ZERO;
     }
@@ -1497,16 +1488,12 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         interrupt::stop_on_signal(&stop);
     }
     let result = (|| {
-        semon_sessions::refresh_analytics_catalog(&options, || stop.is_stopped())
-            .map_err(|error| format!("catalog refresh: {error}"))?;
         publish_materialization(&writer, &stop)?;
         println!(
             "analytics materialized: namespace={namespace} store={} status=idle",
             store_root.display()
         );
         while args.watch && !stop.sleep(std::time::Duration::from_secs(2)) {
-            semon_sessions::refresh_analytics_catalog(&options, || stop.is_stopped())
-                .map_err(|error| format!("catalog refresh: {error}"))?;
             publish_materialization(&writer, &stop)?;
         }
         Ok(())
@@ -2422,9 +2409,8 @@ fn query_usage() -> String {
 }
 
 fn analytics_usage() -> String {
-    "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
-     Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
-     Catalog refresh is complete; --since/--all do not bound analytics input.\n\
+    "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--cache PATH]\n\
+     Materializes analytics from the committed local Catalog and Event Index.\n\
      Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
      One-shot finishes inherited replay, then drains immediately through a fresh endpoint; later changes belong to the next request.\n\
      --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait.\n\
@@ -2457,8 +2443,8 @@ fn usage() -> String {
          Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
          The agent read surface over native session evidence. `semon query` alone lists each tool's arguments.\n\
          \n\
-         Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
-         Explicitly refreshes the local native Catalog and materializes local-only analytics. Nothing starts this writer by default.\n\
+         Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--cache PATH]\n\
+         Materializes local-only analytics from the committed native Catalog and Event Index. Nothing starts this writer by default.\n\
          Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
          \n\
          Usage: semon analytics coverage [--cache PATH] [--json]\n\
@@ -2498,73 +2484,6 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn materialize_publishes_when_a_process_exits_after_runtime_capture() {
-        let root = tempfile::tempdir().unwrap();
-        let claude_home = root.path().join("claude");
-        let projects = claude_home.join("projects/-work-proj");
-        let pids = claude_home.join("sessions");
-        let proc_root = root.path().join("proc");
-        let process = proc_root.join("42/stat");
-        std::fs::create_dir_all(&projects).unwrap();
-        std::fs::create_dir_all(&pids).unwrap();
-        std::fs::create_dir_all(process.parent().unwrap()).unwrap();
-        std::fs::write(
-            projects.join("fixture.jsonl"),
-            concat!(
-                "{\"type\":\"user\",\"uuid\":\"user\",\"sessionId\":\"fixture\",\"timestamp\":\"2026-09-24T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"Synthetic request\"}}\n",
-                "{\"type\":\"assistant\",\"uuid\":\"reply\",\"sessionId\":\"fixture\",\"timestamp\":\"2026-09-24T00:01:00Z\",\"message\":{\"id\":\"reply\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[{\"type\":\"text\",\"text\":\"Synthetic reply\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n",
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            pids.join("42.json"),
-            r#"{"sessionId":"fixture","procStart":777}"#,
-        )
-        .unwrap();
-        std::fs::write(&process, format!("42 (claude) {}777\n", "0 ".repeat(19))).unwrap();
-        let options = semon_sessions::Options {
-            claude_home,
-            claude_json: root.path().join(".claude.json"),
-            codex_home: root.path().join("codex"),
-            copilot_home: root.path().join("copilot"),
-            proc_root,
-            cache: root.path().join("state/index.json"),
-            annotations: root.path().join("annotations.jsonl"),
-            all: true,
-            ..Default::default()
-        };
-        let index = semon_sessions::analytics_index_path(&options.cache);
-        let store = semon_sessions::analytics_store_root(&index).unwrap();
-        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observed_exit = exited.clone();
-        let _hook = semon_sessions::test_hooks::register(&options.cache, move |point| {
-            if point == "runtime_captured"
-                && !observed_exit.swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
-                std::fs::remove_file(&process).unwrap();
-            }
-        });
-        run_materialize(MaterializeArgs {
-            home: HomeArgs {
-                options,
-                ..Default::default()
-            },
-            watch: false,
-            input_budget: semon_sessions::InputBudget {
-                max_sessions: 16,
-                max_steps: 4096,
-            },
-        })
-        .unwrap();
-        assert!(exited.load(std::sync::atomic::Ordering::Relaxed));
-        let manifest = semon_asi::read_manifest(&store).unwrap().unwrap();
-        assert_eq!(
-            semon_asi::read_live_map(&store, &manifest).unwrap().len(),
-            1
-        );
-    }
 
     #[test]
     fn durable_add_parser_requires_explicit_row_and_values_source() {

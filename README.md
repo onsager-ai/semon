@@ -47,9 +47,9 @@ semon query search 'timeout'
 ```
 
 Use `semon query view FULL_ASI_UID` with a `body_uid` returned by search to inspect
-a hit. `semon query schema` describes the analytics tables. Materialization refreshes
-the full local Catalog; initial preparation can take time. It publishes one
-snapshot and exits. For ongoing publication, run `semon analytics materialize
+a hit. `semon query schema` describes the analytics tables. Materialization reads the local Catalog and Event Index. Keep the Viewer running
+and let its Catalog finish preparing before publishing a full snapshot. Materialize
+publishes one snapshot and exits. For ongoing publication, run `semon analytics materialize
 --watch` in another process; Viewer and MCP do not start that writer automatically.
 These commands keep data local. The [centralized default contract](docs/design/asi-centralized.md)
 uses `push`/`receive` for durable redacted-log custody across one owner's machines;
@@ -299,20 +299,21 @@ semon query get_session SESSION_ID --all                 # every log file
 ## Local analytics materialization
 
 `semon analytics materialize` is the explicit, local-only entry point for
-analytics publication. It drains the Viewer's native Catalog producer in strict
-mode, then writes Parquet under `<index parent>/analytics-store`; Viewer,
-MCP, push and receive never enable it implicitly. The shared library initializer
-creates an empty current native index and records a random namespace plus an
+analytics publication. Start `semon sessions --serve` to populate and refresh
+the Catalog, then run materialize with the same `--cache` if you set one. It reads
+committed Catalog and Event Index evidence and writes Parquet under
+`<index parent>/analytics-store`. Viewer, MCP, push and receive never enable
+analytics publication implicitly. The analytics initializer records a random namespace plus an
 independent origin incarnation together in the private JSON
 `<index parent>/analytics-namespace`. Later calls reuse all three identities;
 initialization alone leaves publication pending and writes no empty snapshot.
 Deleting that state directory creates a new namespace and new session IDs;
 there is no automatic reconciliation or rename/transfer workflow yet. Typed
 local paths can be present in the Parquet, so governed export remains a
-separate operation. Writer ownership is acquired before namespace creation or
-Catalog refresh; contention explains that another process is writing local analytics without changing the
-index or namespace. Corrupt or unsupported indexes are refused unchanged.
-Catalog refresh is complete; `--since`/`--all` do not bound analytics input.
+separate operation. Writer ownership precedes namespace creation. A missing
+Catalog, a busy writer, or a corrupt or unsupported index causes a refusal.
+Materialize can read committed rows while Catalog backfill continues. Those
+rows become eligible for analytics as the Catalog producer publishes them.
 `--batch-sessions N` limits sessions or journal entries per chunk (default 64),
 and `--batch-steps N` limits admitted steps (default 8192). Both limits must be
 positive integers no greater than `min(usize::MAX, i64::MAX)` for the build
@@ -331,13 +332,13 @@ chain. Its retries can add failures to the overall wait; they neither spend nor
 reset the publication budget. Terminal refusal, NoWriter, owning-waiter
 cancellation and shutdown drop the chain. The next chain starts at zero.
 Each request waits for all required chunks and final compaction. `--watch` exits
-on refresh or publication failure and cancels its wait on SIGINT/SIGTERM before
+on publication failure and cancels its wait on SIGINT/SIGTERM before
 joining the writer and re-raising the signal.
 
 ```sh
-semon analytics materialize --all
-semon analytics materialize --all --batch-sessions 16 --batch-steps 4096
-semon analytics materialize --watch --since 7d
+semon analytics materialize
+semon analytics materialize --batch-sessions 16 --batch-steps 4096
+semon analytics materialize --watch
 ```
 
 `semon analytics coverage` reads one already-published analytics snapshot without

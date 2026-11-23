@@ -804,17 +804,36 @@ pub(super) fn open_scoped(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), 
 /// Create only the current cold native index; no source discovery or recovery.
 pub(crate) fn initialize_analytics_index(path: &Path) -> Result<String, String> {
     drop(open_scoped(path)?);
-    analytics_index_incarnation(path).map_err(|error| error.to_string())
+    analytics_index_incarnation(path, false).map_err(|error| error.to_string())
 }
 
-pub(crate) fn analytics_index_incarnation(path: &Path) -> Result<String, crate::analytics::Error> {
+pub(crate) fn analytics_index_incarnation(
+    path: &Path,
+    require_catalog: bool,
+) -> Result<String, crate::analytics::Error> {
     use crate::analytics::{Error, ErrorKind, Stage};
     let db = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
-    qualified_analytics_incarnation(&db)
+    let tx = db
+        .unchecked_transaction()
+        .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
+    let incarnation = qualified_analytics_incarnation(&tx)?;
+    if require_catalog {
+        let published: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
+        if !published {
+            return Err(Error::new(ErrorKind::CatalogUnavailable, Stage::Index));
+        }
+    }
+    Ok(incarnation)
 }
 
 /// Qualify an already-open snapshot without reopening or initializing the store.
@@ -933,18 +952,10 @@ pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
-    local_runtime: Option<&crate::facts::LocalRuntime>,
 ) -> io::Result<Option<String>> {
     let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
         .map_err(|error| io::Error::other(error.to_string()))?;
-    let observations = match local_runtime {
-        Some(runtime) => crate::native_evidence::RuntimeObservations::from_local_capture(
-            options,
-            runtime,
-            &mut crate::native_timing::Measurements::default(),
-        ),
-        None => crate::native_evidence::RuntimeObservations::new(options),
-    };
+    let observations = crate::native_evidence::RuntimeObservations::new(options);
     let machine = crate::facts::MachineFacts::of(options);
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
@@ -5892,20 +5903,14 @@ pub(crate) fn catalog_names_json(db: &Connection) -> rusqlite::Result<Option<Str
 pub(crate) fn publish_catalog_names(
     options: &crate::Options,
     namespace: &crate::storage::Namespace,
-    local_runtime: Option<&crate::facts::LocalRuntime>,
 ) -> io::Result<()> {
     let _facts_fence = options
         .facts
         .as_ref()
         .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
         .transpose()?;
-    let captured_at = local_runtime
-        .map_or_else(crate::facts::native_name_capture_time, |runtime| {
-            runtime.native_names_captured_at
-        });
-    let names = if let Some(runtime) = local_runtime {
-        runtime.facts.native_names.clone()
-    } else if let Some(path) = options.facts.as_ref() {
+    let captured_at = crate::facts::native_name_capture_time();
+    let names = if let Some(path) = options.facts.as_ref() {
         let Ok(authority) = crate::facts::source_authority::CurrentSources::open(path) else {
             // Offline or unavailable Facts cannot publish a new name observation.
             return Ok(());
@@ -5957,8 +5962,8 @@ pub(crate) fn publish_catalog_names(
         tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES, encoded])
             .map_err(io::Error::other)?;
     }
-    // Once a source has published names, even an unchanged observation or
-    // a withdrawal must fence an older in-flight capture.
+    // An observer and a Viewer can read the same name source before either
+    // gets the writer lock. An unchanged observation also fences older reads.
     tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES_CAPTURE, captured_at.to_string()])
         .map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
@@ -7286,46 +7291,6 @@ mod tests {
     }
 
     #[test]
-    fn older_catalog_names_cannot_replace_a_newer_observation() {
-        let root = scratch("catalog-name-capture-order");
-        let options = crate::Options {
-            cache: root.join("index.json"),
-            claude_home: root.join("claude"),
-            claude_json: root.join("claude.json"),
-            codex_home: root.join("codex"),
-            proc_root: root.join("proc"),
-            ..Default::default()
-        };
-        fs::create_dir_all(&options.codex_home).unwrap();
-        let names_path = options.codex_home.join("session_index.jsonl");
-        let id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-        let set_name = |name: &str| {
-            let row =
-                serde_json::json!({"id":id,"thread_name":name,"updated_at":"2026-09-24T00:00:00Z"});
-            fs::write(&names_path, format!("{row}\n")).unwrap();
-        };
-        let namespace = crate::storage::Namespace::new("local").unwrap();
-        drop(crate::storage::sqlite::open_index(&options, &namespace).unwrap());
-        set_name("older");
-        let mut delayed = crate::facts::LocalRuntime::capture(&options).unwrap();
-        delayed.native_names_captured_at = 1;
-        assert_eq!(delayed.facts.native_names[0].name, "older");
-
-        // Use the ordinary Catalog observer path, then complete the delayed refresh.
-        set_name("newer");
-        publish_catalog_names(&options, &namespace, None).unwrap();
-        publish_catalog_names(&options, &namespace, Some(&delayed)).unwrap();
-        let db = focused_connection(&crate::events::EventCache::path(&options.cache)).unwrap();
-        let saved = catalog_names_json(&db).unwrap().unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&saved).unwrap()[id],
-            "newer"
-        );
-        drop(db);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn catalog_without_published_names_needs_no_writer_lock() {
         let root = scratch("catalog-empty-names-lock");
         let options = crate::Options {
@@ -7338,7 +7303,7 @@ mod tests {
         let path = crate::events::EventCache::path(&options.cache);
         let db = Connection::open(&path).unwrap();
         let writer = Transaction::new_unchecked(&db, TransactionBehavior::Immediate).unwrap();
-        publish_catalog_names(&options, &namespace, None).unwrap();
+        publish_catalog_names(&options, &namespace).unwrap();
         assert_eq!(catalog_names_json(&writer).unwrap(), None);
         drop(writer);
         drop(db);

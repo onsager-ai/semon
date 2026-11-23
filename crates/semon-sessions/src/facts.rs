@@ -10,7 +10,6 @@ use std::{
     env, fs,
     io::{self, Read},
     path::Path,
-    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -295,20 +294,6 @@ pub fn local_runtime_facts(options: &crate::Options) -> io::Result<Facts> {
     }
     let codex_locks = codex_locks(options);
     let pids = model::pid_files(options, &MachineFacts::Local);
-    Ok(local_process_facts(
-        options,
-        &pids,
-        proc_starts,
-        codex_locks,
-    ))
-}
-
-fn local_process_facts(
-    options: &Options,
-    pids: &[model::PidFile],
-    proc_starts: BTreeMap<u32, u64>,
-    codex_locks: BTreeMap<String, u32>,
-) -> Facts {
     let mut runs = BTreeMap::new();
     let mut process_ancestors = BTreeMap::new();
     let machine = MachineFacts::Local;
@@ -331,7 +316,7 @@ fn local_process_facts(
             process_ancestors.insert(pid, ancestors);
         }
     }
-    Facts {
+    Ok(Facts {
         process_ancestors,
         version: FACTS_VERSION,
         push_observation_id: None,
@@ -348,7 +333,7 @@ fn local_process_facts(
         runs,
         reported_runs: Vec::new(),
         native_names: Vec::new(),
-    }
+    })
 }
 
 pub(crate) fn env_home() -> Option<String> {
@@ -376,23 +361,17 @@ fn claude_pids(options: &Options) -> BTreeSet<u32> {
 }
 
 fn codex_locks(options: &Options) -> BTreeMap<String, u32> {
-    codex_lock_observations(options).map_or_else(BTreeMap::new, |(_, held)| held)
-}
-
-fn codex_lock_observations(options: &Options) -> Option<(BTreeSet<String>, BTreeMap<String, u32>)> {
-    let locks = fs::read_to_string(options.proc_root.join("locks")).ok()?;
-    let mut files = BTreeSet::new();
     let mut held = BTreeMap::new();
-    if let Ok(entries) = fs::read_dir(options.codex_home.join("thread-writer-locks")) {
+    #[cfg(unix)]
+    if let (Ok(locks), Ok(entries)) = (
+        fs::read_to_string(options.proc_root.join("locks")),
+        fs::read_dir(options.codex_home.join("thread-writer-locks")),
+    ) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(id) = name.to_str().and_then(|name| name.strip_suffix(".lock")) else {
                 continue;
             };
-            if entry.metadata().is_ok_and(|metadata| metadata.is_file()) {
-                files.insert(id.to_owned());
-            }
-            #[cfg(unix)]
             if let Ok((major, minor, ino)) = crate::lock_identity(&entry.path())
                 && let Some(pid) = lock_pid(&locks, major, minor, ino)
             {
@@ -401,12 +380,11 @@ fn codex_lock_observations(options: &Options) -> Option<(BTreeSet<String>, BTree
         }
     }
     #[cfg(not(unix))]
-    let _ = locks;
-    Some((files, held))
+    let _ = options;
+    held
 }
 
-/// Order name observations across Index writers using the wall clock, even
-/// when presentation tests fix the model's clock.
+/// Order name observations across Index writers even when tests fix the model clock.
 pub(crate) fn native_name_capture_time() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -415,88 +393,9 @@ pub(crate) fn native_name_capture_time() -> i64 {
         })
 }
 
-/// One in-memory capture for the complete local materialization refresh.
-/// A subsequent refresh captures again, including in watch mode.
-pub(crate) struct LocalRuntime {
-    pub(crate) facts: Facts,
-    pub(crate) pids: Vec<model::PidFile>,
-    lock_files: Option<BTreeSet<String>>,
-    pub(crate) native_names_captured_at: i64,
-    pub(crate) reported_runs_stamp: Option<crate::events::ReportedFileStamp>,
-    pub(crate) captured_at: i64,
-    pub(crate) generation: String,
-}
-
-impl LocalRuntime {
-    pub(crate) fn capture(options: &Options) -> io::Result<Self> {
-        use sha2::{Digest, Sha256};
-
-        let captured_at = model::now_ms();
-        let mut pids = model::pid_files(options, &MachineFacts::Local);
-        let locks = codex_lock_observations(options);
-        let (lock_files, held_locks) = match locks {
-            Some((files, held)) => (Some(files), held),
-            None => (None, BTreeMap::new()),
-        };
-        let proc_starts = pids
-            .iter()
-            .map(|pid| pid.pid)
-            .chain(held_locks.values().copied())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter_map(|pid| proc_start(&options.proc_root, pid).map(|start| (pid, start)))
-            .collect::<BTreeMap<_, _>>();
-        for pid in &mut pids {
-            pid.alive &= proc_starts.get(&pid.pid).copied() == pid.start;
-        }
-        let mut facts = local_process_facts(options, &pids, proc_starts, held_locks);
-        // Exclude sessions that changed process identity during the capture.
-        facts
-            .proc_starts
-            .retain(|&pid, start| proc_start(&options.proc_root, pid) == Some(*start));
-        if !facts.codex_locks.is_empty() {
-            let current = codex_locks(options);
-            facts.codex_locks.retain(|id, pid| {
-                current.get(id) == Some(pid) && facts.proc_starts.contains_key(pid)
-            });
-        }
-        facts
-            .runs
-            .retain(|pid, _| facts.proc_starts.contains_key(pid));
-        facts
-            .process_ancestors
-            .retain(|pid, _| facts.proc_starts.contains_key(pid));
-        for pid in &mut pids {
-            pid.alive &= facts.proc_starts.get(&pid.pid).copied() == pid.start;
-        }
-        let native_names_captured_at = native_name_capture_time();
-        facts.native_names = native_names::read(&options.codex_home);
-        for name in &mut facts.native_names {
-            name.observed_at = 0;
-        }
-        let reported_runs_stamp =
-            crate::events::capture_reported_runs(&options.claude_json).map(|(stamp, runs)| {
-                facts.reported_runs = runs;
-                stamp
-            });
-        let bytes = serde_json::to_vec(&(&facts, &pids, &lock_files)).map_err(io::Error::other)?;
-        let generation = format!("{:x}", Sha256::digest(bytes));
-        Ok(Self {
-            facts,
-            pids,
-            lock_files,
-            native_names_captured_at,
-            reported_runs_stamp,
-            captured_at,
-            generation,
-        })
-    }
-}
-
 /// Where the builder learns about the machine: this one, or a facts file.
 pub(crate) enum MachineFacts {
     Local,
-    Captured(Arc<LocalRuntime>),
     Recorded(Box<Facts>),
 }
 
@@ -508,13 +407,6 @@ pub(crate) enum Lock {
 }
 
 impl MachineFacts {
-    pub(crate) fn local_capture(&self) -> Option<&LocalRuntime> {
-        match self {
-            Self::Captured(runtime) => Some(runtime),
-            _ => None,
-        }
-    }
-
     /// Presentation reads must not repair the facts source-authority projection.
     pub(crate) fn native_names_read_only(options: &Options) -> io::Result<Vec<NativeName>> {
         match &options.facts {
@@ -536,7 +428,6 @@ impl MachineFacts {
     pub(crate) fn native_names(&self, options: &Options) -> Vec<NativeName> {
         match self {
             Self::Local => native_names::read(&options.codex_home),
-            Self::Captured(runtime) => runtime.facts.native_names.clone(),
             Self::Recorded(facts) => facts
                 .native_names
                 .iter()
@@ -586,7 +477,6 @@ impl MachineFacts {
     pub(crate) fn proc_start(&self, options: &Options, pid: u32) -> Option<u64> {
         match self {
             Self::Local => proc_start(&options.proc_root, pid),
-            Self::Captured(runtime) => runtime.facts.proc_starts.get(&pid).copied(),
             Self::Recorded(facts) => facts.proc_starts.get(&pid).copied(),
         }
     }
@@ -594,7 +484,6 @@ impl MachineFacts {
     pub(crate) fn hostname(&self, options: &Options) -> String {
         match self {
             Self::Local => model::local_hostname(options),
-            Self::Captured(runtime) => runtime.facts.hostname.clone(),
             Self::Recorded(facts) if facts.hostname.trim().is_empty() => "localhost".into(),
             Self::Recorded(facts) => facts.hostname.trim().to_owned(),
         }
@@ -603,7 +492,6 @@ impl MachineFacts {
     pub(crate) fn home(&self) -> Option<String> {
         match self {
             Self::Local => env_home(),
-            Self::Captured(runtime) => runtime.facts.home.clone(),
             Self::Recorded(facts) => facts.home.clone(),
         }
     }
@@ -611,7 +499,7 @@ impl MachineFacts {
     /// `None` when the repository comes from walking the local disk.
     pub(crate) fn recorded_repo(&self, cwd: &str) -> Option<Option<String>> {
         match self {
-            Self::Local | Self::Captured(_) => None,
+            Self::Local => None,
             Self::Recorded(facts) => Some(facts.repos.get(cwd).cloned().flatten()),
         }
     }
@@ -619,7 +507,7 @@ impl MachineFacts {
     /// `None` when the origin identity comes from walking the local disk.
     pub(crate) fn recorded_repo_id(&self, cwd: &str) -> Option<Option<RepoId>> {
         match self {
-            Self::Local | Self::Captured(_) => None,
+            Self::Local => None,
             Self::Recorded(facts) => Some(facts.repo_ids.get(cwd).cloned()),
         }
     }
@@ -632,17 +520,12 @@ impl MachineFacts {
             Self::Local => fs::metadata(options.proc_root.join("locks"))
                 .is_ok()
                 .then(|| codex_locks(options)),
-            Self::Captured(runtime) => runtime
-                .lock_files
-                .as_ref()
-                .map(|_| runtime.facts.codex_locks.clone()),
             Self::Recorded(facts) => Some(facts.codex_locks.clone()),
         }
     }
 
     pub(crate) fn ancestors(&self, options: &Options, pid: u32) -> Option<Vec<u32>> {
         match self {
-            Self::Captured(runtime) => runtime.facts.process_ancestors.get(&pid).cloned(),
             Self::Recorded(facts) => facts.process_ancestors.get(&pid).cloned(),
             Self::Local => {
                 let initial = proc_start(&options.proc_root, pid)?;
@@ -685,7 +568,6 @@ impl MachineFacts {
                     .is_none_or(|start| proc_start(&options.proc_root, pid) == Some(start))
                     .then_some(run)
             }
-            Self::Captured(runtime) => runtime.facts.runs.get(&pid).cloned(),
             Self::Recorded(facts) => facts.runs.get(&pid).cloned(),
         }
     }
@@ -705,7 +587,6 @@ impl MachineFacts {
                         .join(format!("{id}.lock"))
                         .is_file(),
             ),
-            Self::Captured(runtime) => runtime.lock_files.as_ref().map(|files| files.contains(id)),
             Self::Recorded(_) => None,
         }
     }
@@ -716,11 +597,6 @@ impl MachineFacts {
             Self::Recorded(facts) => match facts.codex_locks.get(id) {
                 Some(pid) => Lock::Held(*pid),
                 None => Lock::Free,
-            },
-            Self::Captured(runtime) => match runtime.facts.codex_locks.get(id) {
-                Some(pid) => Lock::Held(*pid),
-                None if runtime.lock_files.is_some() => Lock::Free,
-                None => Lock::Unknown,
             },
             Self::Local => local_codex_lock(options, locks, id),
         }

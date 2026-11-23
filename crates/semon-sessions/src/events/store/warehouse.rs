@@ -712,8 +712,8 @@ pub(super) fn write_runtime(
         .query_row(params![source, pid], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()?;
     let clock = match last {
-        // A long Catalog refresh can publish its request capture after a
-        // different producer has already recorded a more recent observation.
+        // Capture precedes the write transaction. Another live producer can
+        // commit a newer observation while this producer waits for the lock.
         Some((clock, _)) if capture.clock < clock => return Ok(false),
         Some((clock, previous_start)) => {
             if previous_start == start {

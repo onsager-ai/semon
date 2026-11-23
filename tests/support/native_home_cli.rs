@@ -44,6 +44,23 @@ impl Fixture {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
     }
+    #[allow(dead_code)]
+    pub fn publish_catalog(&self) -> semon_sessions::Options {
+        let options = semon_sessions::Options {
+            claude_home: self.claude.clone(),
+            claude_json: self.claude.join(".claude.json"),
+            codex_home: self.codex.clone(),
+            copilot_home: self.root.join("empty-copilot"),
+            proc_root: self.root.join("empty-proc"),
+            cache: self.root.join("state/index.json"),
+            ..Default::default()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        semon_sessions::refresh_native_catalog(&options, || std::time::Instant::now() >= deadline)
+            .unwrap();
+        options
+    }
+
     pub fn command(&self, binary: &str) -> Command {
         let mut command = Command::new(binary);
         // Only the Semon test child gets this fallback home. No native CLI runs,

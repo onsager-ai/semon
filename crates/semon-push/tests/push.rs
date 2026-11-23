@@ -87,7 +87,7 @@ fn published_catalog(options: &Options, members: &[&str]) -> Vec<Value> {
     // Each fixture owns its cache exclusively. Drain the local producer before
     // comparing copies so every expected row comes from committed evidence.
     let deadline = Instant::now() + Duration::from_secs(30);
-    semon_sessions::refresh_analytics_catalog(options, || Instant::now() >= deadline).unwrap();
+    semon_sessions::refresh_native_catalog(options, || Instant::now() >= deadline).unwrap();
     let catalog = reply_body(&semon_sessions::session_catalog_page(
         options,
         "local",

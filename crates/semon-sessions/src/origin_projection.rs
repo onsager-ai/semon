@@ -104,6 +104,10 @@ impl AnalyticsInput for SqliteAnalyticsInput {
         crate::events::store::read_silver_snapshot(
             &mut self.connection,
             |tx, incarnation, current| {
+                #[cfg(feature = "test-hooks")]
+                if let Some(index) = tx.path() {
+                    crate::test_hooks::run_cache(Path::new(index), "analytics_snapshot");
+                }
                 let previous = match previous {
                     Some(previous) if previous.incarnation == incarnation => {
                         Some(validate_cursor(tx, previous.cursor, current)?)

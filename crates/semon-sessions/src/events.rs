@@ -1254,8 +1254,6 @@ struct CachedFile {
 /// to an [`IndexStore`] file by file when one could be opened.
 #[derive(Default)]
 pub(crate) struct EventCache {
-    /// Shared by every batch of an explicit local Catalog refresh.
-    pub(crate) local_refresh_runtime: Option<Arc<crate::facts::LocalRuntime>>,
     files: BTreeMap<String, CachedFile>,
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
@@ -1392,7 +1390,7 @@ pub(crate) fn current_reported_runs(path: &Path) -> Vec<crate::facts::ReportedRu
 
 /// Snapshot and stamp of the same open state file. The capture clock is added
 /// only when ingesting it, so it cannot change a runtime fingerprint.
-pub(crate) fn capture_reported_runs(
+fn capture_reported_runs(
     path: &Path,
 ) -> Option<(ReportedFileStamp, Vec<crate::facts::ReportedRunSnapshot>)> {
     let file = crate::open_input(path).ok()?;
@@ -2708,7 +2706,7 @@ impl EventCache {
         true
     }
 
-    pub(crate) fn ingest_reported_runs(
+    fn ingest_reported_runs(
         &mut self,
         stamp: &ReportedFileStamp,
         runs: &[crate::facts::ReportedRunSnapshot],

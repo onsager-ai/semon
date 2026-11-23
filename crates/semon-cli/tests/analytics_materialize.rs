@@ -6,6 +6,7 @@ mod fixture;
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::Path,
     process::{Output, Stdio},
 };
@@ -16,9 +17,7 @@ fn materialize(home: &fixture::Fixture) -> Output {
 
 fn materialize_with(home: &fixture::Fixture, arguments: &[&str]) -> Output {
     home.command(env!("CARGO_BIN_EXE_semon"))
-        .args(["analytics", "materialize", "--all", "--proc-root"])
-        .arg(home.root.join("empty-proc"))
-        .arg("--cache")
+        .args(["analytics", "materialize", "--cache"])
         .arg(home.root.join("state/index.json"))
         .args(arguments)
         .output()
@@ -154,15 +153,156 @@ fn live_session_rows(root: &Path) -> BTreeMap<String, Vec<String>> {
     rows
 }
 
+const CLAUDE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const CODEX_ID: &str = "00000000-0000-4000-8000-000000000002";
+
+fn write_live_metadata(claude_json: &Path, codex_home: &Path, name: &str, cost: f64) {
+    let runs = serde_json::json!({"projects":{"/fixture":{
+        "lastSessionId":CLAUDE_ID,"lastStartTime":1,"lastCost":cost
+    }}});
+    fs::write(claude_json, runs.to_string()).unwrap();
+    let row = serde_json::json!({"id":CODEX_ID,"thread_name":name,
+        "updated_at":"2026-10-03T08:00:00Z"});
+    fs::write(codex_home.join("session_index.jsonl"), format!("{row}\n")).unwrap();
+}
+
+fn committed_live_metadata(index: &Path) -> (String, f64) {
+    let db =
+        rusqlite::Connection::open_with_flags(index, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let names: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key='warehouse_codex_names'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let names: BTreeMap<String, String> = serde_json::from_str(&names).unwrap();
+    let cost = db
+        .query_row(
+            "SELECT cost FROM reported_runs WHERE session_id=?1 AND start=1",
+            [CLAUDE_ID],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (names[CODEX_ID].clone(), cost)
+}
+
+#[test]
+fn materialize_preserves_an_observer_commit_during_its_snapshot() {
+    use semon_sessions::{AnalyticsWriterConfig, AnalyticsWriterStatus, analytics, test_hooks};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let home = fixture::Fixture::new();
+    let compact = serde_json::json!({"type":"system", "subtype":"compact_boundary",
+        "uuid":"fixture-compaction", "sessionId":CLAUDE_ID,
+        "timestamp":"2026-10-03T09:00:00Z", "compactMetadata":{"trigger":"auto","preTokens":42000}
+    });
+    let transcript = home
+        .claude
+        .join(format!("projects/fixture/{CLAUDE_ID}.jsonl"));
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(transcript)
+            .unwrap(),
+        "{compact}"
+    )
+    .unwrap();
+    write_live_metadata(
+        &home.claude.join(".claude.json"),
+        &home.codex,
+        "old name",
+        1.0,
+    );
+    let options = home.publish_catalog();
+    let index = semon_sessions::analytics_index_path(&options.cache);
+    assert_eq!(committed_live_metadata(&index), ("old name".into(), 1.0));
+    let store = semon_sessions::analytics_store_root(&index).unwrap();
+    let old = materialize(&home);
+    assert!(
+        old.status.success(),
+        "{}",
+        String::from_utf8_lossy(&old.stderr)
+    );
+    let before = live_rows(&store);
+    assert_eq!(before["fact_session"].len(), 2);
+    assert!(!before["fact_step"].is_empty());
+    assert_eq!(before["fact_compaction"].len(), 1);
+
+    // Force a new inventory so the comparison covers every live fact and
+    // dimension, even though changes to display metadata need no analytics rows.
+    fs::rename(&store, home.root.join("baseline-store")).unwrap();
+    let initialized = analytics::initialize_from_catalog(&index, || false).unwrap();
+    let mut config = AnalyticsWriterConfig::new(initialized.binding.namespace, &index, &store);
+    config.interval = std::time::Duration::ZERO;
+    let published = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&published);
+    let _hook = test_hooks::register(&index, move |point| {
+        if point == "analytics_snapshot" && !observed.swap(true, Ordering::Relaxed) {
+            write_live_metadata(&options.claude_json, &options.codex_home, "new name", 23.0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            semon_sessions::refresh_native_catalog(&options, || {
+                std::time::Instant::now() >= deadline
+            })
+            .unwrap();
+        }
+    });
+    let writer = initialized.owner.start(config).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(40);
+    assert_eq!(
+        writer.publish_and_wait_until(|| std::time::Instant::now() >= deadline),
+        AnalyticsWriterStatus::Idle,
+    );
+    writer.stop_and_join();
+    assert!(published.load(Ordering::Relaxed));
+    assert_eq!(committed_live_metadata(&index), ("new name".into(), 23.0));
+    assert_eq!(live_rows(&store), before);
+
+    // A cold read of the newer committed Catalog must also yield the same facts.
+    fs::rename(&store, home.root.join("overlap-store")).unwrap();
+    let new = materialize(&home);
+    assert!(
+        new.status.success(),
+        "{}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+    assert_eq!(live_rows(&store), before);
+}
+
+#[test]
+fn materialize_refuses_a_missing_catalog_before_creating_state() {
+    let home = fixture::Fixture::new();
+    let output = materialize(&home);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("No native Catalog has been published")
+    );
+    assert!(!home.root.join("state").exists());
+}
+
 #[test]
 fn materialize_publishes_once_and_reuses_its_namespace() {
     let home = fixture::Fixture::new();
+    let options = home.publish_catalog();
+    let index = semon_sessions::analytics_index_path(&options.cache);
+    let index_before = fs::read(&index).unwrap();
+    write_live_metadata(
+        &options.claude_json,
+        &options.codex_home,
+        "unpublished name",
+        17.0,
+    );
     let first = materialize(&home);
     assert!(
         first.status.success(),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
+    assert_eq!(fs::read(&index).unwrap(), index_before);
     let state = home.root.join("state");
     let namespace = semon_sessions::read_analytics_namespace(&state)
         .unwrap()
@@ -263,6 +403,7 @@ fn materialize_tiny_budget_drains_several_chunks_and_matches_one_shot_rows() {
             transcript.as_bytes(),
         );
     }
+    home.publish_catalog();
     let first = materialize(&home);
     assert!(
         first.status.success(),
@@ -356,6 +497,9 @@ fn materialize_refuses_an_unsupported_index_without_changing_its_bytes() {
 #[test]
 fn materialize_reports_a_busy_writer_without_publishing() {
     let home = fixture::Fixture::new();
+    home.publish_catalog();
+    let index = home.root.join("state/index.sqlite3");
+    let index_bytes = fs::read(&index).unwrap();
     let lock_path = home.root.join("state/analytics-store/analytics.lock");
     fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
     let lock = fs::File::create(&lock_path).unwrap();
@@ -370,12 +514,11 @@ fn materialize_reports_a_busy_writer_without_publishing() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(fs::read(&lock_path).unwrap(), before_lock);
-    assert_eq!(fs::read_dir(home.root.join("state")).unwrap().count(), 1);
     assert_eq!(
         fs::read_dir(lock_path.parent().unwrap()).unwrap().count(),
         1
     );
-    assert!(!home.root.join("state/index.sqlite3").exists());
+    assert_eq!(fs::read(index).unwrap(), index_bytes);
     assert!(!home.root.join("state/analytics-namespace").exists());
     lock.unlock().unwrap();
 }
@@ -485,6 +628,7 @@ fn native_query_with_a_borrowed_cache_refuses_without_rebuilding() {
 #[test]
 fn materialize_busy_writer_preserves_an_existing_index_and_namespace() {
     let home = fixture::Fixture::new();
+    home.publish_catalog();
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
     let index = fs::read(state.join("index.sqlite3")).unwrap();
@@ -547,6 +691,7 @@ fn materialize_refuses_non_directory_analytics_before_creating_namespace() {
 #[test]
 fn materialize_requires_the_existing_stores_namespace() {
     let home = fixture::Fixture::new();
+    home.publish_catalog();
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
     let manifest = state.join("analytics-store/analytics/manifest.json");
@@ -563,6 +708,7 @@ fn materialize_requires_the_existing_stores_namespace() {
 fn materialize_namespace_refusal_preserves_crash_leftovers() {
     for malformed in [false, true] {
         let home = fixture::Fixture::new();
+        home.publish_catalog();
         assert!(materialize(&home).status.success());
         let state = home.root.join("state");
         let analytics = state.join("analytics-store/analytics");
@@ -602,6 +748,7 @@ fn materialize_namespace_refusal_preserves_crash_leftovers() {
 #[test]
 fn materialize_refuses_a_symlinked_index_without_publishing() {
     let target_home = fixture::Fixture::new();
+    target_home.publish_catalog();
     assert!(materialize(&target_home).status.success());
     let target = target_home.root.join("state/index.sqlite3");
     let before = fs::read(&target).unwrap();
@@ -627,6 +774,7 @@ fn materialize_refuses_a_symlinked_index_without_publishing() {
 #[test]
 fn analytics_input_validation_preserves_live_wal_entries_and_bytes() {
     let home = fixture::Fixture::new();
+    home.publish_catalog();
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
     let index = state.join("index.sqlite3");

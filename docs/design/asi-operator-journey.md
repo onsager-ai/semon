@@ -466,19 +466,19 @@ permissions completes the packaging prerequisite for this journey.
 An install recipe must name a verified artifact/revision and supported platform;
 this proposal does not invent an existing release URL.
 
-With that binary installed, the current commands are:
+With that binary installed, start `semon sessions --serve` and let it prepare
+the local Catalog. Then run the analytics commands in another process.
 
 ```sh
 semon analytics materialize
 semon query sql 'SELECT COUNT(*) AS sessions FROM fact_session'
 semon query search 'timeout'
 semon query view FULL_ASI_UID
-semon sessions --serve
 ```
 
 `FULL_ASI_UID` is replaced with a `body_uid` returned by search, not a native
-session filename. The first command refreshes the full local Catalog and drains
-analytics through its captured endpoint. It is one-shot; use
+session filename. The first command reads the committed Catalog and Event Index
+and drains analytics through its captured endpoint. It is one-shot; use
 `semon analytics materialize --watch` for ongoing publication in a separate process.
 Opening Viewer or MCP does not start that writer. `semon query schema` supplies
 table/column reference without requiring the user to read storage internals.

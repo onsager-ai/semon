@@ -34,10 +34,9 @@ fn materialize(home: &fixture::Fixture) -> Output {
 }
 
 fn materialize_with(home: &fixture::Fixture, arguments: &[&str]) -> Output {
+    home.publish_catalog();
     home.command(env!("CARGO_BIN_EXE_semon"))
-        .args(["analytics", "materialize", "--all", "--proc-root"])
-        .arg(home.root.join("empty-proc"))
-        .arg("--cache")
+        .args(["analytics", "materialize", "--cache"])
         .arg(home.root.join("state/index.json"))
         .args(arguments)
         .output()

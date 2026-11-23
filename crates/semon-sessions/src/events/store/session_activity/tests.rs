@@ -616,7 +616,7 @@ fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
         initial_rows
     );
 
-    crate::refresh_analytics_catalog(&options, || false).unwrap();
+    crate::refresh_native_catalog(&options, || false).unwrap();
     let mut refreshed_input = SqliteAnalyticsInput::open(&index, "fixture-machine").unwrap();
     let refreshed = refreshed_input
         .read_admitted(None, InputBudget::default())
@@ -727,7 +727,7 @@ fn native_catalog_rules_refresh_skips_never_derivable_sessions_and_drains_rounds
 
     // More than 64 repairable sessions are stale, so qualification needs more
     // than one repair round; the never-derivable ones must not block it.
-    crate::refresh_analytics_catalog(&options, || false).unwrap();
+    crate::refresh_native_catalog(&options, || false).unwrap();
 
     let (store, _) = opened(&index);
     let stale_repairable: i64 = store

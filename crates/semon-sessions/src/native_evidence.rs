@@ -17,7 +17,6 @@ pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
-    local_refresh_runtime: Option<Arc<crate::facts::LocalRuntime>>,
     pub(crate) received_machine: RwLock<Option<crate::received_registry::ReceivedMachine>>,
     /// The source namespace its host configured. The producer binds its
     /// database to it and refuses a database bound to another namespace.
@@ -479,33 +478,21 @@ impl NativeEvidence {
 
     pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
         let storage = crate::storage::runtime::RuntimeStore::for_source(&options, key);
-        Self::with_storage(options, storage, None)
-    }
-
-    pub(crate) fn for_materialization(options: Options) -> io::Result<Arc<Self>> {
-        let runtime = options
-            .facts
-            .is_none()
-            .then(|| crate::facts::LocalRuntime::capture(&options).map(Arc::new))
-            .transpose()?;
-        let storage = crate::storage::runtime::RuntimeStore::for_source(&options, "local");
-        Ok(Self::with_storage(options, storage, runtime))
+        Self::with_storage(options, storage)
     }
 
     #[cfg(test)]
     fn construct(namespace: Option<crate::storage::Namespace>, options: Options) -> Arc<Self> {
         let storage = crate::storage::runtime::RuntimeStore::sqlite(&options, namespace);
-        Self::with_storage(options, storage, None)
+        Self::with_storage(options, storage)
     }
 
     pub(crate) fn with_storage(
         options: Options,
         storage: crate::storage::runtime::RuntimeStore,
-        local_refresh_runtime: Option<Arc<crate::facts::LocalRuntime>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             options,
-            local_refresh_runtime,
             received_machine: RwLock::default(),
             storage,
             catalog_demand: AtomicBool::new(false),
@@ -697,9 +684,7 @@ impl NativeEvidence {
 
     /// Open main's single scoped writer, bound to the host's namespace.
     pub(crate) fn open_index(&self) -> io::Result<EventCache> {
-        let mut cache = self.storage.open_index()?;
-        cache.local_refresh_runtime = self.local_refresh_runtime.clone();
-        Ok(cache)
+        self.storage.open_index()
     }
 
     /// Initialize the source index and publish a bounded cold catalog page.
@@ -728,15 +713,7 @@ impl NativeEvidence {
         // The index commits each file's change as it reads it: nothing is
         // left to save.
         let mut dirty = false;
-        if let Some(runtime) = &self.local_refresh_runtime {
-            if let Some(stamp) = &runtime.reported_runs_stamp {
-                cache.ingest_reported_runs(
-                    stamp,
-                    &runtime.facts.reported_runs,
-                    runtime.captured_at,
-                );
-            }
-        } else if self.options.facts.is_none() {
+        if self.options.facts.is_none() {
             cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
         }
         Ok(())
@@ -984,7 +961,12 @@ impl NativeEvidence {
                                 .into_owned()
                         })
                         .collect::<Vec<_>>();
-                    if self.begin_catalog_stage(cache, &paths)? != crate::events::Outcome::Written {
+                    if self.begin_catalog_stage(
+                        cache,
+                        &paths,
+                        &query_runtime_generation(&self.options)?,
+                    )? != crate::events::Outcome::Written
+                    {
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
                             "semantic stage changed",
@@ -1036,16 +1018,13 @@ impl NativeEvidence {
         &self,
         cache: &mut EventCache,
         paths: &[String],
+        runtime: &str,
     ) -> io::Result<crate::events::Outcome> {
-        let runtime = match &self.local_refresh_runtime {
-            Some(runtime) => runtime.generation.clone(),
-            None => query_runtime_generation(&self.options)?,
-        };
         // The store checks journal authority in the stage transaction.
         if self.options.facts.is_some() {
-            cache.begin_semantic_stage_with_journal(paths, &runtime, true)
+            cache.begin_semantic_stage_with_journal(paths, runtime, true)
         } else {
-            cache.begin_semantic_stage(paths, &runtime)
+            cache.begin_semantic_stage(paths, runtime)
         }
     }
 
@@ -1098,7 +1077,8 @@ impl NativeEvidence {
         if !cache.is_scoped() {
             return Ok(false);
         }
-        match self.begin_catalog_stage(cache, &[])? {
+        let runtime = query_runtime_generation(&self.options)?;
+        match self.begin_catalog_stage(cache, &[], &runtime)? {
             crate::events::Outcome::Conflict => return Ok(false),
             crate::events::Outcome::Written => {}
             _ => {
@@ -1611,11 +1591,7 @@ impl NativeEvidence {
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
             if let Some(namespace) = self.storage.namespace() {
-                crate::events::store::publish_catalog_names(
-                    &self.options,
-                    namespace,
-                    self.local_refresh_runtime.as_deref(),
-                )?;
+                crate::events::store::publish_catalog_names(&self.options, namespace)?;
             }
             lock(&self.catalog_search).close();
         }
@@ -1727,7 +1703,6 @@ impl NativeEvidence {
                     &self.options,
                     page.as_ref().map_or(&[], |page| page.inputs.as_slice()),
                     (!audit.checked).then_some(audit.after.as_str()),
-                    self.local_refresh_runtime.as_deref(),
                 )?;
                 if let Some(last) = last {
                     audit.after = last;
@@ -1837,7 +1812,12 @@ impl NativeEvidence {
                     None => {}
                 }
             }
-            if self.begin_catalog_stage(cache, &staged_paths)? != crate::events::Outcome::Written {
+            if self.begin_catalog_stage(
+                cache,
+                &staged_paths,
+                &query_runtime_generation(&self.options)?,
+            )? != crate::events::Outcome::Written
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "semantic stage changed",
@@ -1925,8 +1905,11 @@ impl NativeEvidence {
                         None => {}
                     }
                 }
-                if self.begin_catalog_stage(cache, &staged_paths)?
-                    != crate::events::Outcome::Written
+                if self.begin_catalog_stage(
+                    cache,
+                    &staged_paths,
+                    &query_runtime_generation(&self.options)?,
+                )? != crate::events::Outcome::Written
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,

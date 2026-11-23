@@ -80,11 +80,10 @@ fn durable_backup_cli_copies_and_refuses_existing_destination() {
 fn durable_add_cli_file_and_stdin_round_trip_without_echoing_bodies() {
     let home = fixture::Fixture::new();
     let cache = home.root.join("state/index.json");
+    home.publish_catalog();
     let output = home
         .command(env!("CARGO_BIN_EXE_semon"))
-        .args(["analytics", "materialize", "--all", "--proc-root"])
-        .arg(home.root.join("empty-proc"))
-        .arg("--cache")
+        .args(["analytics", "materialize", "--cache"])
         .arg(&cache)
         .output()
         .unwrap();
@@ -566,11 +565,10 @@ fn content(reply: &Value) -> (Value, bool) {
 fn cli_and_mcp_search_and_view_native_fixture_text() {
     let home = fixture::Fixture::new();
     home.write("configured-claude/projects/fixture/00000000-0000-4000-8000-000000000001.jsonl", b"{\"type\":\"user\",\"uuid\":\"prompt\",\"sessionId\":\"00000000-0000-4000-8000-000000000001\",\"timestamp\":\"2026-11-10T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"uniqueftsneedle\"}}\n");
+    home.publish_catalog();
     let output = home
         .command(env!("CARGO_BIN_EXE_semon"))
-        .args(["analytics", "materialize", "--all", "--proc-root"])
-        .arg(home.root.join("empty-proc"))
-        .arg("--cache")
+        .args(["analytics", "materialize", "--cache"])
         .arg(home.root.join("state/index.json"))
         .output()
         .unwrap();
@@ -710,11 +708,10 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
     );
 
     let cache = home.root.join("state/index.json");
+    home.publish_catalog();
     let output = home
         .command(env!("CARGO_BIN_EXE_semon"))
-        .args(["analytics", "materialize", "--all", "--proc-root"])
-        .arg(home.root.join("empty-proc"))
-        .arg("--cache")
+        .args(["analytics", "materialize", "--cache"])
         .arg(&cache)
         .output()
         .unwrap();

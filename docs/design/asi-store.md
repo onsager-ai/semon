@@ -272,11 +272,11 @@ tables.
   read.
   The local `semon-sessions` writer service is an explicit lifecycle primitive.
   `semon analytics materialize` enables publication after the library's explicit
-  `semon_sessions::analytics::initialize` call. Viewer, MCP, push and receive do
-  not initialize. Initialization
-  installs a private versioned JSON `analytics-namespace` containing the random
-  `origin-` namespace and independent `producer-` origin incarnation in one durable
-  step, and creates a current empty native index through its cold initializer.
+  `semon_sessions::analytics::initialize_from_catalog` call. Viewer, MCP, push and
+  receive leave analytics initialization to the operator. The Catalog producer
+  creates and maintains the native index. Analytics initialization installs a
+  private versioned JSON `analytics-namespace` containing the random `origin-`
+  namespace and independent `producer-` origin incarnation in one durable step.
   Later calls reuse all three IDs and preserve published bytes. The first actual
   publication records the origin incarnation in the manifest; initialization alone
   writes no manifest, live map, checkpoint or label revision. See the

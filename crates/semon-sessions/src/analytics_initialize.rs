@@ -34,6 +34,7 @@ pub struct Initialized {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     UnsupportedState,
+    CatalogUnavailable,
     InconsistentState,
     WriterBusy,
     BindingMismatch,
@@ -82,6 +83,9 @@ impl Error {
             ErrorKind::WriterBusy => {
                 "Another process is writing local analytics. Wait for it to finish, or stop the Semon analytics writer you started, then retry."
             }
+            ErrorKind::CatalogUnavailable => {
+                "No native Catalog has been published for this Event Index. Start `semon sessions --serve` with the same cache and native homes, then retry after the Catalog is available."
+            }
             ErrorKind::UnsupportedState | ErrorKind::InconsistentState => {
                 "Local analytics state is unsupported or inconsistent; existing data was preserved. See the analytics export/reset recovery guidance (docs/design/asi-store.md#generations-publication-and-versions) before retrying. Unsupported or ambiguous state needs the matching older binary for custody export first. Do not delete the state directory."
             }
@@ -115,13 +119,30 @@ pub fn initialize(
     expected: Option<&Binding>,
     cancelled: impl Fn() -> bool,
 ) -> Result<Initialized, Error> {
+    initialize_inner(index, expected, cancelled, false)
+}
+
+/// Set up the analytics store against an existing native Catalog publication.
+pub fn initialize_from_catalog(
+    index: &Path,
+    cancelled: impl Fn() -> bool,
+) -> Result<Initialized, Error> {
+    initialize_inner(index, None, cancelled, true)
+}
+
+fn initialize_inner(
+    index: &Path,
+    expected: Option<&Binding>,
+    cancelled: impl Fn() -> bool,
+    require_catalog: bool,
+) -> Result<Initialized, Error> {
     let state = index
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| Error::new(ErrorKind::InconsistentState, Stage::Preflight))?;
     let root = state.join("analytics-store");
     check_cancelled(&cancelled, Stage::Preflight)?;
-    qualify(index, state, expected)?;
+    qualify(index, state, expected, require_catalog)?;
     let mut directory = fs::DirBuilder::new();
     directory.recursive(true);
     #[cfg(unix)]
@@ -135,7 +156,7 @@ pub fn initialize(
     let owner =
         Owner::acquire_qualified(&root).map_err(|error| Error::store(error, Stage::Ownership))?;
     check_cancelled(&cancelled, Stage::Ownership)?;
-    let (identity, incarnation) = qualify(index, state, expected)?;
+    let (identity, incarnation) = qualify(index, state, expected, require_catalog)?;
     let created = identity.is_none() || incarnation.is_none() || !root.join("analytics").exists();
     // Install identity first: a crash before cold index creation leaves an
     // explicit partial binding that the next admission refuses.
@@ -170,7 +191,7 @@ pub fn read_binding(index: &Path) -> Result<Option<Binding>, Error> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .ok_or_else(|| Error::new(ErrorKind::InconsistentState, Stage::Preflight))?;
-    let (identity, incarnation) = qualify(index, state, None)?;
+    let (identity, incarnation) = qualify(index, state, None, false)?;
     Ok(identity
         .zip(incarnation)
         .map(|(identity, incarnation)| identity.binding(incarnation)))
@@ -188,6 +209,7 @@ fn qualify(
     index: &Path,
     state: &Path,
     expected: Option<&Binding>,
+    require_catalog: bool,
 ) -> Result<(Option<analytics_namespace::Identity>, Option<String>), Error> {
     safe_ancestors(state)?;
     let root = state.join("analytics-store");
@@ -211,12 +233,15 @@ fn qualify(
     }
     let identity = analytics_namespace::read_identity(state)?;
     let incarnation = if index.exists() {
-        Some(store::analytics_index_incarnation(index)?)
+        Some(store::analytics_index_incarnation(index, require_catalog)?)
     } else {
         None
     };
     if identity.is_some() && incarnation.is_none() {
         return Err(Error::new(ErrorKind::InconsistentState, Stage::Index));
+    }
+    if require_catalog && incarnation.is_none() {
+        return Err(Error::new(ErrorKind::CatalogUnavailable, Stage::Index));
     }
     if let Some(expected) = expected {
         let actual = identity

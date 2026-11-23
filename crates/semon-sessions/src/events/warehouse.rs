@@ -37,7 +37,7 @@ impl RuntimeCapture {
         pid: u32,
         start: u64,
     ) -> Option<Self> {
-        let mut capture = Self::acquire(
+        Self::acquire(
             pid,
             start,
             || facts.proc_start(options, pid),
@@ -52,11 +52,7 @@ impl RuntimeCapture {
                 let ancestors = facts.ancestors(options, pid).unwrap_or_default();
                 (environment, ancestors)
             },
-        )?;
-        if let Some(runtime) = facts.local_capture() {
-            capture.clock = runtime.captured_at;
-        }
-        Some(capture)
+        )
     }
 
     fn acquire(
