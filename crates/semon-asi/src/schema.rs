@@ -9,7 +9,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
 /// Bumped on any change to a table, column, type, class or enum set. A store whose
 /// manifest carries another version is refused (asi-store.md, Version bumps).
-pub const ASI_SCHEMA_VERSION: u32 = 4;
+pub const ASI_SCHEMA_VERSION: u32 = 5;
 
 /// Name of the generation column the writer appends to every file.
 pub const GEN_COLUMN: &str = "_gen";
@@ -260,6 +260,7 @@ pub(crate) const WASTE_KIND: &[&str] = &[
     "redundant_read",
     "context_refill",
 ];
+pub(crate) const COMPACTION_TRIGGER: &[&str] = &["auto", "manual"];
 pub(crate) const TRIGGER: &[&str] = &[
     "tool_error",
     "empty_result",
@@ -574,6 +575,16 @@ pub static FACT_COMPACTION: Table = Table {
         ts_opt(
             "ts",
             "Time of the compaction, when the harness recorded it.",
+        ),
+        en_opt(
+            "trigger",
+            COMPACTION_TRIGGER,
+            "Recorded compaction trigger.",
+        ),
+        num_opt(
+            "pre_tokens",
+            "tokens",
+            "Recorded context size before compaction.",
         ),
     ],
 };

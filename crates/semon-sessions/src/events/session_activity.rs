@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 11;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 12;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -313,6 +313,8 @@ pub(crate) struct Compaction {
     pub(crate) native_record: Option<super::NativeRecordIdentity>,
     pub(crate) timestamp: Option<i64>,
     pub(crate) step_id: Option<ActivityStepId>,
+    pub(crate) trigger: Option<String>,
+    pub(crate) pre_tokens: Option<u64>,
 }
 
 /// A partial sum preserves both the measured amount and its missing coverage.
@@ -634,6 +636,10 @@ pub(crate) fn derive(
             },
             timestamp: signal.t,
             step_id: None,
+            trigger: signal
+                .n
+                .filter(|trigger| matches!(trigger.as_str(), "auto" | "manual")),
+            pre_tokens: signal.v,
         })
         .collect();
     compactions.sort_by(|a, b| a.position.cmp(&b.position));

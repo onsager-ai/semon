@@ -102,6 +102,8 @@ pub fn project(session: &AdmittedSession) -> Result<ProjectedSession> {
                 ("session_uid", text(&session.session_uid)),
                 ("step_uid", text_opt(compact.step_uid.as_deref())),
                 ("ts", time(compact.timestamp)),
+                ("trigger", text_opt(compact.trigger.as_deref())),
+                ("pre_tokens", int_opt_u64(compact.pre_tokens)?),
             ]),
         )?;
     }

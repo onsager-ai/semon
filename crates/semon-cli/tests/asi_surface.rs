@@ -626,6 +626,248 @@ fn cli_and_mcp_search_and_view_native_fixture_text() {
     assert_eq!(result["hits"].as_array().unwrap().len(), 1);
 }
 
+fn context_fixture(
+    home: &fixture::Fixture,
+    number: u8,
+    events: &[(u8, u64, Option<&str>)],
+) -> String {
+    let native_id = format!("00000000-0000-4000-8000-0000000000{number:02}");
+    let mut records = vec![json!({
+        "type":"user", "uuid":format!("prompt-{number}"), "sessionId":native_id,
+        "timestamp":"2026-11-09T23:59:59Z",
+        "message":{"role":"user","content":"Synthetic context fixture"}
+    })];
+    for &(minute, tokens, trigger) in events {
+        let timestamp = format!("2026-11-10T00:{minute:02}:00Z");
+        records.push(if let Some(trigger) = trigger {
+            json!({
+                "type":"system", "subtype":"compact_boundary", "uuid":format!("compact-{number}-{minute}"),
+                "sessionId":native_id, "timestamp":timestamp,
+                "compactMetadata":{"trigger":trigger,"preTokens":tokens}
+            })
+        } else {
+            json!({
+                "type":"assistant", "uuid":format!("assistant-{number}-{minute}"),
+                "sessionId":native_id, "timestamp":timestamp,
+                "message":{"id":format!("message-{number}-{minute}"),"role":"assistant",
+                    "model":"claude-sonnet-4-5","content":[{"type":"text","text":"Synthetic step"}],
+                    "usage":{"input_tokens":5000,"output_tokens":25,
+                        "cache_creation_input_tokens":10000,"cache_read_input_tokens":tokens-15000,
+                        "cache_creation":{"ephemeral_5m_input_tokens":4000,"ephemeral_1h_input_tokens":6000}}}
+            })
+        });
+    }
+    let jsonl = records
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>();
+    home.write(
+        &format!("configured-claude/projects/fixture/{native_id}.jsonl"),
+        jsonl.as_bytes(),
+    );
+    native_id
+}
+
+#[test]
+fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
+    let home = fixture::Fixture::new();
+    let base = context_fixture(
+        &home,
+        10,
+        &[
+            (0, 150_000, None),
+            (1, 105_000, Some("auto")),
+            (2, 60_000, None),
+        ],
+    );
+    let storm = context_fixture(
+        &home,
+        11,
+        &[
+            (0, 135_000, None),
+            (1, 67_000, Some("auto")),
+            (2, 60_000, None),
+            (8, 68_000, Some("auto")),
+            (9, 61_000, None),
+            (16, 67_000, Some("auto")),
+            (17, 62_000, None),
+            (40, 67_000, Some("auto")),
+        ],
+    );
+    let mut long_events = vec![(0, 170_000, None)];
+    for minute in (1..16).step_by(2) {
+        long_events.extend([(minute, 167_000, Some("auto")), (minute + 1, 160_000, None)]);
+    }
+    let long = context_fixture(&home, 12, &long_events);
+    let manual = context_fixture(
+        &home,
+        13,
+        &[
+            (0, 150_000, None),
+            (1, 30_000, Some("manual")),
+            (2, 55_000, None),
+        ],
+    );
+
+    let cache = home.root.join("state/index.json");
+    let output = home
+        .command(env!("CARGO_BIN_EXE_semon"))
+        .args(["analytics", "materialize", "--all", "--proc-root"])
+        .arg(home.root.join("empty-proc"))
+        .arg("--cache")
+        .arg(&cache)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let namespace: Value = serde_json::from_slice(
+        &std::fs::read(home.root.join("state/analytics-namespace")).unwrap(),
+    )
+    .unwrap();
+    let uid = |native_id: &str| {
+        format!(
+            "{}/claude/{native_id}",
+            namespace["namespace"].as_str().unwrap()
+        )
+    };
+    let timestamp = |minute: u8| 1_794_268_800_000_i64 + i64::from(minute) * 60_000;
+    let query = |native_id: &str, flags: &[&str]| {
+        let mut arguments = vec!["query", "context_growth"];
+        let session_uid = uid(native_id);
+        arguments.push(&session_uid);
+        arguments.extend_from_slice(flags);
+        let output = cli(&arguments, cache.clone());
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let step = |minute, tokens: u64| {
+        json!([
+            timestamp(minute),
+            "step",
+            tokens,
+            null,
+            null,
+            null,
+            null,
+            null
+        ])
+    };
+    let compact = |minute, trigger: &str, pre: u64, refill: Option<u64>, early, storm| {
+        json!([
+            timestamp(minute),
+            "compaction",
+            null,
+            trigger,
+            pre,
+            refill,
+            early,
+            storm
+        ])
+    };
+    let points = |result: &Value| {
+        result["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let mut values = row.as_array().unwrap().clone();
+                assert!(values.remove(2).as_str().is_some());
+                Value::Array(values)
+            })
+            .collect::<Vec<_>>()
+    };
+    let base_result = query(&base, &[]);
+    let columns: Vec<_> = base_result["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| column["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            "timestamp",
+            "kind",
+            "uid",
+            "context_tokens",
+            "trigger",
+            "pre_tokens",
+            "post_refill_tokens",
+            "early",
+            "storm"
+        ]
+    );
+    assert_eq!(
+        points(&base_result),
+        [
+            step(0, 150_000),
+            compact(1, "auto", 105_000, Some(60_000), false, false),
+            step(2, 60_000)
+        ]
+    );
+    assert_eq!(
+        points(&query(&storm, &[])),
+        [
+            step(0, 135_000),
+            compact(1, "auto", 67_000, Some(60_000), true, true),
+            step(2, 60_000),
+            compact(8, "auto", 68_000, Some(61_000), false, true),
+            step(9, 61_000),
+            compact(16, "auto", 67_000, Some(62_000), true, true),
+            step(17, 62_000),
+            compact(40, "auto", 67_000, None, true, false),
+        ]
+    );
+    let mut expected_long = vec![step(0, 170_000)];
+    for minute in (1..16).step_by(2) {
+        expected_long.extend([
+            compact(minute, "auto", 167_000, Some(160_000), false, true),
+            step(minute + 1, 160_000),
+        ]);
+    }
+    assert_eq!(points(&query(&long, &[])), expected_long);
+    assert_eq!(
+        points(&query(&manual, &[])),
+        [
+            step(0, 150_000),
+            compact(1, "manual", 30_000, Some(55_000), false, false),
+            step(2, 55_000)
+        ]
+    );
+
+    let since = timestamp(1).to_string();
+    let filtered = query(&storm, &["--since", &since, "--until", &since]);
+    assert_eq!(
+        points(&filtered),
+        [compact(1, "auto", 67_000, Some(60_000), true, true)]
+    );
+    let limited = query(&storm, &["--limit", "1"]);
+    assert_eq!(points(&limited), [step(0, 135_000)]);
+    assert_eq!(limited["truncated"], true);
+
+    let mut server = Server::start(cache);
+    let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"context_growth","arguments":{"session_uid":uid(&storm),"since":timestamp(1),"until":timestamp(1)}
+    }}));
+    let (result, failed) = content(&reply);
+    assert!(!failed, "{result}");
+    assert_eq!(result["rows"], filtered["rows"]);
+    let reply = server.request(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"context_growth","arguments":{"session_uid":uid(&storm),"since":timestamp(2),"until":timestamp(1)}
+    }}));
+    let (error, failed) = content(&reply);
+    assert!(failed);
+    assert_eq!(error["error"]["code"], "invalid_argument");
+}
+
 #[test]
 fn query_help_distinguishes_native_and_search_since_flags() {
     let dir = tempfile::tempdir().unwrap();
@@ -757,6 +999,7 @@ fn mcp_advertises_asi_tools_and_serves_schema_resource() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"sql"));
+    assert!(names.contains(&"context_growth"));
     assert!(names.contains(&"schema"));
     assert!(names.contains(&"search"));
     assert!(names.contains(&"view"));

@@ -6,10 +6,10 @@
 use std::fmt::Write;
 
 use crate::schema::{
-    ACTIVITY, ASI_SCHEMA_VERSION, COMPUTATION_STATUS, CONTEXT_BAND, Class, Column, DIM_SESSION,
-    FACT_LABEL, FACT_STEP, INITIATOR, Kind, PARENT_METHOD, PRICE_STATUS, PRICE_UNIT, RATE_KIND,
-    ROLE, SOURCE_STATUS, STATUS, TARGET_TYPE, TRIGGER, Table, Type, USAGE_OWNER, WASTE_KIND,
-    table as schema_table,
+    ACTIVITY, ASI_SCHEMA_VERSION, COMPACTION_TRIGGER, COMPUTATION_STATUS, CONTEXT_BAND, Class,
+    Column, DIM_SESSION, FACT_LABEL, FACT_STEP, INITIATOR, Kind, PARENT_METHOD, PRICE_STATUS,
+    PRICE_UNIT, RATE_KIND, ROLE, SOURCE_STATUS, STATUS, TARGET_TYPE, TRIGGER, Table, Type,
+    USAGE_OWNER, WASTE_KIND, table as schema_table,
 };
 
 /// A named closed enum set in the analytics schema.
@@ -123,6 +123,10 @@ pub const ENUMS: &[EnumDefinition] = &[
     EnumDefinition {
         name: "trigger",
         values: TRIGGER,
+    },
+    EnumDefinition {
+        name: "compaction_trigger",
+        values: COMPACTION_TRIGGER,
     },
     EnumDefinition {
         name: "initiator",

@@ -789,6 +789,8 @@ fn read_compactions(
             compaction_uid: format!("{session_uid}/c/{}", encode_component(&anchor)),
             step_uid: compact.step_id.as_ref().map(|id| step_uid(session_uid, id)),
             timestamp: compact.timestamp,
+            trigger: compact.trigger,
+            pre_tokens: compact.pre_tokens,
         };
         if let Some(&index) = identities.get(&projected.compaction_uid) {
             let existing = &mut compactions[index];
@@ -801,6 +803,15 @@ fn read_compactions(
                     .timestamp
                     .zip(projected.timestamp)
                     .is_some_and(|(first, next)| first != next)
+                || existing
+                    .trigger
+                    .as_ref()
+                    .zip(projected.trigger.as_ref())
+                    .is_some_and(|(first, next)| first != next)
+                || existing
+                    .pre_tokens
+                    .zip(projected.pre_tokens)
+                    .is_some_and(|(first, next)| first != next)
             {
                 return Ok(None);
             }
@@ -808,6 +819,8 @@ fn read_compactions(
             // contributor order; retain the first persisted ordinal position.
             existing.step_uid = existing.step_uid.take().or(projected.step_uid);
             existing.timestamp = existing.timestamp.or(projected.timestamp);
+            existing.trigger = existing.trigger.take().or(projected.trigger);
+            existing.pre_tokens = existing.pre_tokens.or(projected.pre_tokens);
         } else {
             // Retain the first occurrence in persisted ordinal order.
             identities.insert(projected.compaction_uid.clone(), compactions.len());
