@@ -260,7 +260,7 @@ The focused native tools read a window of recent logs: only the log files modifi
 `sql` and `schema` read the current local analytics snapshot or generated schema rather than the native-log window; they return compact JSON by default (`--json` is accepted but redundant). `sql --format tsv` prints a tab-delimited header and rows; tabs, newlines and carriage returns in column names and values become spaces. Typed query failures print `{"error":{"code","message","detail"}}` on stdout and exit 1; successful commands exit 0. MCP exposes the generated JSON reference at `semon://asi/schema`. `search` and `view` also default to compact JSON and require materialization; their text is wrapped as untrusted data. Search time filters use inclusive UTC milliseconds (`--since` and `--until`). Remote body queries are refused.
 
 Use `semon query context_growth SESSION_UID [--since MS] [--until MS] [--limit N]`
-with a full ASI `session_uid` from `dim_session`. The MCP tool is also named
+with either a full ASI `session_uid` from `dim_session` or a bare native session ID. Bare IDs resolve through the analytics snapshot; unknown IDs return `unknown_session`, and IDs matching multiple sessions return `invalid_argument` with candidate UIDs. The MCP tool is also named
 `context_growth`. The result uses the SQL column and row format. Context size
 includes uncached input, cache reads, and cache creation. Each compaction shows
 its recorded trigger, pre-compaction context, and the first measured refill.

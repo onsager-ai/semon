@@ -671,9 +671,11 @@ fn context_fixture(
 #[test]
 fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
     let home = fixture::Fixture::new();
+    // Fixture::new seeds a complete Codex rollout with the native ID ending in 02.
+    // Reuse that ID for Claude so both harnesses publish it in this origin.
     let base = context_fixture(
         &home,
-        10,
+        2,
         &[
             (0, 150_000, None),
             (1, 105_000, Some("auto")),
@@ -727,17 +729,25 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
         &std::fs::read(home.root.join("state/analytics-namespace")).unwrap(),
     )
     .unwrap();
-    let uid = |native_id: &str| {
-        format!(
-            "{}/claude/{native_id}",
-            namespace["namespace"].as_str().unwrap()
-        )
-    };
+    let namespace = namespace["namespace"].as_str().unwrap();
+    let uid = |native_id: &str| format!("{namespace}/claude/{native_id}");
+    let codex_uid = format!("{namespace}/codex/{base}");
     let timestamp = |minute: u8| 1_794_268_800_000_i64 + i64::from(minute) * 60_000;
-    let query = |native_id: &str, flags: &[&str]| {
+    let ambiguous = cli(&["query", "context_growth", &base], cache.clone());
+    assert!(
+        !ambiguous.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ambiguous.stdout)
+    );
+    let ambiguous: Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
+    assert_eq!(ambiguous["error"]["code"], "invalid_argument");
+    assert_eq!(
+        ambiguous["error"]["detail"],
+        format!("{base}: {}, {codex_uid}", uid(&base))
+    );
+    let query_id = |session_id: &str, flags: &[&str]| {
         let mut arguments = vec!["query", "context_growth"];
-        let session_uid = uid(native_id);
-        arguments.push(&session_uid);
+        arguments.push(session_id);
         arguments.extend_from_slice(flags);
         let output = cli(&arguments, cache.clone());
         assert!(
@@ -748,6 +758,7 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
         );
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
+    let query = |native_id: &str, flags: &[&str]| query_id(&uid(native_id), flags);
     let step = |minute, tokens: u64| {
         json!([
             timestamp(minute),
@@ -785,6 +796,14 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
             .collect::<Vec<_>>()
     };
     let base_result = query(&base, &[]);
+    assert_eq!(query_id(&storm, &[])["rows"], query(&storm, &[])["rows"]);
+    let unknown = cli(
+        &["query", "context_growth", "missing-native-id"],
+        cache.clone(),
+    );
+    assert!(!unknown.status.success());
+    let unknown: Value = serde_json::from_slice(&unknown.stdout).unwrap();
+    assert_eq!(unknown["error"]["code"], "unknown_session");
     let columns: Vec<_> = base_result["columns"]
         .as_array()
         .unwrap()
@@ -855,7 +874,7 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
 
     let mut server = Server::start(cache);
     let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "name":"context_growth","arguments":{"session_uid":uid(&storm),"since":timestamp(1),"until":timestamp(1)}
+        "name":"context_growth","arguments":{"session_uid":storm,"since":timestamp(1),"until":timestamp(1)}
     }}));
     let (result, failed) = content(&reply);
     assert!(!failed, "{result}");
