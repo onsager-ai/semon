@@ -61,8 +61,11 @@ use super::{
 use crate::{Tokens, facts::ReportedRunSnapshot};
 
 #[cfg(test)]
+type BeforeFreshWal = Box<dyn FnOnce(&Connection)>;
+
+#[cfg(test)]
 std::thread_local! {
-    static BEFORE_FRESH_WAL: std::cell::RefCell<Option<Box<dyn FnOnce(&Connection)>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_FRESH_WAL: std::cell::RefCell<Option<BeforeFreshWal>> = const { std::cell::RefCell::new(None) };
     static BEFORE_STORAGE_INIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_SOURCE_INVALIDATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
