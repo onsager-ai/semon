@@ -709,7 +709,7 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
         ],
     );
     home.write(
-        "codex/sessions/2026/11/10/rollout-duplicate.jsonl",
+        "configured-codex/sessions/2026/11/10/rollout-duplicate.jsonl",
         format!("{}\n", json!({"timestamp":"2026-11-10T00:00:00Z","type":"session_meta","payload":{"id":base,"cwd":"/fixture"}})).as_bytes(),
     );
 
