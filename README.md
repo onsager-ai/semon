@@ -36,10 +36,9 @@ semon sessions --serve
 Open the printed local launch URL to browse your history. Semon works without
 T3 Code; the Viewer is read-only and does not start or control a harness.
 
-For ASI SQL, full-text search and focused views, use a binary built with the
-`asi-query` feature. The current `release-binary.yml` workflow artifact does not
-include that feature; downloading it alone does not enable these commands.
-With a query-enabled binary, prepare the local analytics once, then query it:
+ASI SQL, full-text search and focused views need the `asi-query` feature. The
+`release-binary.yml` workflow artifact is built with it. Prepare the local
+analytics once, then query it:
 
 ```sh
 semon analytics materialize
