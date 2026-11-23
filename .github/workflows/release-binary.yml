@@ -44,11 +44,13 @@ jobs:
             ${{ runner.os }}-release-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Build semon
-        run: cargo build --locked --release -p semon-cli --bins
+        run: cargo build --locked --release -p semon-cli --bins --features asi-query
 
       # `--help` prints the usage and exits nonzero, so only the grep's status counts.
       - name: Smoke test
-        run: ./target/release/semon sessions --help 2>&1 | grep -q -- --serve
+        run: |
+          ./target/release/semon sessions --help 2>&1 | grep -q -- --serve
+          ./target/release/semon query 2>&1 | grep -q context_growth
 
       - name: Upload the binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

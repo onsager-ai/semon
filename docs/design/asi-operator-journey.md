@@ -460,12 +460,9 @@ loss retains frozen facts and reports evidence loss; it cannot recreate bodies.
 ### Current runnable path and packaging gap
 
 There is no supported one-command ASI installer in the baseline. The Linux workflow
-artifact is obtainable with the command documented in
-[release-binary.yml](../../.github/workflows/release-binary.yml), but that workflow
-builds without `asi-query`. It cannot complete this journey. A query-enabled binary
-must first be built in CI using `cargo build --locked --release -p semon-cli --bin
-semon --features asi-query`, then installed into the user's PATH with executable
-permissions. This is a packaging prerequisite, not a request to run a local build.
+artifact from [release-binary.yml](../../.github/workflows/release-binary.yml) is
+built with `asi-query`, so installing it into the user's PATH with executable
+permissions completes the packaging prerequisite for this journey.
 An install recipe must name a verified artifact/revision and supported platform;
 this proposal does not invent an existing release URL.
 
