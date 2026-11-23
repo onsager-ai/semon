@@ -708,6 +708,10 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
             (2, 55_000, None),
         ],
     );
+    home.write(
+        "codex/sessions/2026/11/10/rollout-duplicate.jsonl",
+        format!("{}\n", json!({"timestamp":"2026-11-10T00:00:00Z","type":"session_meta","payload":{"id":base,"cwd":"/fixture"}})).as_bytes(),
+    );
 
     let cache = home.root.join("state/index.json");
     let output = home
@@ -734,10 +738,25 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
         )
     };
     let timestamp = |minute: u8| 1_794_268_800_000_i64 + i64::from(minute) * 60_000;
-    let query = |native_id: &str, flags: &[&str]| {
+    let ambiguous = cli(&["query", "context_growth", &base], cache.clone());
+    assert!(!ambiguous.status.success());
+    let ambiguous: Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
+    assert_eq!(ambiguous["error"]["code"], "invalid_argument");
+    assert!(
+        ambiguous["error"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("/claude/")
+    );
+    assert!(
+        ambiguous["error"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("/codex/")
+    );
+    let query_id = |session_id: &str, flags: &[&str]| {
         let mut arguments = vec!["query", "context_growth"];
-        let session_uid = uid(native_id);
-        arguments.push(&session_uid);
+        arguments.push(session_id);
         arguments.extend_from_slice(flags);
         let output = cli(&arguments, cache.clone());
         assert!(
@@ -748,6 +767,7 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
         );
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
+    let query = |native_id: &str, flags: &[&str]| query_id(&uid(native_id), flags);
     let step = |minute, tokens: u64| {
         json!([
             timestamp(minute),
@@ -785,6 +805,14 @@ fn cli_and_mcp_context_growth_preserve_session_series_and_compaction_flags() {
             .collect::<Vec<_>>()
     };
     let base_result = query(&base, &[]);
+    assert_eq!(query_id(&storm, &[])["rows"], query(&storm, &[])["rows"]);
+    let unknown = cli(
+        &["query", "context_growth", "missing-native-id"],
+        cache.clone(),
+    );
+    assert!(!unknown.status.success());
+    let unknown: Value = serde_json::from_slice(&unknown.stdout).unwrap();
+    assert_eq!(unknown["error"]["code"], "unknown_session");
     let columns: Vec<_> = base_result["columns"]
         .as_array()
         .unwrap()

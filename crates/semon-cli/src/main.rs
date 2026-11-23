@@ -2045,6 +2045,36 @@ impl AsiMcp {
             .and_then(serde_json::Value::as_str)
             .filter(|uid| !uid.trim().is_empty())
             .ok_or_else(|| asi_error("invalid_argument", "session_uid is required", "request"))?;
+        let root = self
+            .store_root
+            .as_deref()
+            .ok_or_else(|| asi_error("store_unavailable", "Analytics unavailable", "store"))?;
+        let lookup = semon_asi::query::Request::new(
+            "SELECT session_uid FROM dim_session WHERE session_uid = ? OR regexp_extract(session_uid, '/([^/]+)$', 1) = ? ORDER BY session_uid",
+        );
+        let mut lookup = lookup;
+        lookup.params = vec![
+            serde_json::Value::String(uid.to_owned()),
+            serde_json::Value::String(uid.to_owned()),
+        ];
+        let result = semon_asi::query::run(&self.executable, root, &lookup)
+            .map_err(|failure| serde_json::to_value(failure).expect("failure serializes"))?;
+        let candidates = result
+            .rows
+            .iter()
+            .filter_map(|row| row.first()?.as_str())
+            .collect::<Vec<_>>();
+        let uid = match candidates.as_slice() {
+            [] => return Err(asi_error("unknown_session", "Unknown session", uid)),
+            [candidate] => (*candidate).to_owned(),
+            _ => {
+                return Err(asi_error(
+                    "invalid_argument",
+                    "Ambiguous native session ID",
+                    &format!("{uid}: {}", candidates.join(", ")),
+                ));
+            }
+        };
         let bound = |key| {
             object
                 .get(key)
