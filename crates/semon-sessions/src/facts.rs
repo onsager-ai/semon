@@ -11,6 +11,7 @@ use std::{
     io::{self, Read},
     path::Path,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -404,12 +405,23 @@ fn codex_lock_observations(options: &Options) -> Option<(BTreeSet<String>, BTree
     Some((files, held))
 }
 
+/// Order name observations across Index writers using the wall clock, even
+/// when presentation tests fix the model's clock.
+pub(crate) fn native_name_capture_time() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| {
+            i64::try_from(time.as_micros()).unwrap_or(i64::MAX)
+        })
+}
+
 /// One in-memory capture for the complete local materialization refresh.
 /// A subsequent refresh captures again, including in watch mode.
 pub(crate) struct LocalRuntime {
     pub(crate) facts: Facts,
     pub(crate) pids: Vec<model::PidFile>,
     lock_files: Option<BTreeSet<String>>,
+    pub(crate) native_names_captured_at: i64,
     pub(crate) reported_runs_stamp: Option<crate::events::ReportedFileStamp>,
     pub(crate) captured_at: i64,
     pub(crate) generation: String,
@@ -457,6 +469,7 @@ impl LocalRuntime {
         for pid in &mut pids {
             pid.alive &= facts.proc_starts.get(&pid.pid).copied() == pid.start;
         }
+        let native_names_captured_at = native_name_capture_time();
         facts.native_names = native_names::read(&options.codex_home);
         for name in &mut facts.native_names {
             name.observed_at = 0;
@@ -472,6 +485,7 @@ impl LocalRuntime {
             facts,
             pids,
             lock_files,
+            native_names_captured_at,
             reported_runs_stamp,
             captured_at,
             generation,
