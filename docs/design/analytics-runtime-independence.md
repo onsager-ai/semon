@@ -1,7 +1,7 @@
 # Analytics without live runtime observation
 
-Status: proposed for review. Open an implementation PR only after this design
-has been reviewed and the hp-code-2 materialize measurements are available.
+Status: Chief PM approved the design on 2026-11-24. Open an implementation PR
+once the hp-code-2 materialize measurements are available.
 
 ## Problem
 
@@ -75,7 +75,39 @@ new commits. A later append belongs to a later pass. Source admission and its
 integrity and custody checks belong to the Index, even if the CLI invokes it
 before running the analytics drain.
 
-## Phase 4 and decisions
+## Concurrent admission
+
+The Viewer and materialize can admit the same growing source into the same
+Index. `Ledger::resumes` checks the file identity and hashes of the consumed
+prefix and tail before reusing it, unless the scanner already has qualified
+append evidence. `SqliteStore::write_one_dirty` compares the committed `files`
+ledger with the scanner's expected ledger under `BEGIN IMMEDIATE`. It writes the
+new ledger, proofs and warehouse facts in that transaction. `commit_initial_files`
+requires an absent ledger and matching file stat. A losing scan reads the
+newer ledger before trying again. While Catalog publication still uses source
+claims, `publish_catalog_with_writer` compares each claimed revision against
+`session_catalog_invalidations` and acknowledges only the matching revision, so
+old work cannot clear a newer claim. Phase 4 retires those semantic claims with
+their consumers and keeps the Index ledger checks.
+[Scanner and ledger](../../crates/semon-sessions/src/events.rs) · [Index transactions and claims](../../crates/semon-sessions/src/events/store.rs)
+
+A pending scan never erases already-admitted facts. A losing transaction leaves
+the committed facts visible, and `SessionChange::Pending` leaves the published
+analytics rows in place. Neither the Viewer's Index admission nor materialize's
+admission takes a runtime capture in this path. Process churn cannot invalidate
+these batches, and there are no captured runtime values to reconcile or publish
+out of order. This removes the failure class seen in #735 and #737 from
+materialize.
+[Analytics publication](../../crates/semon-asi/src/publish.rs)
+
+The implementation PR must include `concurrent_admission_matches_single_run`.
+Race two admission runs over the same growing native source using separate
+processes or database connections. Assert that admitted facts increase
+monotonically, stale work never overwrites newer data, both runs complete
+without lock timeouts, and the analytics published afterward match a single-run
+baseline over the same evidence.
+
+## Phase 4
 
 Make this the analytics slice of the [phase 4 cutover](star-catalog-phase3.md#phase-4).
 It needs the phase 2 writer and phase 3 identity and source-resolution contracts,
@@ -85,17 +117,18 @@ and family totals, costs, and label provenance. Keep source qualification and
 Index compare-and-swap checks. Remove the old stage and its generation fences
 when the remaining CLI, MCP and export callers have moved.
 
-- **Who advances the Index?** Prefer standalone materialize invoking shared
-  runtime-free admission. This preserves one-command cold start and fresh watch
-  without a Viewer. A read-only command backed by a separately managed Index
-  producer gives a cleaner process boundary, but adds setup and must explicitly
-  report stale or missing coverage when that producer is absent.
-- **When to switch?** Prefer phase 4. If it slips and the hp-code-2 measurements
-  justify an earlier cut, a runtime-free adapter over native evidence and
-  committed identity and lineage could ship first. That still needs independent
-  admission and fact parity, and adds an adapter that phase 4 would replace.
-  Review the design and compare cold and warm one-shot time and watch freshness
-  on hp-code-2 before choosing.
+## Decisions
+
+Chief PM approved both choices on 2026-11-24.
+
+- **Index admission.** Materialize invokes shared runtime-free admission. This
+  preserves one-command cold start and fresh watch without a Viewer. A separately
+  managed Index producer would give materialize a read-only process boundary and
+  add setup and explicit stale-coverage handling.
+- **Cutover.** Switch in phase 4. An earlier adapter over native evidence and
+  committed identity and lineage would still need runtime-free admission and
+  fact parity, then be replaced in phase 4. Collect the cold and warm one-shot
+  timings and watch freshness measurements on hp-code-2 before implementation.
 
 Close [#736](https://github.com/onsager-ai/semon/issues/736) after verifying that
 neither materialize mode can capture or publish Codex names. Any stale-name
