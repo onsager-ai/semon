@@ -5926,6 +5926,15 @@ pub(crate) fn publish_catalog_names(
         .collect::<BTreeMap<_, _>>();
     let encoded = serde_json::to_string(&names).map_err(io::Error::other)?;
     let path = super::EventCache::path(&options.cache);
+    // A source that has never published names has no name row to clear.
+    // Keep its steady-state refresh read-only so it needs no writer lock.
+    if names.is_empty() {
+        let db = focused_connection(&path)?;
+        crate::storage::sqlite::qualify(&db, namespace).map_err(io::Error::other)?;
+        if catalog_names_json(&db).map_err(io::Error::other)?.is_none() {
+            return Ok(());
+        }
+    }
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(io::Error::other)?;
     let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
@@ -5944,11 +5953,12 @@ pub(crate) fn publish_catalog_names(
         return Ok(());
     }
     let previous = catalog_names_json(&tx).map_err(io::Error::other)?;
-    if previous.as_ref() != Some(&encoded) && (previous.is_some() || !names.is_empty()) {
+    if previous.as_ref() != Some(&encoded) {
         tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES, encoded])
             .map_err(io::Error::other)?;
     }
-    // Unchanged names still qualify this observation, including an empty set.
+    // Once a source has published names, even an unchanged observation or
+    // a withdrawal must fence an older in-flight capture.
     tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES_CAPTURE, captured_at.to_string()])
         .map_err(io::Error::other)?;
     tx.commit().map_err(io::Error::other)
@@ -7311,6 +7321,26 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&saved).unwrap()[id],
             "newer"
         );
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_without_published_names_needs_no_writer_lock() {
+        let root = scratch("catalog-empty-names-lock");
+        let options = crate::Options {
+            cache: root.join("index.json"),
+            codex_home: root.join("codex"),
+            ..Default::default()
+        };
+        let namespace = crate::storage::Namespace::new("local").unwrap();
+        drop(crate::storage::sqlite::open_index(&options, &namespace).unwrap());
+        let path = crate::events::EventCache::path(&options.cache);
+        let db = Connection::open(&path).unwrap();
+        let writer = Transaction::new_unchecked(&db, TransactionBehavior::Immediate).unwrap();
+        publish_catalog_names(&options, &namespace, None).unwrap();
+        assert_eq!(catalog_names_json(&writer).unwrap(), None);
+        drop(writer);
         drop(db);
         fs::remove_dir_all(root).unwrap();
     }
