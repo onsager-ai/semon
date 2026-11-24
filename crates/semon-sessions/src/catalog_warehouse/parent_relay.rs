@@ -439,7 +439,10 @@ impl<M> Plan<M> {
         let failed = run.tn.is_some_and(|(_, _, _, index)| {
             matches!(
                 self.run[index].step,
-                Step::Notification { completed: false }
+                Step::Notification {
+                    completed: false,
+                    ..
+                }
             )
         });
         // A notification may determine status even when the hand-back is the
@@ -535,6 +538,7 @@ fn collect_run<M: Clone>(
                 let status: Option<String> = row.get(4).map_err(index)?;
                 Step::Notification {
                     completed: matches!(status.as_deref(), Some("completed" | "success" | "done")),
+                    resumed: false,
                 }
             }
             "agm" if parent_aliases.is_some() => Step::Final,

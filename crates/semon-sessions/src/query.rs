@@ -92,9 +92,9 @@ impl StallReason {
 
 /// The rule `stalls` applies, as it states it in every answer.
 const STALL_RULE: &str = "A session stalls when no log line has landed for at least idle_minutes and: \
-     a Claude pid file recorded it busy but that process is gone (process-gone); or a question to you \
-     is open (waiting-question); or it is working (no-output). Working is a live Claude process whose \
-     status is busy, a subagent whose parent runs and whose spawning call has no result, or a Codex run \
+     a Claude pid file recorded it busy, covers the latest transcript activity, and its process was \
+     observed gone (process-gone); or a question to you is open (waiting-question); or it is working (no-output). Working is a live Claude process whose \
+     status is busy, a subagent whose parent runs and whose current run has no evidence of completion, or a Codex run \
      that holds its writer lock.";
 
 const SINCE: &str = "A duration back from now (90m, 2h, 7d, 1w) or an RFC 3339 time; not before the \

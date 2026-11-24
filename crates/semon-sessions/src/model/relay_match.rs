@@ -149,19 +149,25 @@ pub(super) fn claude_runs(
     child_events: &[Ref],
     first_prompt: Option<Ref>,
     finals: &[Ref],
-    ends: &[Ref],
+    ends: &[(Ref, bool)],
 ) -> (Vec<super::Run>, super::BTreeSet<Ref>) {
     use super::{AGM_DOWN, BTreeSet};
     use ClaudeRunStep as Step;
     let mut steps: Vec<(Ref, Step)> = finals
         .iter()
         .map(|at| (*at, Step::Final))
-        .chain(ends.iter().map(|at| {
+        .chain(ends.iter().map(|(at, resumed)| {
             let completed = matches!(
                 event(files, *at).n.as_deref(),
                 Some("completed" | "success" | "done")
             );
-            (*at, Step::Notification { completed })
+            (
+                *at,
+                Step::Notification {
+                    completed,
+                    resumed: *resumed,
+                },
+            )
         }))
         .collect();
     for at in child_events {
@@ -188,7 +194,7 @@ pub(super) fn claude_runs(
 pub(crate) enum ClaudeRunStep {
     Final,
     Handback,
-    Notification { completed: bool },
+    Notification { completed: bool, resumed: bool },
     Start { coordinator: bool },
 }
 
@@ -234,9 +240,10 @@ pub(crate) fn group_claude_runs<A: Copy + Ord>(
             // handed back before it, when that one has none. A failed or
             // killed one is about the run still open: the one before had
             // handed back, so it didn't fail.
-            Step::Notification { completed } => {
+            Step::Notification { completed, resumed } => {
                 let target = if last > 0
                     && completed
+                    && !resumed
                     && !runs[last].ended()
                     && runs[last - 1].handed_back()
                     && runs[last - 1].tn.is_none()

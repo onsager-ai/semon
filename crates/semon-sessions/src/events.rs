@@ -102,7 +102,9 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v39: activity steps retain exact Codex call provenance for transcript anchors.
 /// v41: usage and compaction signals retain physical record ordinals for ASI anchors.
 /// v42: retain the next physical record ordinal for qualified Copilot sources.
-pub(crate) const CACHE_VERSION: u32 = 42;
+/// v43: Claude task notifications retain the task ID, and assistant text
+/// retains the native end-turn marker.
+pub(crate) const CACHE_VERSION: u32 = 43;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -4170,6 +4172,8 @@ pub(crate) const AGM_UP: u8 = 16;
 /// resumed subagent (`origin.kind == "coordinator"`), or a Codex parent's
 /// message to its child.
 pub(crate) const AGM_DOWN: u8 = 32;
+/// Claude assistant text whose API response stopped at the end of a turn.
+pub(crate) const ASSISTANT_END_TURN: u8 = 1;
 /// A Codex agent message between agents where neither is the other's ancestor.
 pub(crate) const AGM_SIDE: u8 = 64;
 /// The agent's final report for its run (`origin.handback == true`).
@@ -4262,6 +4266,9 @@ pub(crate) struct Event {
     /// [`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`] and [`AGM_PROGRESS`].
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
+    /// A Claude task notification's native task ID, independent of tool-use ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_id: Option<String>,
     /// A bounded literal code-mode `write_stdin` target. Retained so an
     /// output arriving after the terminal event can still be checked exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4907,6 +4914,14 @@ fn prompt_events(
             found = true;
         }
         for (id, status, body) in notifications(text) {
+            // The native header precedes result/summary text, which can
+            // contain quoted tags that do not identify this task.
+            let header_end = ["<result>", "<summary>"]
+                .into_iter()
+                .filter_map(|tag| body.find(tag))
+                .min()
+                .unwrap_or(body.len());
+            let header = &body[..header_end];
             push(
                 summary,
                 Event {
@@ -4915,6 +4930,14 @@ fn prompt_events(
                     t: time,
                     id: id.map(str::to_owned),
                     n: status.map(str::to_owned),
+                    task_id: inner(header, "task-id")
+                        .filter(|id| {
+                            !id.is_empty()
+                                && id.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                                })
+                        })
+                        .map(str::to_owned),
                     script: if !matches!(status, Some("killed" | "stopped"))
                         && (status == Some("failed")
                             || inner(body, "summary")
@@ -6641,6 +6664,12 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                         o: offset,
                                         b: block,
                                         t: time,
+                                        script: if field(message, "stop_reason") == Some("end_turn")
+                                        {
+                                            ASSISTANT_END_TURN
+                                        } else {
+                                            0
+                                        },
                                         ..Event::default()
                                     },
                                 );

@@ -1657,12 +1657,12 @@ impl NativeEvidence {
                         .snapshot
                         .unwrap_or_else(|| Snapshot::sources(&self.options, &[]));
                     if self.options.facts.is_none() {
-                        snapshot.pids.extend(
-                            discovery
-                                .pids
-                                .into_iter()
-                                .map(|pid| (pid, proc_start(&self.options.proc_root, pid))),
-                        );
+                        snapshot.pids.extend(discovery.pids.into_iter().map(|pid| {
+                            (
+                                pid,
+                                crate::observe_claude_proc_start(&self.options.proc_root, pid),
+                            )
+                        }));
                     }
                     work.catalog_snapshot = Some(snapshot);
                 }
@@ -1983,12 +1983,12 @@ impl NativeEvidence {
                     .snapshot
                     .unwrap_or_else(|| Snapshot::sources(&self.options, &[]));
                 if self.options.facts.is_none() {
-                    snapshot.pids.extend(
-                        discovery
-                            .pids
-                            .into_iter()
-                            .map(|pid| (pid, proc_start(&self.options.proc_root, pid))),
-                    );
+                    snapshot.pids.extend(discovery.pids.into_iter().map(|pid| {
+                        (
+                            pid,
+                            crate::observe_claude_proc_start(&self.options.proc_root, pid),
+                        )
+                    }));
                 }
                 work.catalog_snapshot = Some(snapshot);
                 work.observed_catalog_generation = Some(generation);
@@ -2014,7 +2014,12 @@ impl NativeEvidence {
         if self.options.facts.is_none() {
             snapshot.pids = pids
                 .iter()
-                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .map(|pid| {
+                    (
+                        *pid,
+                        crate::observe_claude_proc_start(&self.options.proc_root, *pid),
+                    )
+                })
                 .collect();
         }
         work.catalog_snapshot = Some(snapshot);
@@ -2105,7 +2110,12 @@ impl NativeEvidence {
             snapshot.pids = data
                 .pids
                 .iter()
-                .map(|pid| (*pid, proc_start(&self.options.proc_root, *pid)))
+                .map(|pid| {
+                    (
+                        *pid,
+                        crate::observe_claude_proc_start(&self.options.proc_root, *pid),
+                    )
+                })
                 .collect();
         }
         let data = Arc::new(data);
@@ -2235,15 +2245,13 @@ fn local_runtime_generation(options: &Options) -> io::Result<String> {
     let ids = lock_ids(options);
     let locks = writer_locks(options, &ids);
     let machine = crate::facts::MachineFacts::Local;
-    let pids = model::pid_files(options, &machine)
-        .into_iter()
-        .map(|pid| pid.pid)
-        .chain(
-            machine
-                .codex_lock_pids(options)
-                .into_iter()
-                .flat_map(|pids| pids.into_values()),
-        );
+    let claude = model::pid_files(options, &machine);
+    let pids = claude.iter().map(|pid| pid.pid).chain(
+        machine
+            .codex_lock_pids(options)
+            .into_iter()
+            .flat_map(|pids| pids.into_values()),
+    );
     for pid in pids {
         processes.insert(
             pid,
@@ -2262,7 +2270,7 @@ fn local_runtime_generation(options: &Options) -> io::Result<String> {
             Ok((path.to_owned(), observed.map(|stamp| stamp.generation)))
         })
         .collect::<io::Result<_>>()?;
-    let bytes = serde_json::to_vec(&(paths, locks, processes)).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(&(paths, locks, processes, claude)).map_err(io::Error::other)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -2273,7 +2281,7 @@ pub(crate) struct Snapshot {
     /// come and go all the time and change nothing here.
     lock_ids: BTreeSet<(u64, u64, u64)>,
     locks: Option<String>,
-    pub(crate) pids: BTreeMap<u32, Option<u64>>,
+    pub(crate) pids: BTreeMap<u32, Option<Option<u64>>>,
 }
 
 /// A `/proc/locks` line's `major:minor:inode`, as `lock_pid` reads it.
@@ -2557,7 +2565,10 @@ impl Snapshot {
             watched.insert(path.clone(), stamp(&path));
             ids = lock_ids(options);
             for pid in model::pid_files(options, &crate::facts::MachineFacts::Local) {
-                pids.insert(pid.pid, proc_start(&options.proc_root, pid.pid));
+                pids.insert(
+                    pid.pid,
+                    crate::observe_claude_proc_start(&options.proc_root, pid.pid),
+                );
             }
             writer_locks(options, &ids)
         } else {
@@ -2743,7 +2754,12 @@ impl Snapshot {
         }
         let pids = ids
             .into_iter()
-            .map(|pid| (pid, proc_start(&options.proc_root, pid)))
+            .map(|pid| {
+                (
+                    pid,
+                    crate::observe_claude_proc_start(&options.proc_root, pid),
+                )
+            })
             .collect();
         let lock_ids = lock_ids(options);
         Self {
@@ -2791,10 +2807,9 @@ impl Snapshot {
             return false;
         }
         writer_locks(options, &self.lock_ids) != self.locks
-            || self
-                .pids
-                .iter()
-                .any(|(pid, original)| proc_start(&options.proc_root, *pid) != *original)
+            || self.pids.iter().any(|(pid, original)| {
+                crate::observe_claude_proc_start(&options.proc_root, *pid) != *original
+            })
     }
 }
 

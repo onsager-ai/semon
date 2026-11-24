@@ -51,6 +51,10 @@ pub struct Facts {
     /// `sessions/<pid>.json` names, when that process exists. A pid file is
     /// live when its `procStart` equals this.
     pub proc_starts: BTreeMap<u32, u64>,
+    /// Claude PID files whose processes were observed absent. A pid missing
+    /// from both process observations has unknown liveness.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub missing_claude_pids: BTreeSet<u32>,
     /// Current native Codex plain-rollout paths, relative to its home.
     /// None is an older snapshot with unknown source selection; Some(empty)
     /// explicitly selects no sources. Retired mirrored bytes stay retained.
@@ -140,6 +144,7 @@ impl Facts {
     pub fn offline(&self, last_seen: i64) -> Self {
         Self {
             proc_starts: BTreeMap::new(),
+            missing_claude_pids: BTreeSet::new(),
             codex_locks: BTreeMap::new(),
             runs: BTreeMap::new(),
             offline_since: Some(last_seen),
@@ -287,28 +292,39 @@ pub(crate) fn collect_facts(
 /// Fresh allowlisted process/lock/run observations, without transcript, event
 /// index or repository scans. Source inventory is deliberately unknown.
 pub fn local_runtime_facts(options: &crate::Options) -> io::Result<Facts> {
-    let mut proc_starts = BTreeMap::new();
-    for pid in claude_pids(options) {
-        if let Some(start) = proc_start(&options.proc_root, pid) {
-            proc_starts.insert(pid, start);
-        }
-    }
+    let observations = claude_pids(options)
+        .into_iter()
+        .filter_map(|pid| observe_claude_proc(options, pid).map(|start| (pid, start)))
+        .collect();
     let codex_locks = codex_locks(options);
     let pids = model::pid_files(options, &MachineFacts::Local);
     Ok(local_process_facts(
         options,
         &pids,
-        proc_starts,
+        observations,
         codex_locks,
     ))
+}
+
+fn observe_claude_proc(options: &Options, pid: u32) -> Option<Option<u64>> {
+    crate::observe_claude_proc_start(&options.proc_root, pid)
 }
 
 fn local_process_facts(
     options: &Options,
     pids: &[model::PidFile],
-    proc_starts: BTreeMap<u32, u64>,
+    observations: BTreeMap<u32, Option<u64>>,
     codex_locks: BTreeMap<String, u32>,
 ) -> Facts {
+    let mut proc_starts = BTreeMap::new();
+    let mut missing_claude_pids = BTreeSet::new();
+    for (pid, start) in observations {
+        if let Some(start) = start {
+            proc_starts.insert(pid, start);
+        } else {
+            missing_claude_pids.insert(pid);
+        }
+    }
     let mut runs = BTreeMap::new();
     let mut process_ancestors = BTreeMap::new();
     let machine = MachineFacts::Local;
@@ -339,6 +355,7 @@ fn local_process_facts(
         hostname: model::local_hostname(options),
         home: env_home(),
         proc_starts,
+        missing_claude_pids,
         codex_locks,
         codex_rollouts: None,
         codex_provisional_rollouts: None,
@@ -438,18 +455,22 @@ impl LocalRuntime {
             Some((files, held)) => (Some(files), held),
             None => (None, BTreeMap::new()),
         };
-        let proc_starts = pids
+        let mut observations = pids
             .iter()
-            .map(|pid| pid.pid)
-            .chain(held_locks.values().copied())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter_map(|pid| proc_start(&options.proc_root, pid).map(|start| (pid, start)))
+            .filter_map(|pid| observe_claude_proc(options, pid.pid).map(|start| (pid.pid, start)))
             .collect::<BTreeMap<_, _>>();
         for pid in &mut pids {
-            pid.alive &= proc_starts.get(&pid.pid).copied() == pid.start;
+            pid.alive &= observations.get(&pid.pid).copied().flatten() == pid.start;
         }
-        let mut facts = local_process_facts(options, &pids, proc_starts, held_locks);
+        for &pid in held_locks.values() {
+            if let Some(start) = proc_start(&options.proc_root, pid) {
+                observations.insert(pid, Some(start));
+            }
+        }
+        let mut facts = local_process_facts(options, &pids, observations, held_locks);
+        facts
+            .missing_claude_pids
+            .retain(|&pid| observe_claude_proc(options, pid) == Some(None));
         // Exclude sessions that changed process identity during the capture.
         facts
             .proc_starts
@@ -467,7 +488,13 @@ impl LocalRuntime {
             .process_ancestors
             .retain(|pid, _| facts.proc_starts.contains_key(pid));
         for pid in &mut pids {
-            pid.alive &= facts.proc_starts.get(&pid.pid).copied() == pid.start;
+            let observed = recorded_claude_proc(&facts, pid.pid);
+            let alive = pid
+                .start
+                .zip(observed)
+                .map(|(start, observed)| Some(start) == observed);
+            pid.alive &= alive == Some(true);
+            pid.gone &= alive == Some(false);
         }
         let native_names_captured_at = native_name_capture_time();
         facts.native_names = native_names::read(&options.codex_home);
@@ -505,6 +532,18 @@ pub(crate) enum Lock {
     Held(u32),
     Free,
     Unknown,
+}
+
+fn recorded_claude_proc(facts: &Facts, pid: u32) -> Option<Option<u64>> {
+    if facts.offline_since.is_some() {
+        return None;
+    }
+    facts
+        .proc_starts
+        .get(&pid)
+        .copied()
+        .map(Some)
+        .or_else(|| facts.missing_claude_pids.contains(&pid).then_some(None))
 }
 
 impl MachineFacts {
@@ -581,6 +620,14 @@ impl MachineFacts {
                     .codex_provisional_rollouts
                     .as_ref()
                     .is_some_and(|paths| paths.contains(&relative)))
+    }
+
+    pub(crate) fn claude_proc_start(&self, options: &Options, pid: u32) -> Option<Option<u64>> {
+        match self {
+            Self::Local => observe_claude_proc(options, pid),
+            Self::Captured(runtime) => recorded_claude_proc(&runtime.facts, pid),
+            Self::Recorded(facts) => recorded_claude_proc(facts, pid),
+        }
     }
 
     pub(crate) fn proc_start(&self, options: &Options, pid: u32) -> Option<u64> {

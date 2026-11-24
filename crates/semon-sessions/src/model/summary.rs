@@ -223,7 +223,7 @@ impl CatalogSource {
     }
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 9;
+pub(crate) const CATALOG_VERSION: u32 = 10;
 
 pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
     let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;

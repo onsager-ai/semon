@@ -47,8 +47,8 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use crate::{
     Marker, Options, events,
     events::{
-        ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASYNC, DENIED, Event,
-        EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
+        ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASSISTANT_END_TURN,
+        ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
     field, file_list, handoff,
@@ -322,7 +322,7 @@ pub(crate) struct SessionFacts {
     pub(crate) pid: Option<u32>,
     /// Whether that process runs: `true` when its start time matches (or its
     /// writer lock is held), `false` when the record's process is gone,
-    /// `None` when there is no process record to check.
+    /// `None` when current process evidence is missing, stale or unreadable.
     pub(crate) alive: Option<bool>,
     /// The status the Claude pid file recorded (`busy`, `idle`, `shell`, `waiting`, …).
     pub(crate) recorded_status: Option<String>,
@@ -897,12 +897,14 @@ pub(crate) struct PidFile {
     pub(crate) pid: u32,
     pub(crate) session: String,
     pub(crate) alive: bool,
+    pub(crate) gone: bool,
     /// The process start time the file records.
     pub(crate) start: Option<u64>,
     /// When the process started, in epoch milliseconds (`startedAt`): a
     /// process that resumed a session into the same file ran none of the
     /// background calls logged before it.
     started: Option<i64>,
+    updated: Option<i64>,
     status: Option<String>,
     /// What the process is waiting on you for, when it says so
     /// (`input needed`, `permission prompt`): the record's `waitingFor`.
@@ -1017,20 +1019,31 @@ pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFil
             .get("procStart")
             .and_then(Value::as_u64)
             .or_else(|| field(&record, "procStart").and_then(|value| value.parse().ok()));
+        let alive = start
+            .zip(machine.claude_proc_start(options, pid))
+            .map(|(start, observed)| Some(start) == observed);
+        let started = record.get("startedAt").and_then(Value::as_i64);
+        let status_updated = record
+            .get("statusUpdatedAt")
+            .and_then(Value::as_i64)
+            .or_else(|| field(&record, "statusUpdatedAt").and_then(events::parse_ms));
         result.push(PidFile {
             pid,
             session: session.to_owned(),
-            alive: start.is_some() && machine.proc_start(options, pid) == start,
+            alive: alive == Some(true),
+            gone: alive == Some(false),
             start,
-            started: record.get("startedAt").and_then(Value::as_i64),
+            started,
+            updated: record
+                .get("updatedAt")
+                .and_then(Value::as_i64)
+                .or(status_updated)
+                .or(started),
             status: field(&record, "status").map(str::to_owned),
             waiting_for: field(&record, "waitingFor")
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_owned),
-            waiting_since: record
-                .get("statusUpdatedAt")
-                .and_then(Value::as_i64)
-                .or_else(|| field(&record, "statusUpdatedAt").and_then(events::parse_ms)),
+            waiting_since: status_updated,
             name: field(&record, "name").map(str::to_owned),
         });
     }
@@ -1654,8 +1667,8 @@ struct Sess {
     names: BTreeSet<String>,
     refs: Vec<Ref>,
     parent: Option<usize>,
-    /// Every pid file that names this lineage: (pid, alive, status, start).
-    pid_files: Vec<(u32, bool, Option<String>, Option<u64>)>,
+    /// Every pid file that names this lineage.
+    pid_files: Vec<PidFile>,
     /// The earliest and latest line's time, when any line has one.
     first: Option<i64>,
     last: Option<i64>,
@@ -2247,23 +2260,38 @@ impl<'a> Builder<'a> {
                 }
                 let (kind, pid, alive, recorded_status, run) = match session.kind {
                     SessKind::Lineage => {
-                        let live = session.pid_files.iter().find(|(_, alive, _, _)| *alive);
-                        match (live, session.pid_files.as_slice()) {
-                            (Some((pid, _, status, start)), _) => (
+                        if let Some(pid) = session.pid_files.iter().find(|pid| pid.alive) {
+                            (
                                 "session",
-                                Some(*pid),
+                                Some(pid.pid),
                                 Some(true),
-                                status.clone(),
-                                run_of(*pid, *start),
-                            ),
-                            // One pid file, and its process is gone.
-                            (None, [(pid, _, status, _)]) => {
-                                ("session", Some(*pid), Some(false), status.clone(), None)
+                                pid.status.clone(),
+                                run_of(pid.pid, pid.start),
+                            )
+                        } else {
+                            // A dead process's record cannot describe an unobserved
+                            // continuation whose transcript outlasts that record.
+                            let mut candidates = session.pid_files.iter().filter(|pid| {
+                                pid.updated.is_some_and(|updated| {
+                                    session.last.is_none_or(|last| last <= updated)
+                                })
+                            });
+                            match candidates.next() {
+                                Some(pid) if pid.gone => match candidates.next() {
+                                    None => (
+                                        "session",
+                                        Some(pid.pid),
+                                        Some(false),
+                                        pid.status.clone(),
+                                        None,
+                                    ),
+                                    Some(other) if other.gone && candidates.all(|pid| pid.gone) => {
+                                        ("session", None, Some(false), None, None)
+                                    }
+                                    Some(_) => ("session", None, None, None, None),
+                                },
+                                _ => ("session", None, None, None, None),
                             }
-                            // No process record: nothing to check.
-                            (None, []) => ("session", None, None, None, None),
-                            // Several, all gone: which one ran last isn't logged.
-                            (None, _) => ("session", None, Some(false), None, None),
                         }
                     }
                     // A subagent runs in its parent's process: no record of
@@ -2395,9 +2423,7 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let session = &mut self.sessions[index];
-            session
-                .pid_files
-                .push((pid.pid, pid.alive, pid.status.clone(), pid.start));
+            session.pid_files.push(pid.clone());
             if let Some(name) = &pid.name {
                 session.names.insert(plain_name(name));
             }
@@ -3122,6 +3148,7 @@ impl<'a> Builder<'a> {
         // Terminal task notifications by tool-use id, in log order: a
         // subagent's run ends (its spawning call's id) among them.
         let mut notifications = HashMap::<String, Vec<Ref>>::new();
+        let mut task_notifications = HashMap::<String, Vec<Ref>>::new();
         // Every up agent message a session received: a subagent's sends to
         // `main` and its hand-backs, received in its parent, and its sends to
         // other agents. Only the parent's count for a spawn.
@@ -3146,6 +3173,12 @@ impl<'a> Builder<'a> {
                             .entry(id.clone())
                             .or_default()
                             .push((position, at));
+                        if let Some(task_id) = &event.task_id {
+                            task_notifications
+                                .entry(task_id.clone())
+                                .or_default()
+                                .push((position, at));
+                        }
                     }
                     // A receipt names its sender by `senderTaskId` (the
                     // agent id or the spawning call's id), or by the tag's
@@ -3214,9 +3247,15 @@ impl<'a> Builder<'a> {
                     })
                     .map(|file| self.of_file[file])
             });
-            spawns.push((child, spawner, call, meta.tool_use_id.clone()));
+            spawns.push((
+                child,
+                spawner,
+                call,
+                meta.tool_use_id.clone(),
+                file.id.as_str(),
+            ));
         }
-        for (child, spawner, _, _) in &spawns {
+        for (child, spawner, ..) in &spawns {
             self.sessions[*child].parent = *spawner;
             self.sessions[*child].out.parent_source = None;
             if spawner.is_none() {
@@ -3240,7 +3279,7 @@ impl<'a> Builder<'a> {
         });
         // Each spawner's sends delivered to one of its agents, read once.
         let mut deliveries = HashMap::new();
-        for (child, spawner, call, tool_use_id) in spawns {
+        for (child, spawner, call, tool_use_id, native_id) in spawns {
             let Some(spawner) = spawner else {
                 continue;
             };
@@ -3292,14 +3331,46 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .partition(|at| event(self.files, *at).script & AGM_FINAL != 0);
             let paired = self.pair_sends(child, &key, &received);
-            let ends: Vec<Ref> = tool_use_id
+            let original_ends = tool_use_id
                 .as_deref()
                 .and_then(|id| notifications.get(id))
                 .into_iter()
                 .flatten()
                 .copied()
                 .filter(|at| self.of_file[at.0] == spawner)
-                .collect();
+                .map(|at| (at, false));
+            // The resumed run reports the SendMessage call's ID instead of
+            // the spawning call's. The stable task ID identifies the child.
+            let mut ambiguous_notice = false;
+            let resumed_ends = task_notifications
+                .get(native_id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|at| self.of_file[at.0] == spawner)
+                .filter_map(|at| {
+                    let notice = event(self.files, at);
+                    let id = notice.id.as_deref()?;
+                    if Some(id) == tool_use_id.as_deref() {
+                        return None;
+                    }
+                    let qualified = self.find_in(spawner, id).is_some_and(|call| {
+                        let send = event(self.files, call);
+                        send.n.as_deref() == Some("SendMessage")
+                            && send.r.as_ref().is_some_and(|reply| {
+                                !reply.e
+                                    && reply.f & PIN != 0
+                                    && reply.f & (DENIED | SEND_FAILED) == 0
+                                    && reply
+                                        .t
+                                        .zip(notice.t)
+                                        .is_some_and(|(reply, notice)| reply <= notice)
+                            })
+                    });
+                    ambiguous_notice |= !qualified;
+                    qualified.then_some((at, true))
+                });
+            let ends = original_ends.chain(resumed_ends).collect::<Vec<_>>();
             let (runs, inline) = self.claude_runs(&child_events, first_prompt, &finals, &ends);
             let mut result = None;
             // The latest run that ended: its hand-back receipt's text, else
@@ -3326,7 +3397,7 @@ impl<'a> Builder<'a> {
                     result = Some((text, done, failed));
                     previews.insert("result", self.receipt_preview(&key, &finals, index));
                 } else if let Some(found) = run.tn {
-                    let id = tool_use_id.clone().unwrap_or_default();
+                    let id = event(self.files, found).id.clone().unwrap_or_default();
                     let text = self.text(found, &format!("tn:{id}"), |record, _| {
                         notification_result(record, &id)
                     });
@@ -3360,8 +3431,9 @@ impl<'a> Builder<'a> {
             }
             if result.is_none()
                 && let Some(at) = call
+                && matches!(event(self.files, at).n.as_deref(), Some("Agent" | "Task"))
                 && let Some(reply) = event(self.files, at).r.clone()
-                && reply.f & ASYNC == 0
+                && reply.f & (ASYNC | UNKNOWN) == 0
             {
                 let text = self.result_text(at, "result", tool_result_text);
                 result = Some((text, reply.t, reply.e));
@@ -3385,7 +3457,15 @@ impl<'a> Builder<'a> {
             // A resumed run not ended yet works while its tree runs; the
             // spawn's result stays the previous run's.
             let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
+            // An API end-turn by itself does not prove the parent got a result.
+            let unconfirmed_end = child_events.last().is_some_and(|at| {
+                let event = event(self.files, *at);
+                event.k == Kind::A && event.script & ASSISTANT_END_TURN != 0
+            });
             let (status, state) = match &result {
+                _ if (resumed || result.is_none()) && (unconfirmed_end || ambiguous_notice) => {
+                    (if result.is_some() { "done" } else { "new" }, "unknown")
+                }
                 _ if resumed && running => ("work", "work"),
                 _ if resumed => ("done", "done"),
                 Some((_, _, true)) => ("err", "err"),
@@ -3452,7 +3532,7 @@ impl<'a> Builder<'a> {
         child_events: &[Ref],
         first_prompt: Option<Ref>,
         finals: &[Ref],
-        ends: &[Ref],
+        ends: &[(Ref, bool)],
     ) -> (Vec<Run>, BTreeSet<Ref>) {
         relay_match::claude_runs(self.files, child_events, first_prompt, finals, ends)
     }
@@ -4702,7 +4782,10 @@ impl<'a> Builder<'a> {
                         }
                     }
                     None => {
-                        if self.graph_root_alive(index) {
+                        if self.graph_root_alive(index)
+                            && (self.sessions[index].kind != SessKind::Agent
+                                || self.sessions[index].alive)
+                        {
                             handoff.status = "wait";
                         }
                     }
