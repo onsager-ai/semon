@@ -373,8 +373,10 @@ fn background_end(
     db.prepare_cached(BACKGROUND_END)
         .map_err(index)?
         .query_row(params![source, launch, end, id], |row| {
+            let offset: i64 = row.get(0)?;
             Ok(BackgroundEnd {
-                offset: row.get(0)?,
+                offset: u64::try_from(offset)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, offset))?,
                 occurrence: row.get(1)?,
                 at: row.get(2)?,
                 status: row.get(3)?,
