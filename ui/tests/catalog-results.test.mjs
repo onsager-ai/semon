@@ -463,8 +463,8 @@ test('clipped tool notices stay with tool details while message loading actions 
 
 test('sender relay and spawn cards preserve the recorded outcome and never link their target', () => {
   const edges = [
-    { id: 'relay', kind: 'relay', status: 'err', target_label: 'Peer alias' },
-    { id: 'spawn', kind: 'spawn', status: 'done', target_label: 'Inspect parser' },
+    { id: 'relay', kind: 'relay', status: 'err' },
+    { id: 'spawn', kind: 'spawn', status: 'done' },
   ].map((edge) => ({
     ...edge,
     from: 'owner',
@@ -518,8 +518,8 @@ test('sender relay and spawn cards preserve the recorded outcome and never link 
   const trace = parseCausalTrace(payload, 'local', 'owner', 'turn');
   assert.match(reachableTraceSummary(trace.root, trace.starts), /^1 session · 2 handoffs$/);
   for (const [id, text, outcome] of [
-    ['relay', 'Sent to Peer alias', 'Sender recorded failure'],
-    ['spawn', 'Spawned Inspect parser', 'Sender recorded success'],
+    ['relay', 'Relay requested', 'Sender recorded failure'],
+    ['spawn', 'Spawn requested', 'Sender recorded success'],
   ]) {
     const edge = trace.handoffs.get(id);
     assert.equal(edge.reason, 'not linked yet');
@@ -529,6 +529,8 @@ test('sender relay and spawn cards preserve the recorded outcome and never link 
     assert.equal(traceCard.reason, 'not linked yet');
     assert.equal(traceCard.parts[0].text, text);
     assert.equal(traceCard.parts[0].action, undefined);
+    const reasonless = senderRelationshipPresentation({ ...edge, reason: undefined, to: 'peer' });
+    assert.deepEqual(reasonless, traceCard);
     const [card] = recordedRelationshipViews(
       entry(1, 'turn', { k: 'h', id }),
       { edge },

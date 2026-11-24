@@ -2047,100 +2047,6 @@ impl crate::SessionSourceReader for RelayFixtureProvider {
 }
 
 #[test]
-fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
-    let mut fixture = Fixture::new("parent-relay-fallback");
-    let root = fixture.claude("root", "Delegate");
-    append_native(
-        &root,
-        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:01Z",
-        "message":{"role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"prompt":"Work"}}]}}),
-    );
-    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
-    fs::create_dir_all(child.parent().unwrap()).unwrap();
-    fs::write(
-        child.with_extension("meta.json"),
-        json!({"agentType":"general-purpose","toolUseId":"agent"}).to_string(),
-    )
-    .unwrap();
-    fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
-    for (id, offset, text) in [("body", 3, "same body"), ("time", 6, "sender version")] {
-        append_native(
-            &child,
-            json!({"type":"assistant","sessionId":"root","timestamp":format!("2026-09-24T00:00:{offset:02}Z"),
-            "message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":"SendMessage","input":{"to":"main","message":text}}]}}),
-        );
-        append_native(
-            &child,
-            json!({"type":"user","sessionId":"root","timestamp":format!("2026-09-24T00:00:{:02}Z",offset+2),
-            "toolUseResult":{"success":true},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"queued"}]}}),
-        );
-    }
-    scan_file(&root, "claude", &mut fixture.cache, &mut false).unwrap();
-    scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
-    let paths = [root.as_path(), child.as_path()];
-    let first = selected_page(&fixture, &paths, "worker", 1, None)
-        .unwrap()
-        .unwrap();
-    let mut offsets = Vec::new();
-    for (time, body) in [(4, "same body"), (7, "receiver version")] {
-        offsets.push(fs::metadata(&root).unwrap().len());
-        append_native(
-            &root,
-            json!({"type":"user","sessionId":"root","timestamp":format!("2026-09-24T00:00:{time:02}Z"),
-            "origin":{"kind":"peer","senderTaskId":"worker","from":"worker","body":body},
-            "message":{"role":"user","content":format!("<agent-message from=\"worker\">{body}</agent-message>")}}),
-        );
-    }
-    scan_file(&root, "claude", &mut fixture.cache, &mut false).unwrap();
-    let source = fixture.source(&paths);
-    let mut call_addresses = Vec::new();
-    for (id, offset) in [("body", offsets[0]), ("time", offsets[1])] {
-        let call = selected::evidence_at(
-            &fixture.options,
-            &source,
-            "worker",
-            selected::Evidence::Call(id),
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        let read = |cursor| {
-            selected::tool_results(&fixture.options, &source, "worker", &call.address, cursor)
-                .unwrap()
-                .unwrap()
-        };
-        assert!(read(first.next.as_ref())[0].relay_receipts.is_empty());
-        let current = read(None);
-        assert_eq!(current[0].relay_receipts.len(), 1);
-        assert_eq!(current[0].relay_receipts[0].offset, offset);
-        call_addresses.push(call.address);
-    }
-
-    let provider = RelayFixtureProvider(BTreeMap::from([
-        ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
-        (
-            "projects/proj/root/subagents/agent-worker.jsonl".into(),
-            fs::read(&child).unwrap(),
-        ),
-    ]));
-    for (path, hidden) in [
-        (&root, root.with_extension("fixture-original")),
-        (&child, child.with_extension("fixture-original")),
-    ] {
-        fs::rename(path, hidden).unwrap();
-    }
-    let mut hosted = fixture.source(&paths);
-    hosted.current_provider = Some(&provider);
-    for (address, offset) in call_addresses.iter().zip(offsets) {
-        let selected = selected::tool_results(&fixture.options, &hosted, "worker", address, None)
-            .unwrap()
-            .unwrap();
-        assert_eq!(selected[0].relay_receipts.len(), 1);
-        assert_eq!(selected[0].relay_receipts[0].offset, offset);
-    }
-}
-
-#[test]
 fn warehouse_trace_keeps_a_continued_sender_without_following_the_peer() {
     let mut fixture = Fixture::new("trace-cross-member-relay");
     let original = fixture.claude("original", "Begin work");
@@ -2230,7 +2136,7 @@ fn warehouse_trace_keeps_a_continued_sender_without_following_the_peer() {
         .collect();
     assert_eq!(outgoing.len(), 1, "{trace}");
     assert_eq!(outgoing[0]["from"], "original");
-    assert_eq!(outgoing[0]["target_label"], "peer");
+    assert!(outgoing[0].get("target_label").is_none());
     assert_eq!(outgoing[0]["reason"], "not linked yet");
     assert_eq!(outgoing[0]["status"], "done");
     assert!(outgoing[0]["to"].is_null());
@@ -2247,7 +2153,7 @@ fn warehouse_transcript_sender_cards_have_recorded_outcomes_and_no_targets() {
         &root,
         json!({"type":"assistant","sessionId":"sender","timestamp":"2026-09-24T00:00:01Z",
         "message":{"role":"assistant","content":[
-            {"type":"tool_use","id":"send","name":"SendMessage","input":{"to":"private-label","message":"Only the sender knows this"}},
+            {"type":"tool_use","id":"send","name":"SendMessage","input":{"target_id":"private-label","message":"Only the sender knows this"}},
             {"type":"tool_use","id":"spawn","name":"Agent","input":{"name":"Inspect parser","prompt":"Inspect"}}
         ]}}),
     );
@@ -2275,16 +2181,13 @@ fn warehouse_transcript_sender_cards_have_recorded_outcomes_and_no_targets() {
     assert_eq!(response.status, 200, "{page}");
     let context = &page["relationship_context"];
     let handoffs = context["handoffs"].as_array().unwrap();
-    for (kind, label, outcome) in [
-        ("relay", "private-label", "err"),
-        ("spawn", "Inspect parser", "done"),
-    ] {
+    for (kind, outcome) in [("relay", "err"), ("spawn", "done")] {
         let edge = handoffs
             .iter()
             .find(|edge| edge["kind"] == kind)
             .unwrap_or_else(|| panic!("{page}"));
         assert_eq!(edge["from"], "sender");
-        assert_eq!(edge["target_label"], label);
+        assert!(edge.get("target_label").is_none());
         assert_eq!(edge["status"], outcome);
         assert_eq!(edge["reason"], "not linked yet");
         for field in [
@@ -2313,6 +2216,8 @@ fn warehouse_transcript_sender_cards_have_recorded_outcomes_and_no_targets() {
         );
     }
     assert_eq!(context["sessions"], json!({}));
+    assert!(!context.to_string().contains("private-label"));
+    assert!(!context.to_string().contains("Inspect parser"));
     assert!(!context.to_string().contains("unexposed-child-id"));
     assert!(!context.to_string().contains("opaque-result-id"));
 }
@@ -2453,7 +2358,7 @@ fn warehouse_trace_copilot_pairs_the_terminal_and_prioritizes_abort() {
 }
 
 #[test]
-fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
+fn warehouse_native_progress_opens_a_turn_without_pairing_or_returning_the_spawn() {
     let mut fixture = Fixture::new("legacy-relay-detail");
     let root = fixture.claude("root", "Delegate");
     let spawn_offset = fs::metadata(&root).unwrap().len();
@@ -2470,7 +2375,6 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     )
     .unwrap();
     fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
-    let send_offset = fs::metadata(&child).unwrap().len();
     append_native(
         &child,
         json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
@@ -2488,16 +2392,20 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:02Z",
         "message":{"role":"assistant","content":[{"type":"tool_use","id":"before-relay","name":"Read","input":{"file_path":"/work/before"}}]}}),
     );
-    let mut offsets = Vec::new();
-    for (time, body) in [(4, "Still working"), (7, "Work finished")] {
-        offsets.push(fs::metadata(&root).unwrap().len());
-        append_native(
-            &root,
-            json!({"type":"user","uuid":format!("receipt-{time}"),"sessionId":"root",
-            "timestamp":format!("2026-09-24T00:00:{time:02}Z"),"message":{"role":"user",
-            "content":format!("<agent-message from=\"worker\">{body}</agent-message>")}}),
-        );
-    }
+    let receipt_offset = fs::metadata(&root).unwrap().len();
+    append_native(
+        &root,
+        json!({"type":"user","uuid":"progress-receipt","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:04Z",
+        "origin":{"kind":"peer","from":"worker","senderTaskId":"worker"},
+        "message":{"role":"user","content":"<agent-message from=\"worker\">Still working</agent-message>"}}),
+    );
+    append_native(
+        &root,
+        json!({"type":"user","uuid":"untyped-receipt","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:07Z",
+        "message":{"role":"user","content":"<agent-message from=\"worker\">Work finished</agent-message>"}}),
+    );
     append_native(
         &root,
         json!({"type":"assistant","uuid":"reply","sessionId":"root","timestamp":"2026-09-24T00:00:08Z",
@@ -2533,27 +2441,7 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         .find(|record| record.text().as_deref() == Some("Thanks for the update"))
         .unwrap();
     let turn = reply.causal.turn.as_ref().unwrap();
-    assert_eq!(turn.address.offset, offsets[0]);
-    let oracle = semantic_transcript(
-        &fixture.options,
-        fixture.namespace.as_str(),
-        "sid=root&after=0&limit=100",
-        None,
-        crate::SessionSourceReadMode::LocalOrPinnedProvider,
-    );
-    assert_eq!(oracle.status, 200);
-    let oracle: serde_json::Value = serde_json::from_slice(&oracle.body).unwrap();
-    let reply = oracle["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["text"] == "Thanks for the update")
-        .unwrap();
-    assert_eq!(reply["turn"].as_str(), Some(turn.id.as_str()));
-    let detail = selected_page(&fixture, &paths, "worker", 100, None)
-        .unwrap()
-        .unwrap();
-    assert_eq!(detail.legacy_completion.unwrap().offset, offsets[1]);
+    assert_eq!(turn.address.offset, receipt_offset);
     let db = Connection::open(&fixture.db).unwrap();
     let state: String = db.query_row("SELECT json_extract(metadata,'$.state') FROM session_trace_headers WHERE session_key='worker'",
         [], |row| row.get(0)).unwrap();
@@ -2572,8 +2460,9 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     assert_eq!(reply.status, 200, "{trace}");
     assert_eq!(trace["evidence"].as_array().unwrap().len(), 1, "{trace}");
     assert!(trace["sessions"].get("root").is_none());
+    assert_ne!(trace["turns"][0]["end"]["why"], "returned");
 
-    // The first receipt starts a turn because its body matches the child's send.
+    // The native progress receipt starts the selected turn.
     // The Agent launch and Read have no tool results and precede the turn.
     // The Glob in the current turn is still live.
     append_native(
@@ -2624,7 +2513,9 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let detail: serde_json::Value = serde_json::from_slice(&home.body).unwrap();
     assert_eq!(home.status, 200, "{detail}");
     assert_eq!(detail["session"]["detail"], "Still working");
-    assert_eq!(detail["session"]["detail_from"], "worker");
+    assert!(detail["session"]["detail_from"].is_null());
+    assert!(detail["session"]["detail_from_name"].is_null());
+    assert_eq!(detail["session"]["detail_from_reason"], "not linked yet");
 
     // Removing the selected proof blocks prevents native result reads, but
     // the list still derives its child status from process and metadata only.
@@ -2671,7 +2562,6 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     )
     .unwrap();
     scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
-    let identity = warehouse::retained_identity(&db, &fixture.namespace, "worker").unwrap();
     let source = fixture.source(&paths);
     let retained = selected::retained_turn(&source, "worker", &launch, &provider).unwrap();
     let address: crate::session_route::NativeEntryAddress = serde_json::from_value(
@@ -2692,22 +2582,6 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         selected::render::turn_address(&opened, source.namespace.as_str(), "worker", &launch),
         Some(json!(address)),
     );
-    let sent = selected::Address {
-        path: child_relative.into(),
-        offset: send_offset,
-        block: 0,
-        occurrence: 0,
-    };
-    let relay = selected::retained_peer_relay_address(
-        &source,
-        "worker",
-        &identity.witness,
-        "root",
-        (&sent, 0),
-        Some(&provider),
-    )
-    .unwrap();
-    assert_eq!(relay.record.offset, offsets[0]);
     let query = crate::native_html::query(&[
         ("sid", "worker"),
         ("scope", "retained_history"),
@@ -2722,40 +2596,29 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         .iter()
         .find(|edge| edge["kind"] == "relay")
         .unwrap();
-    assert_eq!(send["target_label"], "main");
+    assert!(send.get("target_label").is_none());
     assert_eq!(send["reason"], "not linked yet");
     assert!(send["to"].is_null());
     assert_eq!(trace["evidence"].as_array().unwrap().len(), 1, "{trace}");
-    let opened = selected::retained_peer_window(
-        &source,
-        "root",
-        selected::PeerBinding {
-            trace: "worker",
-            witness: &identity.witness,
-        },
-        16,
-        None,
-        Some((&relay.record, &relay.binding)),
-        Some(&provider),
-    )
-    .unwrap();
-    let rendered = selected::render::entries(&opened, source.namespace.as_str(), "root", 0);
-    assert!(
-        rendered
-            .iter()
-            .any(|entry| entry["entry_id"] == relay.entry_id)
+    assert!(trace["evidence"][0].get("peer").is_none());
+    assert_ne!(trace["turns"][0]["end"]["why"], "returned");
+    let peer = json!({"trace":"root","witness":"0".repeat(64)}).to_string();
+    let addressed = serde_json::to_string(&address).unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "worker"),
+        ("scope", "retained_history"),
+        ("turn", &launch),
+        ("address", &addressed),
+    ]);
+    assert_eq!(
+        http::trace(&configured, &query, None, Some(&provider)).status,
+        200
     );
-    assert!(matches!(
-        selected::retained_peer_relay_address(
-            &source,
-            "worker",
-            &identity.witness,
-            "root",
-            (&sent, 1),
-            Some(&provider),
-        ),
-        Err(ReadError::PeerUnavailable(_))
-    ));
+    let query = format!("{query}&{}", crate::native_html::query(&[("peer", &peer)]));
+    assert_eq!(
+        http::trace(&configured, &query, None, Some(&provider)).status,
+        400
+    );
     fs::rename(&root, root.with_extension("fixture-original")).unwrap();
     fixture.claude("root", "Replacement parent");
     let identity = http::identity(&configured, "sid=root&scope=retained_history");
@@ -2772,7 +2635,9 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let detail: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(reply.status, 200, "{detail}");
     assert_eq!(detail["session"]["detail"], "Still working");
-    assert_eq!(detail["session"]["detail_from"], "worker");
+    assert!(detail["session"]["detail_from"].is_null());
+    assert!(detail["session"]["detail_from_name"].is_null());
+    assert_eq!(detail["session"]["detail_from_reason"], "not linked yet");
 }
 
 #[test]
@@ -3194,7 +3059,7 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
         .iter()
         .find(|edge| edge["kind"] == "relay")
         .unwrap();
-    assert_eq!(send["target_label"], "peer");
+    assert!(send.get("target_label").is_none());
     assert_eq!(send["reason"], "not linked yet");
     assert!(send["to"].is_null());
     assert!(trace["sessions"].get("peer").is_none());

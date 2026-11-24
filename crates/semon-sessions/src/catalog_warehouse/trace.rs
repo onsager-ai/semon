@@ -11,7 +11,6 @@ pub(super) fn read(
     root: &str,
     retained_provider: Option<&dyn SessionSourceReader>,
     address: Option<&crate::session_route::NativeEntryAddress>,
-    origin: Option<selected::PeerBinding<'_>>,
 ) -> Result<Option<Value>, ReadError> {
     let view = selected::ReadView::open(source)?;
     let provider =
@@ -21,31 +20,16 @@ pub(super) fn read(
         .map(|reader| reader as &dyn SessionSourceReader);
     let component =
         if let Some(address) = address.filter(|_| scope == CatalogReadScope::RetainedHistory) {
-            origin.map_or_else(
-                || {
-                    selected::transcript_window(
-                        &view,
-                        source,
-                        scope,
-                        key,
-                        1,
-                        None,
-                        Some(address),
-                        provider,
-                        None,
-                    )
-                },
-                |peer| {
-                    selected::retained_peer_trace_window(
-                        &view,
-                        source,
-                        key,
-                        peer,
-                        &address.record,
-                        provider,
-                    )
-                    .map(Some)
-                },
+            selected::transcript_window(
+                &view,
+                source,
+                scope,
+                key,
+                1,
+                None,
+                Some(address),
+                provider,
+                None,
             )?
         } else {
             selected::trace_turn(
@@ -80,19 +64,12 @@ pub(super) fn read(
         return Err(ReadError::Restart);
     }
     let evidence = match rendered {
-        Some(address) => json!({"catalog_key":key,"turn":root,"address":address,
-            "peer":origin.map(|peer| json!({"trace":peer.trace,"witness":peer.witness}))}),
+        Some(address) => json!({"catalog_key":key,"turn":root,"address":address}),
         None => {
             json!({"catalog_key":key,"turn":root,"reason":"The selected turn has no rendered transcript entry."})
         }
     };
-    let peer = origin.or_else(|| {
-        (scope == CatalogReadScope::RetainedHistory).then_some(selected::PeerBinding {
-            trace: key,
-            witness: &component.identity.generation,
-        })
-    });
-    let (end, last) = trace_end(&view, source, &component, record, peer, provider)?;
+    let (end, last) = trace_end(&view, source, &component, record, provider)?;
     let mut handoffs = Vec::new();
     let start = if crate::model::is_ask(root)
         && let Some(at) = record.at
@@ -107,9 +84,7 @@ pub(super) fn read(
     };
     let mut sent = Vec::new();
     let mut limited = false;
-    if let Some(window) =
-        selected::sender_window(&view, source, &component, turn, provider, origin)?
-    {
+    if let Some(window) = selected::sender_window(&view, source, &component, turn, provider)? {
         limited = window.records.len() == 33
             && window.records.iter().all(|record| {
                 record
@@ -139,105 +114,6 @@ pub(super) fn read(
         "frontier":[],"evidence":[evidence],"previews":{(key):generation},
         "incomplete":limited || end["why"] == "unavailable","previews_incomplete":false,
     })))
-}
-
-pub(super) fn passive_summary(
-    view: &selected::ReadView<'_>,
-    source: &Source<'_>,
-    key: &str,
-    peer: Option<selected::PeerBinding<'_>>,
-) -> Result<Option<Value>, ReadError> {
-    use crate::events::store::warehouse;
-    let (identity, references) = {
-        let tx = view.lock()?;
-        let observed = if let Some(peer) = peer {
-            let original = warehouse::retained_identity(&tx, &source.namespace, peer.trace)
-                .map_err(super::retained_error)?;
-            if original.witness != peer.witness {
-                return Err(ReadError::Restart);
-            }
-            let (observed, current) =
-                warehouse::retained_peer(&tx, &source.namespace, &original, peer.witness, key)
-                    .map_err(|err| ReadError::PeerUnavailable(err.to_string()))?;
-            if !current {
-                let (metadata, identity) = super::retained_metadata_in_snapshot(&tx, source, key)?;
-                return Ok(exact_observed_prefix(source, &observed, &identity.source_refs).then(|| json!({
-                    "name": metadata["name"], "harness": identity.harness,
-                    "kind": metadata["presentation_kind"].as_str().or(metadata["kind"].as_str()).unwrap_or(""),
-                    "model": metadata["model"], "tokens": metadata["tokens"],
-                    "cost": {"usd":metadata["cost"]["usd"],"unpriced_models":metadata["cost"]["unpriced_models"]},
-                    "observed_extent": {"scope":"whole_session","last":metadata["last"],
-                        "status":{"state":null,"observation":"unavailable"},
-                        "recorded_activity":{"state":"unavailable"}},
-                })));
-            }
-            Some(observed)
-        } else {
-            None
-        };
-        let Some(identity) = super::current_identity(&tx, source, key, None)? else {
-            return Ok(None);
-        };
-        let Some(references) = super::focused_members(&tx, source, &identity)? else {
-            return Ok(None);
-        };
-        if observed.as_ref().is_some_and(|peer| {
-            identity.0 != peer.owner
-                || identity.1 != peer.harness
-                || identity.2 != peer.native_id
-                || !exact_observed_prefix(source, peer, &references)
-        }) {
-            return Ok(None);
-        }
-        (identity, references)
-    };
-    let row = super::selected_metadata(
-        view,
-        source,
-        key,
-        identity.0,
-        &identity.1,
-        &references,
-        false,
-        Some(None),
-    )?;
-    let status = if peer.is_some() {
-        json!({"state":null,"observation":"unavailable"})
-    } else {
-        row.recorded_status()
-    };
-    Ok(Some(json!({
-        "name": row.title, "harness": row.harness,
-        "kind": row.presentation_kind.unwrap_or(row.kind),
-        "model": row.model, "tokens": row.token_millions(),
-        "cost": {"usd":row.cost.as_ref().and_then(|cost| cost.usd),
-            "unpriced_models":row.cost.as_ref().map_or(&[][..], |cost| cost.unpriced_models.as_slice())},
-        "observed_extent": {"scope":"whole_session","last":(row.position.last != 0).then_some(row.position.last),
-            "status":status,"recorded_activity":{"state":"unavailable"}},
-    })))
-}
-
-fn exact_observed_prefix(
-    source: &Source<'_>,
-    peer: &crate::events::store::warehouse::ObservedPeer,
-    references: &[crate::CatalogSourceObservation],
-) -> bool {
-    references.len() == peer.members.len()
-        && peer.members.iter().all(|member| {
-            let receipt = &member.receipt;
-            let path = receipt
-                .path
-                .to_str()
-                .and_then(|path| selected::relative(source.options, &peer.harness, path));
-            references.iter().any(|reference| {
-                let reference = &reference.source;
-                path == Some(reference.path.as_str())
-                    && receipt.native_id == reference.native_id
-                    && receipt.offset == reference.offset
-                    && receipt.prefix_sha256 == reference.prefix_sha256
-                    && receipt.tail_sha256 == reference.tail_sha256
-            })
-        })
 }
 
 fn session_summary(component: &selected::Component, at: Option<i64>) -> Value {
@@ -274,7 +150,6 @@ fn trace_end(
     source: &Source<'_>,
     component: &selected::Component,
     root: &selected::Record,
-    peer: Option<selected::PeerBinding<'_>>,
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<(Value, bool), ReadError> {
     let (mut end, last) = recorded_end(view, source, component, root)?;
@@ -290,30 +165,27 @@ fn trace_end(
     let limit = if copilot { 32 } else { 8 };
     let addresses = {
         let tx = view.lock()?;
-        let retained = peer
-            .map(|peer| {
+        let retained = (component.identity.read_scope == CatalogReadScope::RetainedHistory)
+            .then(|| {
                 let identity = crate::events::store::warehouse::retained_identity(
                     &tx,
                     &source.namespace,
-                    peer.trace,
+                    &component.identity.catalog_key,
                 )
                 .map_err(super::retained_error)?;
-                selected::retained_member_bounds(
-                    &tx,
-                    source,
-                    &identity,
-                    peer,
-                    &component.identity.catalog_key,
-                    None,
-                )
+                if identity.witness != component.identity.generation {
+                    return Err(ReadError::Restart);
+                }
+                Ok(identity.binding)
             })
             .transpose()?;
         let harness = crate::InputRoot::parse(&component.harness).ok_or(ReadError::Restart)?;
         let order = if copilot { "ASC" } else { "DESC" };
         let sql = format!(
             "WITH member(source) AS (
-               SELECT CAST(m.key AS INTEGER) FROM json_each(?1) m
-               WHERE json_extract(m.value,'$[0]')=?2 AND json_extract(m.value,'$[1]')=?5
+               SELECT m.source FROM warehouse_identity_member m
+               WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
+                 AND json_extract(m.receipt,'$.offset')=?5
                UNION ALL
                SELECT w.source FROM warehouse_current w
                CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?3
@@ -342,7 +214,7 @@ fn trace_end(
             let carrier = harness.home(source.options).join(&reference.path);
             let mut rows = lookup
                 .query(params![
-                    retained.as_deref(),
+                    retained,
                     carrier.to_str(),
                     source.namespace.binding(),
                     if same {
@@ -396,12 +268,17 @@ fn trace_end(
         "No terminal record matched this turn in the selected prefix."
     };
     for (_, address) in addresses.into_iter().take(limit) {
-        let window = match peer {
-            Some(peer) => {
-                selected::retained_peer_trace_window(view, source, key, peer, &address, provider)
-                    .map(Some)
-            }
-            None => selected::trace_record(view, source, key, &address),
+        let window = match component.identity.read_scope {
+            CatalogReadScope::RetainedHistory => selected::retained_trace_window(
+                view,
+                source,
+                key,
+                &component.identity.generation,
+                &address,
+                provider,
+            )
+            .map(Some),
+            CatalogReadScope::Current => selected::trace_record(view, source, key, &address),
         };
         let window = match window {
             Ok(Some(window)) => window,
@@ -491,12 +368,6 @@ pub(super) fn recorded_end(
         .turn
         .as_ref()
         .is_some_and(|turn| component.latest_turn.as_ref() == Some(turn));
-    if root.causal.turn.as_ref().is_some_and(|turn| {
-        turn.id == crate::model::spawn_turn_id(&component.harness, &component.identity.catalog_key)
-    }) && let Some(receipt) = &component.legacy_completion
-    {
-        return Ok((json!({"st":"done","why":"returned","at":receipt.at}), last));
-    }
     if component.harness != "codex"
         || root.causal.turn.as_ref().is_none_or(|turn| turn.handoff)
         || root.prompt_anchor.is_none()

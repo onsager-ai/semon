@@ -41,7 +41,6 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
   if (!['work', 'wait', 'idle', 'done', 'err', 'new', 'off'].includes(status))
     throw Error('Invalid recorded handoff state');
   const reason = row.reason == null ? undefined : text(row.reason);
-  const targetLabel = row.target_label == null ? undefined : text(row.target_label);
   if (
     (reason !== undefined &&
       (reason !== 'not linked yet' ||
@@ -51,7 +50,7 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
         row.target_evidence != null ||
         row.brief_session != null ||
         row.result_session != null)) ||
-    (targetLabel !== undefined && (reason === undefined || targetLabel.length > 192))
+    row.target_label != null
   )
     throw Error('Invalid sender relationship target');
   const base = {
@@ -65,7 +64,6 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     result: row.result == null ? undefined : text(row.result),
     declined: boolean(row.declined),
     reason: reason === 'not linked yet' ? ('not linked yet' as const) : undefined,
-    targetLabel,
   };
   let edge: Handoff;
   if (kind === 'toyou') {
@@ -84,12 +82,12 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
   };
 }
 export function senderRelationshipPresentation(edge: Handoff) {
-  if (!edge.reason || (edge.kind !== 'relay' && edge.kind !== 'spawn')) return undefined;
-  const label =
-    edge.targetLabel ?? (edge.kind === 'spawn' ? 'an unnamed agent' : 'an unnamed recipient');
+  if (edge.kind !== 'relay' && edge.kind !== 'spawn') return undefined;
   return {
-    parts: [{ className: 'verb', text: (edge.kind === 'spawn' ? 'Spawned ' : 'Sent to ') + label }],
-    reason: edge.reason,
+    parts: [
+      { className: 'verb', text: edge.kind === 'spawn' ? 'Spawn requested' : 'Relay requested' },
+    ],
+    reason: 'not linked yet',
     status:
       edge.status === 'done'
         ? 'Sender recorded success'

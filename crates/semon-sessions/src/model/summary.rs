@@ -214,6 +214,7 @@ pub(crate) struct CatalogSource {
     pub(crate) native_role: Option<Value>,
 }
 
+#[cfg(test)]
 impl CatalogSource {
     pub(crate) fn claude_agent_call(&self) -> Option<&str> {
         self.native_role

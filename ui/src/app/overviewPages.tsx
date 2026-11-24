@@ -48,6 +48,7 @@ interface HomeRow extends Selection {
     detail?: string;
     detail_from?: string;
     detail_from_name?: string;
+    detail_from_reason?: string;
     parent?: string;
     branch?: string;
     activity?: readonly [string, string, number];
@@ -126,6 +127,7 @@ function parseHomeRow(value: unknown, now: number): HomeRow {
       detail: nullable(session.detail, text) ?? undefined,
       detail_from: nullable(session.detail_from, text) ?? undefined,
       detail_from_name: nullable(session.detail_from_name, text) ?? undefined,
+      detail_from_reason: nullable(session.detail_from_reason, text) ?? undefined,
       activity: parseActivity(session.activity, now),
     },
     event: event
@@ -187,6 +189,7 @@ function parseHome(value: unknown): HomeData {
 }
 
 function promptSender(row: HomeRow, recent: readonly HomeRow[]): string | null {
+  if (row.session.detail_from_reason) return row.session.detail_from_reason;
   const from = row.session.detail_from;
   if (from === 'you') return 'for you';
   if (!from) return null;
@@ -1298,6 +1301,7 @@ export function createOverviewPages(host: OverviewHost) {
             const detail = nullable(session.detail, text);
             const detailFrom = nullable(session.detail_from, text);
             const detailFromName = nullable(session.detail_from_name, text);
+            const detailFromReason = nullable(session.detail_from_reason, text);
             const activity = parseActivity(session.activity, next.now);
             const failed = boolean(value.incomplete);
             if (failed && rows.length > 1) {
@@ -1309,6 +1313,7 @@ export function createOverviewPages(host: OverviewHost) {
               row.session.detail = detail ?? undefined;
               row.session.detail_from = detailFrom ?? undefined;
               row.session.detail_from_name = detailFromName ?? undefined;
+              row.session.detail_from_reason = detailFromReason ?? undefined;
               row.session.activity = activity;
               if (row.event && events[row.event.id])
                 Object.assign(row.event, events[row.event.id], {
@@ -1498,6 +1503,7 @@ export function createOverviewPages(host: OverviewHost) {
             row.session.detail = retained.session.detail;
             row.session.detail_from = retained.session.detail_from;
             row.session.detail_from_name = retained.session.detail_from_name;
+            row.session.detail_from_reason = retained.session.detail_from_reason;
             if (retained.session.activity) row.session.activity = retained.session.activity;
             if (row.event && retained.event) {
               row.event.brief = retained.event.brief;

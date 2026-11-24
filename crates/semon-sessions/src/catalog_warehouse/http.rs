@@ -862,7 +862,7 @@ pub(crate) fn home_with_mode(
             200,
             json!({
                 "api":1,"identity":component.identity,"generation":selection.expected,
-                "session":{"detail":detail.map(|detail| &detail.text),"detail_from":detail.and_then(|detail| detail.from.as_deref()),"detail_from_name":detail.and_then(|detail| detail.from_name.as_deref()),"activity":component.home_activity},
+                "session":{"detail":detail.map(|detail| &detail.text),"detail_from":detail.and_then(|detail| detail.from.as_deref()),"detail_from_name":detail.and_then(|detail| detail.from_name.as_deref()),"detail_from_reason":detail.and_then(|detail| detail.from_reason),"activity":component.home_activity},
                 "events":events,"turns":turns,"incomplete":incomplete,
             }),
         ))
@@ -954,9 +954,7 @@ pub(crate) fn trace(
     let read = || -> Result<ViewerReply, ViewerReply> {
         let (query, address, peer) = addressed_query(query)?;
         let (request, turn) = turn_request(configured, &query)?;
-        if peer.is_some()
-            && (address.is_none() || request.scope != CatalogReadScope::RetainedHistory)
-        {
+        if peer.is_some() {
             return Err(invalid());
         }
         let key = request.sid.as_deref().ok_or_else(invalid)?;
@@ -981,10 +979,6 @@ pub(crate) fn trace(
             &turn,
             retained_provider,
             address.as_ref(),
-            peer.as_ref().map(|peer| selected::PeerBinding {
-                trace: &peer.trace,
-                witness: &peer.witness,
-            }),
         )
         .map_err(read_error)?
         .ok_or_else(not_found)?;

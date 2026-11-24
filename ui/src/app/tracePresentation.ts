@@ -12,9 +12,6 @@ import { clock, tok } from '../domain/format';
 import {
   parseNativeEntryAddress,
   parseRetainedPeerAddress,
-  sessionPath,
-  tracePath,
-  type CatalogReadScope,
   type NativeEntryAddress,
   type RetainedPeerAddress,
 } from '../lib/sessionRoute';
@@ -685,7 +682,6 @@ export function renderCausalTrace(
   now: number,
   expanded: Map<string, Set<string>>,
   host: { session(id: string, turn?: string): void; fold(): void },
-  readScope: CatalogReadScope = 'current',
 ) {
   const costForSessions = (sessions: Session[]): Cost => ({
     usd: sessions.some((session) => session.cost?.usd == null)
@@ -696,7 +692,11 @@ export function renderCausalTrace(
     ],
   });
   const { agentSnapshot } = createTraceCalculations(
-    data,
+    {
+      sessions: { [data.key]: data.sessions[data.key] },
+      turns: { [data.key]: [data.root] },
+      starts: new Map(),
+    },
     {
       costForSessions,
       costForSession: (id) => data.sessions[id]?.cost ?? { usd: null },
@@ -714,8 +714,10 @@ export function renderCausalTrace(
     STATE,
   );
   const hops: Hop[] = [];
-  const seen = new Set<string>();
-  const sessionPart = (id: string, turn?: string) => causalSessionPart(data, id, turn);
+  const sessionPart = (id: string, turn?: string) =>
+    id === data.key || id === 'you'
+      ? causalSessionPart(data, id, turn)
+      : { className: 'who', text: 'Recorded session' };
   const harness = (sid: string) => {
     const sessionHarness = Object.hasOwn(data.sessions, sid)
         ? data.sessions[sid]?.harness
@@ -759,41 +761,34 @@ export function renderCausalTrace(
         data.readResults,
       ),
     );
-  const rootParts: Hop['parts'] = data.root.start
-    ? traceSentenceParts(
-        data.root.start,
-        sessionPart,
-        data.starts,
-        undefined,
-        data.sessions[data.root.start.to]?.kind,
-      )
-    : data.root.u
+  const rootParts: Hop['parts'] =
+    data.root.start?.kind === 'ask'
       ? traceSentenceParts(
-          {
-            id: data.root.id,
-            kind: 'ask',
-            from: 'you',
-            to: data.key,
-            at: data.root.at ?? now,
-            status: 'done',
-            brief: '',
-          },
+          data.root.start,
           sessionPart,
           data.starts,
-          data.root.id,
+          undefined,
+          data.sessions[data.root.start.to]?.kind,
         )
-      : [
-          { ...sessionPart(data.key), action: undefined, label: undefined },
-          { className: 'verb', text: " · a turn whose start isn't in these logs" },
-        ];
-  const returned = data.returnEvidence;
-  let returnHref: string | undefined;
-  if (returned && 'address' in returned.evidence) {
-    const params = new URLSearchParams({ address: JSON.stringify(returned.evidence.address) });
-    if (readScope === 'retained_history') params.set('scope', readScope);
-    if (returned.evidence.peer) params.set('peer', JSON.stringify(returned.evidence.peer));
-    returnHref = sessionPath(data.source, returned.sid) + '?' + params;
-  }
+      : data.root.u
+        ? traceSentenceParts(
+            {
+              id: data.root.id,
+              kind: 'ask',
+              from: 'you',
+              to: data.key,
+              at: data.root.at ?? now,
+              status: 'done',
+              brief: '',
+            },
+            sessionPart,
+            data.starts,
+            data.root.id,
+          )
+        : [
+            { ...sessionPart(data.key), action: undefined, label: undefined },
+            { className: 'verb', text: " · a turn whose start isn't in these logs" },
+          ];
   hops.push({
     key: 'root:' + data.root.id,
     className: 'k-root',
@@ -804,115 +799,39 @@ export function renderCausalTrace(
     parts: rootParts,
     time: traceRootTime(data.root, (at) => clock(at, now)),
     brief: data.root.u?.text || data.root.start?.brief || undefined,
-    result: data.root.start?.kind === 'spawn' ? data.root.start.result : undefined,
-    returnHref,
-    returnReason: returned && 'reason' in returned.evidence ? returned.evidence.reason : undefined,
     meta: meta(data.root),
   });
-  const walk = (turn: Turn) => {
-    if (seen.has(turn.id)) return;
-    seen.add(turn.id);
-    for (const edge of turn.sent) {
-      const sender = senderRelationshipPresentation(edge),
-        child = sender ? undefined : data.starts.get(edge.id),
-        unjoinedRelay = sender ? undefined : traceQualifiedUnjoinedRelay(data, edge, !!child),
-        isResult = edge.kind === 'toyou' && edge.ask === 'result',
-        edgeOutcome = traceHandoffOutcome(edge, data.readResults);
-      hops.push({
-        key: edge.id,
-        className: traceHopClass(edge, !!child),
-        nodeClass: traceSessionHarnessClass(data, traceHopActor(edge)) ?? '',
-        icon: I[traceHandoffIconKey(edge)],
-        handoff: edge.id,
-        turn: child?.id,
-        parts:
-          sender?.parts ??
-          (isResult
-            ? [{ className: 'verb', text: edgeOutcome.text ?? '' }]
-            : traceSentenceParts(
-                edge,
-                sessionPart,
-                data.starts,
-                turn.id,
-                data.sessions[edge.to]?.kind,
-              )),
-        time: clock(edge.at, now),
-        brief: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.brief || undefined,
-        answers: edge.kind === 'toyou' && Array.isArray(edge.answer) ? edge.answer : undefined,
-        result: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.result,
-        ...(isResult
-          ? {}
-          : {
-              meta: child
-                ? meta(child)
-                : edge.kind === 'toyou'
-                  ? sessionMeta(edge.from, turn.id, edgeOutcome)
-                  : {
-                      state: edgeOutcome.state,
-                      stateLabel: STATE[edgeOutcome.state] ?? edgeOutcome.state,
-                      text: sender?.status ?? edgeOutcome.text ?? '',
-                      note:
-                        sender?.reason ??
-                        ((edge.kind === 'spawn' || edge.kind === 'relay') && !child
-                          ? "Its turn isn't in these logs"
-                          : undefined),
-                      ...(unjoinedRelay
-                        ? {
-                            ...sessionMeta(unjoinedRelay.session, undefined, edgeOutcome),
-                            note: (() => {
-                              const evidence = causalEvidence(data, unjoinedRelay.session);
-                              return evidence && 'reason' in evidence
-                                ? evidence.reason
-                                : "Its turn isn't in these logs";
-                            })(),
-                            name: unjoinedRelay.name,
-                            harness: unjoinedRelay.summary
-                              ? harness(unjoinedRelay.session)
-                              : undefined,
-                            ...(unjoinedRelay.summary
-                              ? traceSessionChip({
-                                  kind: unjoinedRelay.summary.kind || undefined,
-                                  harness: unjoinedRelay.summary.harness,
-                                })
-                              : {}),
-                          }
-                        : {}),
-                    },
-            }),
-      });
-      if (child) walk(child);
-    }
-  };
-  walk(data.root);
+  for (const edge of data.root.sent) {
+    const sender = senderRelationshipPresentation(edge);
+    if (!sender) continue;
+    hops.push({
+      key: edge.id,
+      className: traceHopClass(edge, false),
+      nodeClass: '',
+      icon: I[traceHandoffIconKey(edge)],
+      handoff: edge.id,
+      parts: sender.parts,
+      time: clock(edge.at, now),
+      meta: {
+        state: edge.status,
+        stateLabel: STATE[edge.status] ?? edge.status,
+        text: sender.status,
+        note: sender.reason,
+      },
+    });
+  }
   renderTraceScreen(
     root,
     {
       empty: false,
-      summary: reachableTraceSummary(
-        data.root,
-        data.starts,
-        data.incomplete && !traceMissingContextLocallyCovered(data),
-      ),
+      summary: [
+        '1 session',
+        `${hops.length - 1} ${hops.length === 2 ? 'handoff' : 'handoffs'}`,
+        ...(data.incomplete ? ['some relationship context is unavailable'] : []),
+      ].join(' · '),
       hops,
       agents: agentSnapshot(data.root),
       observation: data.observation,
-      continuations: data.frontier.flatMap((branch) => {
-        const evidence = causalEvidence(data, branch.catalog_key, branch.turn);
-        if (data.evidence && (!evidence || 'reason' in evidence)) return [];
-        const query = new URLSearchParams();
-        if (readScope === 'retained_history') query.set('scope', readScope);
-        if (evidence && 'address' in evidence) {
-          query.set('address', JSON.stringify(evidence.address));
-          if (evidence.peer) query.set('peer', JSON.stringify(evidence.peer));
-        }
-        const url = tracePath(data.source, branch.catalog_key, branch.turn);
-        return [
-          {
-            label: data.sessions[branch.catalog_key]?.name ?? 'Recorded branch',
-            href: query.size ? url + '?' + query : url,
-          },
-        ];
-      }),
     },
     {
       ...host,

@@ -21,15 +21,13 @@ use std::{
 
 #[path = "causal.rs"]
 pub(super) mod causal;
-#[path = "parent_relay.rs"]
-mod parent_relay;
 #[path = "render.rs"]
 pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_annotations,
-    retained_member_bounds, retained_peer_trace_window, retained_preview_turns, retained_turn,
+    retained_preview_turns, retained_trace_window, retained_turn,
 };
 #[cfg(test)]
 pub(super) use retained::{
@@ -260,6 +258,7 @@ FROM unique_call c CROSS JOIN fact_tool_result r ON r.source=?1 AND r.call_id=c.
        OR (r.call_pos=c.pos AND r.call_block=c.block))
 WHERE r.pos<?4 AND r.kind<>'yield_poll' ORDER BY 1,r.pos,r.block,r.occurrence LIMIT ?5";
 
+#[cfg(test)]
 const EXACT_RELAY_RECEIPTS: &str =
     "SELECT r.source,c.path,s.ledger,r.pos,r.block,r.occurrence,r.ts,s.harness
     FROM fact_relay_receipt r INDEXED BY relay_receipt_correlation
@@ -268,7 +267,7 @@ const EXACT_RELAY_RECEIPTS: &str =
     WHERE r.correlation=?2 ORDER BY r.source,r.pos,r.block,r.occurrence";
 
 #[derive(Clone, Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) struct RelayReceipt {
     pub(super) path: String,
     pub(super) offset: u64,
@@ -336,7 +335,7 @@ pub(super) struct Record {
     pub(super) entry_anchor: Option<String>,
     pub(super) operation: Option<causal::Operation>,
     pub(super) causal: causal::Context,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(super) relay_receipts: Vec<RelayReceipt>,
     pub(super) address: Address,
     pub(super) reference: SessionSourceRef,
@@ -373,6 +372,7 @@ fn prompt_images(
         .map_err(index)
 }
 
+#[cfg(test)]
 fn relay_receipts(
     db: &rusqlite::Connection,
     source: &Source<'_>,
@@ -500,7 +500,6 @@ pub(super) struct Component {
     pub(super) member_count: usize,
     pub(super) latest_turn: Option<causal::TurnStart>,
     pub(super) runtime_status: Option<&'static str>,
-    pub(super) legacy_completion: Option<RelayReceipt>,
     pub(super) records: Vec<Record>,
     pub(super) reply_records: BTreeMap<(String, u64), serde_json::Value>,
     pub(super) fields: Fields,
@@ -533,6 +532,7 @@ pub(super) struct HomeDetail {
     pub(super) text: serde_json::Value,
     pub(super) from: Option<String>,
     pub(super) from_name: Option<String>,
+    pub(super) from_reason: Option<&'static str>,
 }
 
 impl HomeDetail {
@@ -557,16 +557,13 @@ impl HomeDetail {
             text,
             from: (!turn.handoff).then(|| "you".into()),
             from_name: None,
+            from_reason: turn.id.starts_with('r').then_some("not linked yet"),
         }
-    }
-
-    fn set_sender(&mut self, key: String, title: Option<String>) {
-        self.from = Some(key);
-        self.from_name = title;
     }
 
     fn set_parent(&mut self, parent: &str, metadata: &serde_json::Value) {
         self.from = Some(parent.to_owned());
+        self.from_reason = None;
         self.from_name = metadata.pointer("/family/ancestors").and_then(|ancestors| {
             ancestors.as_array()?.iter().find_map(|row| {
                 (row["key"] == parent)
@@ -576,51 +573,6 @@ impl HomeDetail {
             })
         });
     }
-}
-
-fn relay_sender(
-    db: &rusqlite::Connection,
-    source: &Source<'_>,
-    turn: &causal::TurnStart,
-    certified: Option<&str>,
-) -> Result<Option<(i64, String, String)>, ReadError> {
-    let at = turn.position;
-    let mut statement = db.prepare_cached(
-        "WITH receipt AS MATERIALIZED (
-           SELECT DISTINCT correlation FROM fact_relay_receipt WHERE source=?1 AND pos=?2 AND correlation IS NOT NULL
-         ), delivered AS MATERIALIZED (
-           SELECT r.*,s.carrier,s.harness,CASE WHEN ?4 IS NULL THEN json_extract(s.ledger,'$.offset')
-             ELSE json_extract(?4,'$.\"' || r.source || '\"') END AS end
-           FROM receipt e CROSS JOIN fact_relay_result r ON r.correlation=e.correlation AND NOT r.failed
-           CROSS JOIN warehouse_source s ON s.source=r.source AND s.origin=?3
-           WHERE ?4 IS NOT NULL OR EXISTS (SELECT 1 FROM warehouse_current WHERE source=r.source)
-         )
-         SELECT DISTINCT r.source,r.carrier,r.harness FROM delivered r
-         CROSS JOIN fact_relay_send c ON c.source=r.source AND c.call_id=r.call_id AND c.pos<r.pos
-           AND ((r.call_pos=c.pos AND r.call_block=c.block) OR (r.call_pos IS NULL AND 1=(
-               SELECT count(*) FROM fact_tool_call a WHERE a.source=r.source AND a.call_id=r.call_id AND a.pos<r.end)))
-         WHERE r.pos<r.end LIMIT 2",
-    ).map_err(index)?;
-    let mut rows = statement
-        .query(params![
-            at.source,
-            at.offset,
-            source.namespace.binding(),
-            certified
-        ])
-        .map_err(index)?;
-    let Some(hit) = rows.next().map_err(index)? else {
-        return Ok(None);
-    };
-    let result = (
-        hit.get(0).map_err(index)?,
-        hit.get(1).map_err(index)?,
-        hit.get(2).map_err(index)?,
-    );
-    if rows.next().map_err(index)?.is_some() {
-        return Ok(None);
-    }
-    Ok(Some(result))
 }
 
 struct Member {
@@ -962,6 +914,7 @@ fn qualified_record(
     Ok(native)
 }
 
+#[cfg(test)]
 pub(super) fn launch_call(
     view: &ReadView<'_>,
     source: &Source<'_>,
@@ -1448,7 +1401,6 @@ pub(super) fn active_tool(
         component,
         view,
         [at, end].into_iter(),
-        "{}",
     )?;
     Ok(turns[&at]
         .as_ref()
@@ -1497,7 +1449,6 @@ pub(super) fn sender_window(
     component: &Component,
     turn: &causal::TurnStart,
     provider: Option<&dyn SessionSourceReader>,
-    peer: Option<PeerBinding<'_>>,
 ) -> Result<Option<Component>, ReadError> {
     let key = &component.identity.catalog_key;
     let target = Target::SenderWindow(turn.position);
@@ -1518,7 +1469,7 @@ pub(super) fn sender_window(
             target,
             None,
             provider.unwrap_or(&view.archive),
-            peer.map(|binding| (binding, provider.is_none())),
+            None,
         )
         .map(Some),
     }
@@ -2544,61 +2495,22 @@ fn read_current(
             );
         }
     }
-    let mut relay_context = BTreeMap::new();
-    if matches!(target, Target::ToolResults(_)) {
-        for position in candidates.keys() {
-            relay_context.insert(*position, relay_receipts(db, source, *position, view)?);
-        }
-    }
-    let parent_plan = if let Target::ToolResults(call) = target
-        && let Some((position, _)) = candidates.first_key_value()
-        && relay_context.values().all(Vec::is_empty)
-    {
-        parent_relay::Plan::collect(db, source, position.source, Some(call), view)?
-            .map(|plan| (plan, position.source))
+    #[cfg(test)]
+    let mut relay_context = if matches!(target, Target::ToolResults(_)) {
+        candidates
+            .keys()
+            .map(|position| Ok((*position, relay_receipts(db, source, *position, view)?)))
+            .collect::<Result<BTreeMap<_, _>, ReadError>>()?
     } else {
-        None
+        BTreeMap::new()
     };
     let home_activity = if include_home_activity && runtime_status == Some("work") {
         active_tool_candidate(db, component, &harness)?
     } else {
         None
     };
-    let mut legacy_plans = Vec::new();
     let need_latest_turn =
         need_pending_turn || !causal.is_empty() || include_home_detail || home_activity.is_some();
-    if harness == "claude"
-        && need_latest_turn
-        && !matches!(target, Target::SenderAnchor(_) | Target::SenderWindow(_))
-    {
-        if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view)? {
-            legacy_plans.push((owner, plan));
-        }
-        let mut children = db
-            .prepare_cached(include_str!("legacy_relay_children.sql"))
-            .map_err(index)?;
-        let mut children = children
-            .query(params![component, crate::events::AGM_UP, view])
-            .map_err(index)?;
-        let mut count = 0;
-        let mut graph = super::parents::Parents::new(db)?;
-        while let Some(row) = children.next().map_err(index)? {
-            let child = row.get(0).map_err(index)?;
-            let Some(edge) = graph.parent(child)?.filter(|edge| edge.method == "native") else {
-                continue;
-            };
-            if graph.owner(edge.source)? != Some(owner) {
-                continue;
-            }
-            count += 1;
-            if count > 128 {
-                return Err(index("Selected legacy relay child budget exhausted"));
-            }
-            if let Some(plan) = parent_relay::Plan::collect(db, source, child, None, view)? {
-                legacy_plans.push((child, plan));
-            }
-        }
-    }
     drop(transaction);
     let mut readers = BTreeMap::new();
     let mut fields = Fields::new();
@@ -2673,36 +2585,6 @@ fn read_current(
             })?;
         Ok::<_, ReadError>((native, pin))
     };
-    let mut resolve = |plan: parent_relay::Plan<Arc<Member>>, child| {
-        plan.resolve(child, |id, member, offset| {
-            read_body(id, member, offset, None, BodyMode::Complete).map(|(native, _)| native)
-        })
-    };
-    if let Some((plan, child)) = parent_plan
-        && let Some(receipt) = resolve(plan, child)?.matched
-        && let Some(first) = relay_context.first_entry()
-    {
-        first.into_mut().push(receipt);
-    }
-    let mut legacy_completion = None;
-    let mut incoming = BTreeMap::new();
-    let mut legacy_sender = BTreeMap::new();
-    for (child, plan) in legacy_plans {
-        let resolved = resolve(plan, child)?;
-        if child == owner {
-            legacy_completion = resolved.completion;
-        } else {
-            if include_home_detail {
-                for turn in resolved.incoming.values() {
-                    legacy_sender
-                        .entry(turn.clone())
-                        .and_modify(|owner| *owner = None)
-                        .or_insert(Some(child));
-                }
-            }
-            incoming.extend(resolved.incoming);
-        }
-    }
     let mut turns = causal::turns(
         &*read_view.lock()?,
         source,
@@ -2715,7 +2597,6 @@ fn read_current(
             .copied()
             .chain(need_latest_turn.then_some(Position::END))
             .chain(home_activity.as_ref().map(|activity| activity.position)),
-        &encode(&incoming)?,
     )?;
     let latest_turn = turns.remove(&Position::END).flatten();
     let annotations = if let Target::Annotations(request) = target {
@@ -2748,45 +2629,7 @@ fn read_current(
             BodyMode::Complete,
         )?
         .0;
-        let mut detail = HomeDetail::from_turn(turn, &native);
-        if turn.id.starts_with('r') {
-            let db = read_view.lock()?;
-            let sender = if let Some(sender) = legacy_sender.get(&turn.id) {
-                *sender
-            } else if let Some((sender, carrier, harness)) = relay_sender(&db, source, turn, None)?
-            {
-                match (
-                    source.availability(&harness, &carrier)?,
-                    super::parents::Parents::new(&db)?.owner(sender)?,
-                ) {
-                    (Availability::Expected(Some(stat)), Some(owner))
-                        if db
-                            .query_row(
-                                "SELECT ledger FROM warehouse_source WHERE source=?1",
-                                [sender],
-                                |row| row.get::<_, String>(0),
-                            )
-                            .map_err(index)
-                            .and_then(|ledger| decode(&ledger))
-                            .is_ok_and(|ledger| stable_or_grown(&ledger.stat, &stat)) =>
-                    {
-                        Some(owner)
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            if let Some(sender) = sender.filter(|sender| *sender != owner)
-                && let Some((_, key, _)) = super::relative_keys(&db, &encode(&[sender])?)?.pop()
-            {
-                let name = db.query_row("SELECT coalesce(f.title,f.agent_name,d.nickname) FROM dim_session d
-                    CROSS JOIN warehouse_current c USING(source) CROSS JOIN files f USING(path) WHERE d.source=?1",
-                    [sender], |row| row.get(0)).optional().map_err(index)?.flatten();
-                detail.set_sender(key, name);
-            }
-        }
-        Some(detail)
+        Some(HomeDetail::from_turn(turn, &native))
     } else {
         None
     };
@@ -2950,6 +2793,7 @@ fn read_current(
             operation,
             causal,
             at: (position.time != i64::MIN).then_some(position.time),
+            #[cfg(test)]
             relay_receipts: relay_context.remove(&position).unwrap_or_default(),
             address: Address {
                 path: reference.path.clone(),
@@ -3052,7 +2896,6 @@ fn read_current(
         retained_metadata: None,
         latest_turn,
         runtime_status,
-        legacy_completion,
         records,
         reply_records,
         fields,

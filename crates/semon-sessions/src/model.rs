@@ -33,7 +33,6 @@ pub(crate) use native_text::{
 };
 use native_text::{coordinator_body, down_target};
 pub(crate) use native_text::{input_string, received_body};
-pub(crate) use relay_match::pair_up;
 pub(crate) use turns::native_id as native_turn_id;
 
 pub(crate) mod relation_stage;

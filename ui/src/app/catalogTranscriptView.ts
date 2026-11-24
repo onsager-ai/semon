@@ -472,7 +472,7 @@ export function recordedRelationshipViews(
     activity?: readonly [string, string];
   },
 ): EntryView[] {
-  const sender = senderRelationshipPresentation(relationship.edge);
+  const sender = relationship.edge.reason && senderRelationshipPresentation(relationship.edge);
   if (sender) {
     return [
       {
