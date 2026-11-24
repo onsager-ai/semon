@@ -7,6 +7,7 @@ publish = false
 description = "The push protocol: the client that sends the session logs' input files, redacted, and the machine's facts to a receiver, and a reference receiver."
 
 [dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 tiny_http.workspace = true
 getrandom.workspace = true
 libc.workspace = true

@@ -1,4 +1,4 @@
-//! Durable owner read authority, separate from machine push credentials.
+//! Durable owner read and snapshot write authority, separate from machine push credentials.
 use crate::{
     credentials::{Bearer, Secret},
     enrollment::{Error, Registry, Store},
@@ -10,14 +10,15 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Read {
+pub enum Scope {
     Read,
+    Snapshot,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
-    tokens: Vec<Bearer<Read>>,
+    tokens: Vec<Bearer<Scope>>,
     audit: Vec<Audit>,
     public_url: Option<String>,
 }
@@ -58,6 +59,14 @@ pub fn configure(dir: &Path, value: Option<&str>) -> Result<()> {
     })
 }
 pub fn create(dir: &Path, now: u64) -> Result<(Secret, Option<String>)> {
+    mint(dir, now, Scope::Read)
+}
+
+pub fn create_snapshot(dir: &Path, now: u64) -> Result<Secret> {
+    mint(dir, now, Scope::Snapshot).map(|(secret, _)| secret)
+}
+
+fn mint(dir: &Path, now: u64, scope: Scope) -> Result<(Secret, Option<String>)> {
     let secret = Secret::generate()?;
     let mut store = Store::open(dir)?;
     store.pairing_transaction(0, |r| {
@@ -66,7 +75,7 @@ pub fn create(dir: &Path, now: u64) -> Result<(Secret, Option<String>)> {
         r.read_tokens.tokens.push(Bearer {
             credential_id: id.clone(),
             enrollment_id: id.clone(),
-            kind: Read::Read,
+            kind: scope,
             sha256: secret.hash(),
             generation: 1,
             valid_from: now,
@@ -83,7 +92,7 @@ pub fn create(dir: &Path, now: u64) -> Result<(Secret, Option<String>)> {
         Ok((secret, r.read_tokens.public_url.clone()))
     })
 }
-pub fn list(dir: &Path) -> Result<Vec<(String, u64, bool)>> {
+pub fn list(dir: &Path) -> Result<Vec<(String, u64, bool, Scope)>> {
     Ok(Registry::read_current(dir)?
         .read_tokens
         .tokens
@@ -93,6 +102,7 @@ pub fn list(dir: &Path) -> Result<Vec<(String, u64, bool)>> {
                 t.credential_id.clone(),
                 t.valid_from,
                 t.revoked_at.is_some(),
+                t.kind,
             )
         })
         .collect())
@@ -131,15 +141,28 @@ impl semon_sessions::ViewerAccess for Access {
     }
 
     fn resolve(&self, secret: &str) -> Option<String> {
-        let hash = Secret::new(secret.to_owned()).hash();
-        let registry = Registry::read_current(&self.0).ok()?;
-        registry
-            .read_tokens
-            .tokens
-            .iter()
-            .find(|t| t.revoked_at.is_none() && crate::credentials::ct_eq(&hash, &t.sha256))
-            .map(|t| t.credential_id.clone())
+        identify(&self.0, secret, Scope::Read)
+            .filter(|(_, revoked)| !revoked)
+            .map(|(id, _)| id)
     }
+
+    fn management_snapshot(&self) -> std::io::Result<Option<serde_json::Value>> {
+        crate::manage::latest(&self.0)
+    }
+}
+
+pub(crate) fn identify(dir: &Path, secret: &str, scope: Scope) -> Option<(String, bool)> {
+    if secret.is_empty() || secret.len() > 512 {
+        return None;
+    }
+    let hash = Secret::new(secret.to_owned()).hash();
+    Registry::read_current(dir)
+        .ok()?
+        .read_tokens
+        .tokens
+        .iter()
+        .find(|t| t.kind == scope && crate::credentials::ct_eq(&hash, &t.sha256))
+        .map(|t| (t.credential_id.clone(), t.revoked_at.is_some()))
 }
 
 impl Registry {
@@ -147,8 +170,7 @@ impl Registry {
         let mut ids = std::collections::BTreeSet::new();
         let mut hashes = std::collections::BTreeSet::new();
         for t in &self.read_tokens.tokens {
-            if t.kind != Read::Read
-                || t.enrollment_id != t.credential_id
+            if t.enrollment_id != t.credential_id
                 || t.generation != 1
                 || t.valid_until != u64::MAX
                 || t.valid_from > self.latest

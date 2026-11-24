@@ -248,6 +248,10 @@ pub trait ViewerAccess: Send + Sync {
     fn resolve(&self, secret: &str) -> Option<String>;
     /// Issue a one-time machine pairing code under the receiver's read authority.
     fn issue_pairing_code(&self) -> Result<Value, String>;
+    /// Receiver-local management data. No session or analytics source receives it.
+    fn management_snapshot(&self) -> io::Result<Option<Value>> {
+        Ok(None)
+    }
 }
 
 impl Viewer {

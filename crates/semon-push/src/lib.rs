@@ -41,6 +41,7 @@ pub mod credentials;
 #[cfg(unix)]
 pub mod enrollment;
 mod lock;
+mod manage;
 #[cfg(unix)]
 pub mod pairing;
 pub mod read_token;
