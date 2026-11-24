@@ -35,7 +35,9 @@ try {
   };
   await post(fixture);
   await post({ ...fixture, generated_at: '2026-01-01T16:29:00Z', hosts: [] });
-  const confirmed = await (await page.request.get(ENV.base + api)).json();
+  const response = await page.request.get(ENV.base + api);
+  assert.equal(response.status(), 200);
+  const confirmed = await response.json();
   assert.deepEqual(confirmed.snapshot, fixture);
 
   // Keep the actual authenticated response and its live Catalog result. Move
@@ -43,12 +45,10 @@ try {
   let age = 89;
   let invalidDate = false;
   await page.route(ENV.base + api, async (route) => {
-    const response = await route.fetch();
-    assert.equal(response.status(), 200);
-    const payload = await response.json();
+    const payload = structuredClone(confirmed);
     payload.now = Date.parse(fixture.generated_at) + age * 60_000;
     if (invalidDate) payload.snapshot.hosts[0].observed_at = '2016-12-31T23:59:60Z';
-    await route.fulfill({ response, json: payload });
+    await route.fulfill({ status: 200, json: payload });
   });
   for (const [minutes, label, color] of [
     [-1, 'Current', 'green'],
