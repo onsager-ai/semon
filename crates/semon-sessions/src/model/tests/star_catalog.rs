@@ -1462,6 +1462,7 @@ fn selected_claude_relations(
                     && e.id == call_id
                     && !matches!(e.n.as_deref(), None | Some("running" | "started"))
             })
+            .map(|at| (at, false))
             .collect::<Vec<_>>();
         let (runs, inline) =
             relay_match::claude_runs(files, &child_refs, first_prompt, &finals, &ends);
