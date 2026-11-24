@@ -45,7 +45,7 @@ export type ManageData = {
         id: string;
         machine: string | null;
         last_activity: number;
-        stall_reason: 'waiting-question' | 'no-output' | 'process-gone';
+        stall_reason: 'waiting-question' | 'no-output' | 'subagent-unconfirmed' | 'process-gone';
       }[]
     | null;
 };
@@ -61,6 +61,7 @@ const number = new Intl.NumberFormat('en', { maximumFractionDigits: 8 });
 const stallReasons = {
   'waiting-question': 'Waiting on a question',
   'no-output': 'No output',
+  'subagent-unconfirmed': 'Subagent completion unconfirmed',
   'process-gone': 'Process gone',
 };
 

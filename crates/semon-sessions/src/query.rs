@@ -84,6 +84,7 @@ fn qualify_summary_state(row: &mut Value, recorded_busy: bool) {
 enum StallReason {
     WaitingQuestion,
     NoOutput,
+    SubagentUnconfirmed,
     ProcessGone,
     // Q3: `waiting-permission`, with the state.
 }
@@ -93,6 +94,7 @@ impl StallReason {
         match self {
             Self::WaitingQuestion => "waiting-question",
             Self::NoOutput => "no-output",
+            Self::SubagentUnconfirmed => "subagent-unconfirmed",
             Self::ProcessGone => "process-gone",
         }
     }
@@ -103,7 +105,8 @@ const STALL_RULE: &str = "A session stalls when no log line has landed for at le
      a single dated Claude pid file recorded it busy more than five minutes after the latest transcript activity, \
      and its process was observed gone (process-gone); or a question to you is open (waiting-question); or the session is \
      working or has unknown liveness and a busy Claude PID record, with no confirmed end \
-     (no-output). Working is a live Claude process whose status is busy, a subagent whose parent runs \
+     (subagent-unconfirmed for a subagent, no-output otherwise). The subagent label leaves completion unknown. \
+     Working is a live Claude process whose status is busy, a subagent whose parent runs \
      and whose spawning call has no result, or a Codex run that holds its writer lock.";
 
 const SINCE: &str = "A duration back from now (90m, 2h, 7d, 1w) or an RFC 3339 time; not before the \
@@ -355,8 +358,9 @@ pub fn query_tools() -> Vec<QueryTool> {
         QueryTool {
             name: "stalls",
             description: "Sessions with no log line for at least idle_minutes that are working, wait on an open \
-                question, or whose process is gone while its record said busy, each with a closed stall_reason: \
-                waiting-question, no-output or process-gone. The answer states its rule.",
+                question, or have a busy Claude PID record with unverified liveness or a gone process. The closed \
+                stall_reason is waiting-question, no-output, subagent-unconfirmed (when a subagent would otherwise \
+                have no-output), or process-gone. The answer states its rule.",
             positional: None,
             input_schema: json!({
                 "type": "object",

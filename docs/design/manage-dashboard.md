@@ -315,7 +315,9 @@ snapshot, show “No snapshot received.”
    Below the host readings, show live stalled sessions from the existing
    owner-authorized Catalog `stalls` query. Show Catalog unavailability
    independently of the snapshot's status. The query uses Catalog metadata and
-   leaves native question bodies unread.
+   leaves native question bodies unread. Display `subagent-unconfirmed` as
+   “Subagent completion unconfirmed” when the query labels a subagent whose
+   reason would otherwise be `no-output`. The query still returns the same rows.
 
 ## V1 data boundaries
 
