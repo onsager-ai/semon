@@ -1131,7 +1131,9 @@ fn management_snapshot_write_scope_validation_and_append_order() {
             .any(|line| line.starts_with(id) && line.ends_with("\ttrue\tsnapshot"))
     );
     let writer = token(&["--snapshot"]);
-    let bearer = |secret| format!("Authorization: Bearer {secret}\r\n");
+    fn bearer(secret: &str) -> String {
+        format!("Authorization: Bearer {secret}\r\n")
+    }
     let ingest = |secret: Option<&str>, body: &str, extra: &str| {
         let mut headers = secret.map(bearer).unwrap_or_default();
         headers.push_str(extra);
