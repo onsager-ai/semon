@@ -2248,6 +2248,176 @@ fn warehouse_trace_follows_a_send_from_a_continuation_and_a_peer_reply() {
 }
 
 #[test]
+fn warehouse_transcript_records_spawn_relay_handback_resume_and_unavailable_send() {
+    let mut fixture = Fixture::new("transcript-relationships");
+    let root = fixture.claude("root", "Delegate");
+    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(
+        child.with_extension("meta.json"),
+        json!({"agentType":"general-purpose","toolUseId":"agent"}).to_string(),
+    )
+    .unwrap();
+    fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
+    let call = |path: &Path, second, id, tool, input| {
+        append_native(
+            path,
+            json!({
+                "type":"assistant","uuid":id,"sessionId":"root","timestamp":format!("2026-09-24T00:00:{second:02}Z"),
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":tool,"input":input}]},
+            }),
+        )
+    };
+    let result = |path: &Path, second, id, delivery| {
+        append_native(
+            path,
+            json!({
+                "type":"user","sessionId":"root","timestamp":format!("2026-09-24T00:00:{second:02}Z"),
+                "toolUseResult":{"success":true,"msg_id":delivery},
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"sent"}]},
+            }),
+        )
+    };
+    let receive = |path: &Path, second, from, delivery, body| {
+        append_native(
+            path,
+            json!({
+                "type":"user","sessionId":"root","timestamp":format!("2026-09-24T00:00:{second:02}Z"),
+                "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/111.sock","name":from,
+                    "fromMode":"prompting","msg_id":delivery,"body":body,"verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+                "message":{"role":"user","content":format!("<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\">{body}</cross-session-message>")},
+            }),
+        )
+    };
+    call(&root, 1, "agent", "Agent", json!({"prompt":"Work"}));
+    call(
+        &root,
+        3,
+        "out",
+        "SendMessage",
+        json!({"to":"worker","message":"Check in"}),
+    );
+    result(&root, 4, "out", "outgoing");
+    receive(&child, 5, "root", "outgoing", "Check in");
+    call(
+        &child,
+        6,
+        "return",
+        "SendMessage",
+        json!({"to":"root","message":"Done"}),
+    );
+    result(&child, 7, "return", "returned");
+    call(
+        &child,
+        8,
+        "handback",
+        "SubagentHandback",
+        json!({"message":"Done"}),
+    );
+    receive(&root, 9, "worker", "returned", "Done");
+    call(
+        &root,
+        10,
+        "resume",
+        "SendMessage",
+        json!({"to":"worker","message":"Resume"}),
+    );
+    result(&root, 11, "resume", "resumed");
+    receive(&child, 12, "root", "resumed", "Resume");
+    call(
+        &root,
+        13,
+        "missing",
+        "SendMessage",
+        json!({"to":"missing-peer","message":"No receipt"}),
+    );
+    result(&root, 14, "missing", "unavailable");
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let transcript = |key| {
+        let query = crate::native_html::query(&[("sid", key)]);
+        let reply = http::transcript(&configured, &query, None, None);
+        let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200, "{page}");
+        page
+    };
+    let root_page = transcript("root");
+    let child_page = transcript("worker");
+    let context = &root_page["relationship_context"];
+    let edges = context["handoffs"].as_array().unwrap();
+    let spawn = crate::model::spawn_turn_id("claude", "worker");
+    for (id, kind, target) in [
+        (spawn, "spawn", "worker"),
+        (
+            crate::model::incoming_relay_turn_id(Some("outgoing"), "worker", 0),
+            "relay",
+            "worker",
+        ),
+        (
+            crate::model::incoming_relay_turn_id(Some("resumed"), "worker", 0),
+            "relay",
+            "worker",
+        ),
+    ] {
+        let edge = edges
+            .iter()
+            .find(|edge| edge["id"] == id)
+            .unwrap_or_else(|| panic!("{root_page}"));
+        assert_eq!(edge["kind"], kind);
+        assert_eq!(edge["to"], target);
+        assert_eq!(edge["target_turn"], id);
+        assert_eq!(edge["brief_session"], target);
+        assert!(context["turns"].as_array().unwrap().iter().any(|turn| {
+            turn["id"] == edge["source_turn"]
+                && turn["sent"].as_array().unwrap().contains(&json!(id))
+        }));
+        assert!(
+            root_page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["k"] == "h"
+                    && entry["id"] == id
+                    && entry["provenance"].is_object())
+        );
+    }
+    let unavailable = edges
+        .iter()
+        .find(|edge| edge["to"] == "missing-peer")
+        .unwrap();
+    assert_eq!(unavailable["status"], "off");
+    assert!(unavailable["reason"].is_string());
+    assert!(unavailable["target_turn"].is_null());
+    assert!(context["sessions"].get("missing-peer").is_none());
+    assert_eq!(context["sessions"]["worker"]["harness"], "claude");
+    assert_eq!(
+        context["previews"]["worker"],
+        child_page["identity"]["generation"]
+    );
+    assert!(
+        child_page["relationship_context"]["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["from"] == "worker"
+                && edge["to"] == "root"
+                && edge["status"] == "done")
+    );
+}
+
+#[test]
 fn warehouse_trace_codex_end_belongs_to_selected_turn() {
     let mut fixture = Fixture::new("trace-codex-end");
     let path = fixture.codex("trace-codex");
@@ -3245,6 +3415,32 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
         options: fixture.options.clone(),
         up: true,
     };
+    let query = crate::native_html::query(&[("sid", "root"), ("scope", "retained_history")]);
+    let reply = http::transcript(&configured, &query, None, Some(&original));
+    let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{page}");
+    let relationships = &page["relationship_context"];
+    let edge = relationships["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["from"] == "root" && edge["to"] == "peer" && edge["status"] == "done")
+        .unwrap_or_else(|| panic!("{page}"));
+    assert!(
+        relationships["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == turn && row["sent"].as_array().unwrap().contains(&edge["id"]))
+    );
+    assert!(relationships["previews"]["peer"].is_string());
+    assert!(
+        !page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["text"] == "Replacement trace")
+    );
     let query = crate::native_html::query(&[
         ("sid", "root"),
         ("scope", "retained_history"),

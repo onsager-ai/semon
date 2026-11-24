@@ -583,11 +583,13 @@ export function recordedRelationshipViews(
               : ' asked '
             : edge.kind === 'relay'
               ? ' relayed to '
-              : ' asked ',
+              : edge.kind === 'spawn'
+                ? ' launched '
+                : ' asked ',
       },
       {
         className: 'who who-link',
-        text: name(edge.to),
+        text: relationship.reason && edge.to ? edge.to : name(edge.to),
         action: targetLinked
           ? { kind: 'session' as const, id: edge.to, turn: relationship.targetTurn }
           : undefined,
@@ -628,8 +630,8 @@ export function recordedRelationshipViews(
       parts,
       time: clock(edge.at, Date.now()),
       brief: preview(native.brief ?? item.native_action_text ?? ''),
-      result: native.result,
-      resultLabel: 'Result',
+      result: relationship.reason ?? native.result,
+      resultLabel: relationship.reason ? 'Evidence' : 'Result',
       answers:
         native.answer == null
           ? undefined
@@ -637,7 +639,7 @@ export function recordedRelationshipViews(
             ? native.answer
             : [native.answer],
       waiting: edge.status === 'wait',
-      stateLabel: STATE[edge.status],
+      stateLabel: relationship.reason ? 'Unavailable' : STATE[edge.status],
     },
   ];
 }

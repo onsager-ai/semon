@@ -114,6 +114,31 @@ well as selecting metadata from committed facts.
   facts and selected parent/child overrides. PID reuse or stale observations
   cannot make a row live. Runtime churn must not restart unrelated history reads.
 
+### Selected transcript relationship response
+
+The transcript's `relationship_context` contains `state` (`complete` or
+`incomplete`), `turn_ids`, `turns`, `handoffs`, `sessions` and `previews`.
+Each turn supplies `id`, `sid`, `start`, `u`, `at`, `end` (`st`, `why`, and
+optional `at`), `sent` and `last`. The Viewer resolves `start` and each `sent`
+ID against `handoffs`. It uses `sent` to offer the Trace action on the turn.
+
+Each handoff supplies `id`, `kind`, `from`, `to`, `at`, `status`, `declined`,
+and, when known, `done`, `source_turn`, `target_turn`, `brief_session` and
+`result_session`. Questions and results sent to the user also use `ask`.
+Relationship action entries use `k: "h"` and the handoff `id`, with an entry
+address and provenance in the source transcript. A recorded outgoing call
+can be outside the page while its handoff is named by a visible source turn.
+An unqualified link carries `status: "off"` and `reason`, with no receipt turn
+or preview authority. A resume delivered as a relay uses the relay shape.
+
+For linked participants, the Viewer reads `name`, `harness` and `model` from
+`sessions`, with optional `kind`, `state`, `start`, `last`, `calls`, `usd`,
+`live_observation` and `activity` (`tool`, `since`) for child cards. `previews`
+keys are Catalog keys and their values are 64-character generation hashes.
+Preview owners use those hashes when requesting body text through the selected
+reader. Retained Trace evidence continues to carry its certified address and
+peer witness. Plain session links keep opening the current owner.
+
 ## Pagination and committed transcript prefixes
 
 - Keep the focused list order `last DESC, catalog_key ASC` and strict keyset

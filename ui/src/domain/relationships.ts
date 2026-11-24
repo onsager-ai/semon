@@ -7,6 +7,7 @@ export interface RecordedRelationship {
   resultOwner?: string;
   targetTurn?: string;
   sourceTurn?: string;
+  reason?: string;
 }
 export interface RecordedTurn {
   id: string;
@@ -59,8 +60,12 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
   } else if (kind === 'move') edge = { ...base, kind, fromMachine: '', toMachine: '' };
   else if (kind === 'ask' || kind === 'spawn' || kind === 'relay') edge = { ...base, kind };
   else throw Error('Invalid recorded handoff');
+  const reason = row.reason == null ? undefined : text(row.reason);
+  if (reason && (reason.length > 1024 || status !== 'off'))
+    throw Error('Invalid unavailable relationship');
   return {
     edge,
+    reason,
     briefOwner: row.brief_session == null ? undefined : text(row.brief_session),
     resultOwner: row.result_session == null ? undefined : text(row.result_session),
     targetTurn: row.target_turn == null ? undefined : text(row.target_turn),

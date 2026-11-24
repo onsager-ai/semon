@@ -146,6 +146,33 @@ pub(in super::super) fn retained_peer_window(
     )
 }
 
+pub(in super::super) fn retained_spawn_window(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    key: &str,
+    peer: PeerBinding<'_>,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<Component, ReadError> {
+    let harness = {
+        let tx = view.lock()?;
+        let identity = warehouse::retained_identity(&tx, &source.namespace, peer.trace)
+            .map_err(super::super::retained_error)?;
+        retained_participant(&tx, source, &identity, peer, key)?
+            .0
+            .harness
+    };
+    let turn = crate::model::spawn_turn_id(&harness, key);
+    read_frozen(
+        view,
+        source,
+        key,
+        Target::Turns(&[&turn], None),
+        None,
+        provider.unwrap_or(&view.archive),
+        (key != peer.trace).then_some((peer, provider.is_none())),
+    )
+}
+
 pub(in super::super) fn retained_peer_trace_window(
     view: &ReadView<'_>,
     source: &Source<'_>,
@@ -1556,47 +1583,63 @@ pub(in super::super) fn retained_peer_launch_in_view(
     peer: &str,
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<(Address, u32, crate::ToolCall), ReadError> {
+    retained_launch_between(
+        view,
+        source,
+        PeerBinding { trace, witness },
+        trace,
+        peer,
+        provider,
+    )
+}
+
+pub(in super::super) fn retained_launch_between(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    binding: PeerBinding<'_>,
+    child_key: &str,
+    parent_key: &str,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<(Address, u32, crate::ToolCall), ReadError> {
     let unavailable = || {
         ReadError::PeerUnavailable(
             "No exact launch call could be proven in the certified prefixes.".into(),
         )
     };
-    if trace == peer {
+    if child_key == parent_key {
         return Err(unavailable());
     }
     let mut matched_call = None;
     let record = read_retained_peer_in_view(
         view,
         source,
-        PeerBinding { trace, witness },
-        peer,
+        binding,
+        parent_key,
         provider,
         crate::handoff::MAX_INPUT_BYTES,
         |db, (identity, observed), parents, read| {
             let tx = db.lock().map_err(index)?;
-            let child_members = frozen_members(&tx, identity.binding)?;
-            let child = child_members
-                .iter()
-                .find(|member| member.id == identity.owner)
+            let (child, _) = retained_participant(&tx, source, identity, binding, child_key)?;
+            let member = child.members.iter().find(|member| member.source == child.owner)
                 .ok_or_else(unavailable)?;
-            let child_carrier = child.receipt.path.to_str().ok_or_else(unavailable)?;
-            let child_path = relative(source.options, &identity.harness, child_carrier)
+            let child_carrier = member.receipt.path.to_str().ok_or_else(unavailable)?;
+            let child_path = relative(source.options, &child.harness, child_carrier)
                 .ok_or_else(unavailable)?;
-            let child_reference = frozen_reference(&identity.harness, child_path, &child.receipt);
-            let claude_parent = (identity.harness == "claude" && observed.harness == "claude")
-                .then(|| claude_storage_parent(Path::new(child_path), &identity.native_id))
+            let child_reference = frozen_reference(&child.harness, child_path, &member.receipt);
+            let claude_parent = (child.harness == "claude" && observed.harness == "claude")
+                .then(|| claude_storage_parent(Path::new(child_path), &child.native_id))
                 .flatten()
                 .filter(|storage_parent| parents.iter().any(|(_, parent)| {
                     *storage_parent == Path::new(&parent.path).with_extension("")
                 }));
-            let native_call = claude_parent.and_then(|_| child.receipt.claude_agent_call());
+            let native_call = claude_parent.and_then(|_| member.receipt.claude_agent_call());
             let marker = if native_call.is_none() {
                 let marker_offset: i64 = tx.query_row(
                     "SELECT p.pos FROM fact_parent_observation p
                      JOIN fact_record r ON r.source=p.source AND r.pos=p.pos AND r.block=0 AND NOT r.gap
                      WHERE p.source=?1 AND p.pos<?2 AND p.method='marker'
                      ORDER BY p.pos DESC,p.block DESC,p.occurrence DESC LIMIT 1",
-                    params![child.id, i64::try_from(child_reference.offset).map_err(index)?],
+                    params![member.source, i64::try_from(child_reference.offset).map_err(index)?],
                     |row| row.get(0),
                 ).optional().map_err(index)?.ok_or_else(unavailable)?;
                 drop(tx);

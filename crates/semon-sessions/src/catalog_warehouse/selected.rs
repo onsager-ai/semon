@@ -30,8 +30,9 @@ pub(super) mod render;
 mod retained;
 pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_annotations,
-    retained_member_bounds, retained_peer_launch_in_view, retained_peer_trace_window,
-    retained_preview_turns, retained_relay_in_view, retained_spawn_return, retained_turn,
+    retained_launch_between, retained_member_bounds, retained_peer_launch_in_view,
+    retained_peer_trace_window, retained_preview_turns, retained_relay_in_view,
+    retained_spawn_return, retained_spawn_window, retained_turn,
 };
 #[cfg(test)]
 pub(super) use retained::{

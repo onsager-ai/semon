@@ -208,6 +208,7 @@ function parseRelationshipContext(
   context: Record<string, unknown>,
   identity: CatalogSessionIdentity,
   entries: readonly Pick<CatalogTranscriptEntry, 'entry'>[],
+  native = false,
 ): CatalogTranscriptPage['relationship_context'] {
   if (
     (context.state !== 'incomplete' && context.state !== 'complete') ||
@@ -231,11 +232,19 @@ function parseRelationshipContext(
     throw Error('Invalid ranged turn scope');
   const named = new Set(relationships.map((row) => row.edge.id));
   const actions = new Set(entries.flatMap((item) => (item.entry.k === 'h' ? [item.entry.id] : [])));
+  const sent = new Map(turns.map((turn) => [turn.id, new Set(turn.sent)]));
   if (
     named.size !== relationships.length ||
     relationships.some(
       (row) =>
-        (!actions.has(row.edge.id) && !starts.has(row.edge.id)) ||
+        (!actions.has(row.edge.id) &&
+          !starts.has(row.edge.id) &&
+          !(
+            native &&
+            row.edge.from === identity.catalog_key &&
+            row.sourceTurn &&
+            sent.get(row.sourceTurn)?.has(row.edge.id)
+          )) ||
         (row.edge.from !== identity.catalog_key && row.edge.to !== identity.catalog_key),
     ) ||
     (context.state === 'complete' && [...actions].some((id) => !named.has(id))) ||
@@ -363,6 +372,7 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
       object(row.relationship_context),
       identity,
       entries,
+      true,
     ),
     session: row.session === null ? null : parseCatalogSession(row.session),
     position: row.position,

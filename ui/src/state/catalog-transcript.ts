@@ -55,7 +55,18 @@ function mergeRelationshipContext(
       handoffs.set(relationship.edge.id, relationship);
     Object.assign(sessions, page.relationship_context.sessions);
     Object.assign(previews, page.relationship_context.previews);
-    for (const turn of page.relationship_context.turns) turns.set(turn.id, turn);
+    for (const turn of page.relationship_context.turns) {
+      const previous = turns.get(turn.id);
+      turns.set(
+        turn.id,
+        previous
+          ? {
+              ...(turn.at == null && previous.at != null ? previous : turn),
+              sent: [...new Set([...previous.sent, ...turn.sent])],
+            }
+          : turn,
+      );
+    }
   }
   return {
     state: pages.some((page) => page.relationship_context.state === 'incomplete')
@@ -388,7 +399,10 @@ export class CatalogNativeTranscriptStore {
             turns = new Set(entries.flatMap(({ entry }) => (entry.turn ? [entry.turn] : []))),
             actions = new Set(entries.flatMap(({ entry }) => (entry.k === 'h' ? [entry.id] : []))),
             retainedTurns = context.turns.filter((turn) => turns.has(turn.id));
-          for (const turn of retainedTurns) if (turn.start) actions.add(turn.start);
+          for (const turn of retainedTurns) {
+            if (turn.start) actions.add(turn.start);
+            for (const id of turn.sent) actions.add(id);
+          }
           this.pages.push({
             ...previous,
             entries,
