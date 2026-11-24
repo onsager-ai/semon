@@ -1453,18 +1453,41 @@ fn selected_claude_relations(
                 head: None,
             });
         }
-        let ends = parent_refs
+        let resume_calls = parent_refs
             .iter()
             .copied()
-            .filter(|at| {
-                let e = event(files, *at);
-                e.k == Kind::Tn
-                    && e.id == call_id
-                    && !matches!(e.n.as_deref(), None | Some("running" | "started"))
-            })
+            .filter(|at| event(files, *at).resumed_agent.as_deref() == Some(key.as_str()))
             .collect::<Vec<_>>();
-        let (runs, inline) =
-            relay_match::claude_runs(files, &child_refs, first_prompt, &finals, &ends);
+        let mut ends = Vec::new();
+        if let Some(original) = call {
+            for (run, invocation) in std::iter::once(original)
+                .chain(resume_calls.iter().copied())
+                .enumerate()
+            {
+                let id = &event(files, invocation).id;
+                ends.extend(
+                    parent_refs
+                        .iter()
+                        .copied()
+                        .filter(|at| {
+                            let notice = event(files, *at);
+                            notice.k == Kind::Tn
+                                && &notice.id == id
+                                && notice.task_id.as_deref() == Some(key.as_str())
+                                && follows_call(files, invocation, *at, run != 0)
+                        })
+                        .map(|at| (at, run)),
+                );
+            }
+        }
+        let (runs, inline) = relay_match::claude_runs(
+            files,
+            &child_refs,
+            first_prompt,
+            &finals,
+            &ends,
+            &resume_calls,
+        );
         let mut completion = None;
         if let Some(run) = runs.iter().rev().find(|run| run.ended()) {
             let done = [run.fin, run.tn, run.handback]
@@ -1484,7 +1507,8 @@ fn selected_claude_relations(
             } else if let Some(at) = run.tn {
                 notification_result(
                     &selected_record(files, at),
-                    call_id.as_deref().unwrap_or(""),
+                    event(files, at).id.as_deref().unwrap_or(""),
+                    Some(key),
                 )
             } else {
                 run.handback.and_then(|at| body(at, "message"))
@@ -1519,29 +1543,6 @@ fn selected_claude_relations(
                 reply.e,
             ));
         }
-        // Runtime observations name physical sources. Select the current root
-        // through the parent/owner reads before qualifying a resumed native run.
-        let mut root = parent;
-        let mut visited = BTreeSet::new();
-        while visited.insert(root) {
-            let Some(next) = rows[root]
-                .parent
-                .as_ref()
-                .and_then(|key| rows.iter().position(|row| &row.id == key))
-            else {
-                break;
-            };
-            root = next;
-        }
-        let running: bool = warehouse
-            .db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM qualified_turn_runtime r
-             JOIN bridge_session_owner b ON b.source=r.source WHERE b.owner=?1)",
-                [rows[root].owner],
-                |r| r.get(0),
-            )
-            .unwrap();
         let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
         let mut out = Handoff::new(
             stable_id("s", &format!("spawn:claude:{key}")),
@@ -1549,10 +1550,8 @@ fn selected_claude_relations(
             (rows[parent].id.clone(), key.clone()),
             call.and_then(|at| event(files, at).t)
                 .unwrap_or(files[source_files[&child_source]].first.unwrap()),
-            if running && (resumed || completion.is_none()) {
+            if resumed || completion.is_none() {
                 "work"
-            } else if resumed {
-                "done"
             } else if completion.as_ref().is_some_and(|c| c.2) {
                 "err"
             } else {
@@ -2377,6 +2376,7 @@ fn star_catalog_subagent_body_time_and_turn_arrival_parity() {
             parent.push(notification(
                 "lead",
                 ts(20, 10),
+                "child",
                 "spawn",
                 "completed",
                 "final answer",
@@ -2457,6 +2457,7 @@ fn star_catalog_subagent_inline_pin_resume_turn_arrival_parity() {
         parent.push(notification(
             "lead",
             ts(20, 5),
+            "child",
             "spawn",
             "completed",
             "first result",
@@ -3054,7 +3055,7 @@ fn star_catalog_human_result_relay_arrival_parity() {
                     ),
                 ];
                 parent.push(if notification_only {
-                    notification("lead", ts(20, 3), "spawn", "completed", "done")
+                    notification("lead", ts(20, 3), "child", "spawn", "completed", "done")
                 } else if progress {
                     agent_send("lead", ts(20, 3), "child", "update")
                 } else {

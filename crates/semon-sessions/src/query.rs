@@ -103,8 +103,9 @@ const STALL_RULE: &str = "A session stalls when no log line has landed for at le
      a single dated Claude pid file recorded it busy more than five minutes after the latest transcript activity, \
      and its process was observed gone (process-gone); or a question to you is open (waiting-question); or the session is \
      working or has unknown liveness and a busy Claude PID record, with no confirmed end \
-     (no-output). Working is a live Claude process whose status is busy, a subagent whose parent runs \
-     and whose spawning call has no result, or a Codex run that holds its writer lock.";
+     (no-output). A Claude subagent with an unconfirmed end is eligible for no-output \
+     regardless of its root's process state. A task notice can confirm an end only when its \
+     unique task ID, tool-use ID and terminal status identify the child's exact invocation.";
 
 const SINCE: &str = "A duration back from now (90m, 2h, 7d, 1w) or an RFC 3339 time; not before the \
      window's start (window_start), or the answer is the error outside_window.";

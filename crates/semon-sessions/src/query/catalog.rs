@@ -47,7 +47,14 @@ pub(super) fn stall_response(
             if since.is_some_and(|since| last < since) || now.saturating_sub(last) < threshold {
                 return None;
             }
-            let reason = if row["alive"] == false && recorded_status.as_deref() == Some("busy") {
+            let claude_child = row["harness"] == "claude" && row["kind"] == "subagent";
+            let reason = if claude_child {
+                match row["state"].as_str() {
+                    Some("waiting-question") => StallReason::WaitingQuestion,
+                    Some("working" | "unknown") => StallReason::NoOutput,
+                    _ => return None,
+                }
+            } else if row["alive"] == false && recorded_status.as_deref() == Some("busy") {
                 StallReason::ProcessGone
             } else {
                 match row["state"].as_str() {

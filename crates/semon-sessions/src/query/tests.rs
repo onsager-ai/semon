@@ -1643,6 +1643,233 @@ fn read_transcript_pages_as_the_viewer_does() {
     );
 }
 
+fn completion_notice(parent: &str, minute: i64, fields: &str) -> Value {
+    json!({"type": "user", "sessionId": parent, "timestamp": ts(1, minute),
+        "origin": {"kind": "task-notification"}, "message": {"role": "user", "content":
+            format!("<task-notification>{fields}<result>Finished</result></task-notification>")}})
+}
+
+#[test]
+fn stalls_require_a_well_formed_notice_for_the_exact_claude_child() {
+    let home = Home::new("testbox");
+    let good = [
+        "<task-id>worker</task-id>",
+        "<tool-use-id>spawn</tool-use-id>",
+        "<status>completed</status>",
+    ];
+    let cases = [
+        ("valid", good.concat()),
+        (
+            "invalid-task",
+            ["<task-id>worker?</task-id>", good[1], good[2]].concat(),
+        ),
+        (
+            "unclosed-task",
+            ["<task-id>worker", good[1], good[2]].concat(),
+        ),
+        (
+            "duplicate-task",
+            [good[0], good[0], good[1], good[2]].concat(),
+        ),
+        (
+            "conflicting-task",
+            [good[0], "<task-id>other</task-id>", good[1], good[2]].concat(),
+        ),
+        ("missing-task", [good[1], good[2]].concat()),
+        ("missing-tool", [good[0], good[2]].concat()),
+        (
+            "duplicate-tool",
+            [good[0], good[1], good[1], good[2]].concat(),
+        ),
+        (
+            "conflicting-tool",
+            [
+                good[0],
+                good[1],
+                "<tool-use-id>other</tool-use-id>",
+                good[2],
+            ]
+            .concat(),
+        ),
+        (
+            "unclosed-tool",
+            [good[0], "<tool-use-id>spawn", good[2]].concat(),
+        ),
+        ("missing-status", [good[0], good[1]].concat()),
+        (
+            "duplicate-status",
+            [good[0], good[1], good[2], good[2]].concat(),
+        ),
+        (
+            "conflicting-status",
+            [good[0], good[1], good[2], "<status>failed</status>"].concat(),
+        ),
+        (
+            "unclosed-status",
+            [good[0], good[1], "<status>completed"].concat(),
+        ),
+        (
+            "unknown-status",
+            [good[0], good[1], "<status>unclear</status>"].concat(),
+        ),
+        (
+            "wrong-task",
+            ["<task-id>other</task-id>", good[1], good[2]].concat(),
+        ),
+        (
+            "wrong-tool",
+            [good[0], "<tool-use-id>other</tool-use-id>", good[2]].concat(),
+        ),
+        ("unknown-process", String::new()),
+        ("unresolved-spawn", good.concat()),
+        ("before-spawn", good.concat()),
+        ("untrusted-notice", good.concat()),
+    ];
+    for (case, fields) in cases {
+        // Make native identities unique across sources in the same query.
+        let id = format!("worker-{case}");
+        let spawn = format!("spawn-{case}");
+        let fields = fields
+            .replace("worker</task-id>", &format!("{id}</task-id>"))
+            .replace("spawn</tool-use-id>", &format!("{spawn}</tool-use-id>"));
+        let mut top = vec![human(case, ts(1, 0), "Delegate")];
+        if case == "before-spawn" {
+            top.push(completion_notice(case, 1, &fields));
+        }
+        if case != "unresolved-spawn" {
+            top.push(assistant(
+                case,
+                ts(1, 2),
+                vec![tool(&spawn, "Agent", json!({"prompt": "Work"}))],
+            ));
+        }
+        if !fields.is_empty() && case != "before-spawn" {
+            let mut notice = completion_notice(case, 4, &fields);
+            if case == "untrusted-notice" {
+                notice.as_object_mut().unwrap().remove("origin");
+            }
+            top.push(notice);
+        }
+        home.top(case, &top);
+        home.agent(case, &id, &spawn, &[user(case, ts(1, 3), "Work")]);
+    }
+    home.pid_file(42, "unknown-process", "busy", 123);
+    home.write("proc/42/stat", "unreadable start time");
+    home.agent("missing-root", "outer", "missing-spawn", &[
+        user("missing-root", ts(1, 0), "Outer task"),
+        assistant("missing-root", ts(1, 1), vec![tool("nested-spawn", "Agent", json!({"prompt":"Inner task"}))]),
+        completion_notice("missing-root", 4, "<task-id>inner</task-id><tool-use-id>nested-spawn</tool-use-id><status>completed</status>"),
+    ]);
+    home.agent(
+        "missing-root",
+        "inner",
+        "nested-spawn",
+        &[user("missing-root", ts(1, 2), "Inner task")],
+    );
+
+    let mut query = home.query();
+    let listed = call(&mut query, "list_sessions", json!({"harness":"claude"}));
+    let stalls = call(&mut query, "stalls", json!({"idle_minutes":60}));
+    for row in listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["kind"] == "subagent")
+    {
+        let id = &row["id"];
+        let stall = stalls["stalls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == *id);
+        if id == "worker-valid" {
+            assert_eq!(row["state"], "ended", "{row}");
+            assert!(stall.is_none(), "{row}");
+        } else {
+            assert_eq!(
+                stall.unwrap_or_else(|| panic!("missing stall for {row}"))["stall_reason"],
+                "no-output"
+            );
+        }
+    }
+    assert_eq!(
+        listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == "subagent")
+            .count(),
+        23
+    );
+}
+
+#[test]
+fn stalls_keep_an_open_claude_resume_when_the_original_spawn_completes_late() {
+    let home = Home::new("testbox");
+    let initial =
+        "<task-id>worker</task-id><tool-use-id>spawn</tool-use-id><status>completed</status>";
+    let resumed =
+        "<task-id>worker</task-id><tool-use-id>resume</tool-use-id><status>completed</status>";
+    let mut records = vec![
+        human("parent", ts(1, 0), "Delegate"),
+        assistant(
+            "parent",
+            ts(1, 1),
+            vec![tool("spawn", "Agent", json!({"prompt":"Work"}))],
+        ),
+        assistant(
+            "parent",
+            ts(1, 4),
+            vec![tool(
+                "resume",
+                "SendMessage",
+                json!({"to":"worker","message":"Continue"}),
+            )],
+        ),
+        json!({"type":"user","sessionId":"parent","timestamp":ts(1, 5),
+            "toolUseResult":{"success":true,"resumedAgentId":"worker"},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"resume","content":"Resumed"}]}}),
+        completion_notice("parent", 7, initial),
+    ];
+    home.top("parent", &records);
+    home.agent(
+        "parent",
+        "worker",
+        "spawn",
+        &[
+            user("parent", ts(1, 2), "Work"),
+            json!({"type":"user","sessionId":"parent","timestamp":ts(1, 6),
+            "origin":{"kind":"coordinator"},"message":{"role":"user","content":"Continue"}}),
+        ],
+    );
+    let mut query = home.query();
+    let stalls = |query: &mut Query| call(query, "stalls", json!({"idle_minutes":60}));
+    let open = stalls(&mut query);
+    assert!(
+        open["stalls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "worker" && row["stall_reason"] == "no-output"),
+        "{open}"
+    );
+    records.push(completion_notice("parent", 8, resumed));
+    home.top("parent", &records);
+    let closed = stalls(&mut query);
+    assert!(
+        !closed["stalls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "worker"),
+        "{closed}"
+    );
+    assert_eq!(
+        call(&mut query, "get_session", json!({"id":"worker"}))["session"]["state"],
+        "ended"
+    );
+}
+
 #[test]
 fn stalls_require_process_evidence_for_the_current_claude_session() {
     let home = Home::new("testbox");

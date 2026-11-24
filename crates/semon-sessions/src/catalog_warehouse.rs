@@ -539,19 +539,6 @@ struct ChildRuntime {
     qualified: bool,
 }
 
-#[derive(Default)]
-struct ChildRun {
-    final_receipt: bool,
-    handback: bool,
-    notification: Option<bool>,
-}
-
-impl ChildRun {
-    fn ended(&self) -> bool {
-        self.final_receipt || self.handback || self.notification.is_some()
-    }
-}
-
 struct Usage {
     shared: bool,
     tokens: [i64; 6],
@@ -781,6 +768,9 @@ impl<'a> Snapshot<'a> {
              LEFT JOIN warehouse_current c ON c.source=m.source WHERE root.source=?1",
             )
             .map_err(index)?;
+        let mut root_lineage = self.transaction.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM dim_session WHERE source=?1 AND harness='claude' AND lineage)",
+        ).map_err(index)?;
         let mut children = Vec::new();
         for &child in owners {
             let Some(native_id) = native
@@ -798,7 +788,9 @@ impl<'a> Snapshot<'a> {
             let Some(&root) = roots.first().filter(|_| roots.len() == 1) else {
                 continue;
             };
-            let mut qualified = true;
+            let mut qualified = root_lineage
+                .query_row([root], |row| row.get::<_, bool>(0))
+                .map_err(index)?;
             for ancestor in ancestors {
                 let mut member_paths = member_paths.query([ancestor]).map_err(index)?;
                 while let Some(row) = member_paths.next().map_err(index)? {
@@ -836,7 +828,6 @@ impl<'a> Snapshot<'a> {
             .map_err(index)?;
         let mut status = BTreeMap::new();
         let mut unqualified = BTreeSet::new();
-        let mut alive = BTreeSet::new();
         let mut pids = BTreeMap::new();
         while let Some(row) = members.next().map_err(index)? {
             let owner: i64 = row.get(0).map_err(index)?;
@@ -857,9 +848,6 @@ impl<'a> Snapshot<'a> {
                 continue;
             }
             let process = observed.warehouse_process(&harness, &native_id);
-            if process.is_some() {
-                alive.insert(owner);
-            }
             if harness == "claude" && lineage {
                 status.entry(owner).or_insert("done");
                 if let Some((pid, state)) = process
@@ -908,13 +896,10 @@ impl<'a> Snapshot<'a> {
                 && !unqualified.contains(&child.root)
                 && !unqualified.contains(&child.child)
             {
-                let root_alive = alive.contains(&child.root);
                 let state = if selected {
-                    child_runtime_state(&mut evidence, &child, root_alive)?
-                } else if root_alive {
-                    "work"
+                    child_runtime_state(&mut evidence, &child)?
                 } else {
-                    "done"
+                    "work"
                 };
                 status.insert(child.child, state);
             }
@@ -1507,9 +1492,9 @@ fn read_row(
 fn child_runtime_state(
     evidence: &mut rusqlite::Statement<'_>,
     child: &ChildRuntime,
-    running: bool,
 ) -> Result<&'static str, ReadError> {
-    use crate::events::{AGM_DOWN, AGM_FINAL, ASYNC};
+    use crate::events::{AGM_DOWN, AGM_FINAL, ASYNC, RESUMED};
+    use crate::model::ClaudeRunStep as Step;
     let mut events = evidence
         .query(params![
             child.child,
@@ -1519,51 +1504,57 @@ fn child_runtime_state(
             AGM_FINAL,
             AGM_DOWN,
             ASYNC,
+            RESUMED
         ])
         .map_err(index)?;
-    let mut prior = ChildRun::default();
-    let mut run = ChildRun::default();
-    let mut resumed = false;
+    let mut steps = Vec::new();
+    let mut failed = BTreeMap::new();
     let mut synchronous = None;
     while let Some(row) = events.next().map_err(index)? {
         let kind: i64 = row.get(0).map_err(index)?;
-        let failed: bool = row.get(1).map_err(index)?;
-        match kind {
-            0 if resumed && !run.ended() && prior.handback && !prior.final_receipt => {
-                prior.final_receipt = true;
-            }
-            0 => run.final_receipt = true,
-            1 => run.handback = true,
-            2 if resumed
-                && !failed
-                && !run.ended()
-                && (prior.handback || prior.final_receipt)
-                && prior.notification.is_none() =>
-            {
-                prior.notification = Some(false)
-            }
+        let failure: bool = row.get(1).map_err(index)?;
+        let run = row.get(2).map_err(index)?;
+        let time = row.get(3).map_err(index)?;
+        let at = (
+            row.get::<_, i64>(4).map_err(index)?,
+            row.get::<_, i64>(5).map_err(index)?,
+            row.get::<_, i64>(6).map_err(index)?,
+            row.get::<_, i64>(7).map_err(index)?,
+        );
+        let step = match kind {
+            0 => Step::Final,
+            1 => Step::Handback,
             2 => {
-                run.notification.get_or_insert(failed);
+                failed.insert(at, failure);
+                Step::Notification {
+                    run,
+                    failed: failure,
+                }
             }
-            3 if run.ended() => {
-                prior = std::mem::take(&mut run);
-                resumed = true;
+            3 => Step::Start { coordinator: false },
+            4 => {
+                synchronous = Some(failure);
+                continue;
             }
-            3 => {}
-            4 => synchronous = Some(failed),
+            5 => Step::Resume { run },
             _ => return Err(index("Unknown warehouse child runtime event")),
-        }
+        };
+        steps.push((time, step, at));
     }
-    let working = if running { "work" } else { "done" };
-    let finished = if run.ended() {
-        Some(run.notification.unwrap_or(false))
+    let runs = crate::model::group_claude_runs(steps, |_| ());
+    let run = runs.last().expect("initial Claude run");
+    Ok(if run.ended() {
+        if run.tn.is_some_and(|at| failed[&at]) {
+            "err"
+        } else {
+            "done"
+        }
+    } else if runs.len() == 1
+        && let Some(failure) = synchronous
+    {
+        if failure { "err" } else { "done" }
     } else {
-        synchronous
-    };
-    Ok(match (resumed && !run.ended(), finished) {
-        (true, _) | (_, None) => working,
-        (_, Some(true)) => "err",
-        (_, Some(false)) => "done",
+        "work"
     })
 }
 

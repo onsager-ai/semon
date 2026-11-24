@@ -2404,21 +2404,32 @@ fn warehouse_trace_uses_the_latest_completed_claude_run() {
         json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
         "message":{"role":"assistant","content":[{"type":"tool_use","id":"handback","name":"SubagentHandback","input":{"message":"First return"}}]}}),
     );
-    append_native(&child, prompt("root", 4, "Resume"));
-    for (at, status, summary) in [
-        (5, "completed", "Late first notification"),
-        (6, "failed", "Second run failed"),
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:04Z",
+            "message":{"role":"assistant","content":[{"type":"tool_use","id":"resume","name":"SendMessage","input":{"to":"worker","message":"Resume"}}]}}),
+    );
+    append_native(
+        &root,
+        json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:05Z",
+            "toolUseResult":{"success":true,"resumedAgentId":"worker"},"message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"resume","content":"Resumed"}]}}),
+    );
+    append_native(
+        &child,
+        json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:06Z",
+            "origin":{"kind":"coordinator"},"message":{"role":"user","content":"Resume"}}),
+    );
+    for (at, invocation, status, summary) in [
+        (7, "agent", "completed", "Late first notification"),
+        (8, "resume", "failed", "Second run failed"),
     ] {
-        append_native(
-            &root,
-            prompt(
-                "root",
-                at,
-                &format!(
-                    "<task-notification><tool-use-id>agent</tool-use-id><status>{status}</status><summary>{summary}</summary></task-notification>"
-                ),
-            ),
+        let content = format!(
+            "<task-notification><task-id>worker</task-id><tool-use-id>{invocation}</tool-use-id><status>{status}</status><summary>{summary}</summary></task-notification>"
         );
+        let mut record = prompt("root", at, &content);
+        record["origin"] = json!({"kind":"task-notification"});
+        append_native(&root, record);
     }
     crate::model::observe_catalog(
         &fixture.options,

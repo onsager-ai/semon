@@ -250,7 +250,7 @@ pub(super) fn down_target(record: &Value, block: usize) -> Option<String> {
     (pinned || text.contains("queued for delivery to")).then(String::new)
 }
 
-pub(crate) fn notification_result(record: &Value, id: &str) -> Option<String> {
+pub(crate) fn notification_result(record: &Value, id: &str, task: Option<&str>) -> Option<String> {
     let text = record
         .get("attachment")
         .and_then(|attachment| attachment.get("prompt"))
@@ -260,15 +260,7 @@ pub(crate) fn notification_result(record: &Value, id: &str) -> Option<String> {
                 .and_then(|message| message.get("content"))
         })
         .map(content_text)?;
-    events::notifications(&text)
-        .into_iter()
-        .find(|(tool, _, _)| *tool == Some(id))
-        .map(|(_, _, body)| {
-            events::inner(body, "result")
-                .or_else(|| events::inner(body, "summary"))
-                .unwrap_or("")
-                .to_owned()
-        })
+    events::task_notification_result(&text, id, task)
 }
 
 pub(crate) fn tool_result_text(record: &Value, block: usize) -> Option<String> {

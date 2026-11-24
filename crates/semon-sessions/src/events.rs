@@ -102,7 +102,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v39: activity steps retain exact Codex call provenance for transcript anchors.
 /// v41: usage and compaction signals retain physical record ordinals for ASI anchors.
 /// v42: retain the next physical record ordinal for qualified Copilot sources.
-pub(crate) const CACHE_VERSION: u32 = 42;
+/// v43: retain qualified Claude completion task IDs and explicit resumed agent IDs.
+pub(crate) const CACHE_VERSION: u32 = 43;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -4151,6 +4152,8 @@ pub(crate) const ACK: u8 = 32;
 /// A Codex call finished without a structured exit code: its outcome is
 /// unknown, neither success nor failure.
 pub(crate) const UNKNOWN: u8 = 64;
+/// An explicit, successful Claude SendMessage resume.
+pub(crate) const RESUMED: u8 = 128;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Reply {
@@ -4276,6 +4279,12 @@ pub(crate) struct Event {
     /// [`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`] and [`AGM_PROGRESS`].
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
+    /// Native task ID from a qualified Claude completion notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_id: Option<String>,
+    /// A successful SendMessage result's explicit resumedAgentId.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resumed_agent: Option<String>,
     /// A bounded literal code-mode `write_stdin` target. Retained so an
     /// output arriving after the terminal event can still be checked exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4741,24 +4750,93 @@ pub(crate) fn notification_exit(summary: &str) -> Option<i64> {
         .ok()
 }
 
-/// Top-level task-notification blocks: `(tool-use id, status, body)`. A
-/// block quoted inside another relay block isn't one.
-pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str)> {
+#[derive(Default)]
+struct TaskNotice<'a> {
+    task: Option<&'a str>,
+    tool: Option<&'a str>,
+    status: Option<&'a str>,
+}
+
+fn native_task_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn task_notice(mut fields: &str) -> Option<TaskNotice<'_>> {
+    let mut notice = TaskNotice::default();
+    while !fields.trim_start().is_empty() {
+        let (tag, tail) = fields.trim_start().strip_prefix('<')?.split_once('>')?;
+        let (close, slot) = match tag {
+            "task-id" => ("</task-id>", Some(&mut notice.task)),
+            "tool-use-id" => ("</tool-use-id>", Some(&mut notice.tool)),
+            "status" => ("</status>", Some(&mut notice.status)),
+            // Native payload fields can contain quoted tags.
+            "result" => ("</result>", None),
+            "summary" => ("</summary>", None),
+            "output-file" => ("</output-file>", None),
+            "usage" => ("</usage>", None),
+            _ => return None,
+        };
+        let (value, rest) = tail.split_once(close)?;
+        fields = rest;
+        if let Some(slot) = slot {
+            let value = value.trim();
+            if !native_task_token(value) || slot.replace(value).is_some() {
+                return None;
+            }
+        }
+    }
+    notice.tool?;
+    notice.status?;
+    Some(notice)
+}
+
+impl TaskNotice<'_> {
+    fn completion_task(&self) -> Option<&str> {
+        match self.status {
+            Some("completed" | "success" | "done" | "failed" | "killed" | "stopped") => self.task,
+            _ => None,
+        }
+    }
+}
+
+/// Top-level task-notification blocks. Quoted blocks are excluded.
+fn notifications(text: &str) -> Vec<(TaskNotice<'_>, &str)> {
     let spans = relay_spans(text);
     let opens = opening_tags(text, "task-notification");
     let ends = closes(text, "task-notification", &opens);
-    let mut result = Vec::new();
-    for ((at, _, start), close) in opens.iter().zip(ends) {
-        let Some(close) = close else {
-            continue;
-        };
-        if nested(&spans, *at) {
-            continue;
-        }
-        let body = &text[*start..close];
-        result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
-    }
-    result
+    opens
+        .into_iter()
+        .zip(ends)
+        .filter_map(|((at, attrs, start), close)| {
+            let body = &text[start..close?];
+            (!nested(&spans, at)).then(|| {
+                let notice = attrs
+                    .is_empty()
+                    .then(|| task_notice(body))
+                    .flatten()
+                    .unwrap_or_default();
+                (notice, body)
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn task_notification_result(text: &str, id: &str, task: Option<&str>) -> Option<String> {
+    notifications(text)
+        .into_iter()
+        .find(|(notice, _)| {
+            notice.tool == Some(id)
+                && task.is_none_or(|task| notice.completion_task() == Some(task))
+        })
+        .map(|(_, body)| {
+            inner(body, "result")
+                .or_else(|| inner(body, "summary"))
+                .unwrap_or("")
+                .to_owned()
+        })
 }
 
 fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
@@ -4920,7 +4998,11 @@ fn prompt_events(
             );
             found = true;
         }
-        for (id, status, body) in notifications(text) {
+        let delivered =
+            origin.and_then(|origin| field(origin, "kind")) == Some("task-notification");
+        for (notice, body) in notifications(text) {
+            let id = notice.tool;
+            let status = notice.status;
             push(
                 summary,
                 Event {
@@ -4929,6 +5011,10 @@ fn prompt_events(
                     t: time,
                     id: id.map(str::to_owned),
                     n: status.map(str::to_owned),
+                    task_id: notice
+                        .completion_task()
+                        .filter(|_| delivered)
+                        .map(str::to_owned),
                     script: if !matches!(status, Some("killed" | "stopped"))
                         && (status == Some("failed")
                             || inner(body, "summary")
@@ -6747,8 +6833,21 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                 .pending
                                 .get(id)
                                 .and_then(|at| summary.events.get(*at));
-                            let (flags, msg_id) =
+                            let (mut flags, msg_id) =
                                 result_flags(call.and_then(|e| e.n.as_deref()), tool_result);
+                            let resumed_agent = tool_result
+                                .and_then(|value| field(value, "resumedAgentId"))
+                                .filter(|agent| {
+                                    !error
+                                        && flags & (DENIED | SEND_FAILED) == 0
+                                        && native_task_token(agent)
+                                        && call.is_some_and(|call| {
+                                            call.n.as_deref() == Some("SendMessage")
+                                        })
+                                });
+                            if resumed_agent.is_some() {
+                                flags |= RESUMED;
+                            }
                             let reply = Reply {
                                 o: offset,
                                 b: block,
@@ -6785,15 +6884,24 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                     exit_code: None,
                                     target: tool_result
                                         .and_then(|result| {
-                                            result
-                                                .get("pin")
-                                                .and_then(|pin| field(pin, "id"))
+                                            resumed_agent
+                                                .or_else(|| {
+                                                    result
+                                                        .get("pin")
+                                                        .and_then(|pin| field(pin, "id"))
+                                                })
                                                 .or_else(|| field(result, "resumedAgentId"))
                                         })
                                         .map(str::to_owned),
                                     kind: "tool_result",
                                 }
                             });
+                            if let Some(agent) = resumed_agent
+                                && let Some(index) = summary.pending.get(id).copied()
+                                && let Some(call) = summary.event_mut(index)
+                            {
+                                call.resumed_agent = Some(agent.to_owned());
+                            }
                             resolve(summary, id, |_| reply);
                         }
                     }
@@ -7736,9 +7844,9 @@ mod tests {
         let notes = notifications(
             "<task-notification><tool-use-id>t1</tool-use-id><status>completed</status><result>ok</result></task-notification>",
         );
-        assert_eq!(notes[0].0, Some("t1"));
-        assert_eq!(notes[0].1, Some("completed"));
-        assert_eq!(inner(notes[0].2, "result"), Some("ok"));
+        assert_eq!(notes[0].0.tool, Some("t1"));
+        assert_eq!(notes[0].0.status, Some("completed"));
+        assert_eq!(inner(notes[0].1, "result"), Some("ok"));
     }
     #[test]
     fn non_ascii_attributes_never_split_a_character() {
@@ -9155,8 +9263,11 @@ mod tests {
         assert_eq!(index.events[0].id.as_deref(), Some("t1"));
         let found = notifications(text);
         assert_eq!(found.len(), 1);
-        assert_eq!((found[0].0, found[0].1), (Some("t1"), Some("completed")));
-        assert!(found[0].2.ends_with("</agent-message></result>"));
+        assert_eq!(
+            (found[0].0.tool, found[0].0.status),
+            (Some("t1"), Some("completed"))
+        );
+        assert!(found[0].1.ends_with("</agent-message></result>"));
     }
 
     #[test]

@@ -478,9 +478,9 @@ fn peer(sid: &str, time: String, msg_id: &str, name: &str, pid: u64, body: &str)
         "message":{"role":"user","content":format!("<cross-session-message from=\"uds:/run/user/1000/cc-socks/{pid}.sock\" from-name=\"{name}\">{body}</cross-session-message>")}})
 }
 
-fn notification(sid: &str, time: String, id: &str, status: &str, body: &str) -> Value {
+fn notification(sid: &str, time: String, task: &str, id: &str, status: &str, body: &str) -> Value {
     json!({"type":"user","timestamp":time,"sessionId":sid,"origin":{"kind":"task-notification"},
-        "message":{"role":"user","content":format!("<task-notification><task-id>x</task-id><tool-use-id>{id}</tool-use-id><status>{status}</status><result>{body}</result></task-notification>")}})
+        "message":{"role":"user","content":format!("<task-notification><task-id>{task}</task-id><tool-use-id>{id}</tool-use-id><status>{status}</status><result>{body}</result></task-notification>")}})
 }
 
 fn codex_line(time: String, kind: &str, payload: Value) -> Value {
@@ -1265,15 +1265,15 @@ fn parent_with_agents(home: &Home) {
             result("parent", ts(1, 2), "t6", "launched", false, json!({"status":"async_launched"})),
             result("parent", ts(1, 2), "t7", "launched", false, json!({"status":"async_launched"})),
             result("parent", ts(1, 2), "t8", "launched", false, json!({"status":"async_launched"})),
-            notification("parent", ts(1, 10), "t1", "completed", "notified one"),
+            notification("parent", ts(1, 10), "a1", "t1", "completed", "notified one"),
             json!({"type":"user","timestamp":ts(1, 11),"sessionId":"parent",
                 "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/9.sock","handback":true,"senderTaskId":"a2","body":"handed back two"},
                 "message":{"role":"user","content":"<agent-message from=\"a2\">handed back two</agent-message>"}}),
             json!({"type":"user","timestamp":ts(1, 15),"sessionId":"parent",
                 "origin":{"kind":"peer","from":"lead","handback":true,"senderTaskId":"t8","body":"handed back eight"},
                 "message":{"role":"user","content":"x"}}),
-            notification("parent", ts(1, 12), "t5", "failed", "five broke"),
-            notification("parent", ts(1, 13), "t6", "completed", "six by notification"),
+            notification("parent", ts(1, 12), "a5", "t5", "failed", "five broke"),
+            notification("parent", ts(1, 13), "a6", "t6", "completed", "six by notification"),
             json!({"type":"user","timestamp":ts(1, 14),"sessionId":"parent",
                 "origin":{"kind":"peer","from":"a6","handback":true,"senderTaskId":"a6","body":"six by hand-back"},
                 "message":{"role":"user","content":"x"}}),
@@ -1350,9 +1350,9 @@ fn spawn_results_come_from_four_sources_in_order() {
         (six.status, six.result.as_deref(), six.done),
         ("done", Some("six by hand-back"), Some(at(1, 13)))
     );
-    // No result and the parent isn't running: done, with nothing returned.
+    // An unobserved parent process supplies no completion evidence.
     let seven = spawn("a7");
-    assert_eq!((seven.status, seven.result.as_deref()), ("done", None));
+    assert_eq!((seven.status, seven.result.as_deref()), ("work", None));
     assert_eq!(built.sessions["a7"].kind, Some("Subagent"));
     assert_eq!(built.sessions["a7"].name, "task a7");
     // The spawn sits in the parent's turn and starts the child's.
@@ -1505,9 +1505,23 @@ fn background_bash_notifications_keep_their_position_and_spawn_notifications_sta
                 json!({"status":"async_launched","agentId":"child"}),
             ),
             assistant("parent", ts(1, 3), vec![text("Waiting for results")]),
-            notification("parent", ts(1, 4), "bash", "completed", "Fetch finished"),
+            notification(
+                "parent",
+                ts(1, 4),
+                "bash",
+                "bash",
+                "completed",
+                "Fetch finished",
+            ),
             assistant("parent", ts(1, 5), vec![text("Fetch is done")]),
-            notification("parent", ts(1, 6), "agent", "completed", "Review finished"),
+            notification(
+                "parent",
+                ts(1, 6),
+                "child",
+                "agent",
+                "completed",
+                "Review finished",
+            ),
         ],
     );
     home.agent(
@@ -1523,7 +1537,14 @@ fn background_bash_notifications_keep_their_position_and_spawn_notifications_sta
         "other",
         &[
             human("other", ts(1, 0), "Other session"),
-            notification("other", ts(1, 7), "bash", "failed", "Must not attach"),
+            notification(
+                "other",
+                ts(1, 7),
+                "bash",
+                "bash",
+                "failed",
+                "Must not attach",
+            ),
         ],
     );
     // The second build reads the persisted index, including its background flag.
@@ -2641,6 +2662,7 @@ fn states_follow_the_process_the_question_and_the_last_word() {
             notification(
                 "notified-reply",
                 ts(16, 9),
+                "task-check",
                 "task-check",
                 "completed",
                 "task finished",
@@ -7459,7 +7481,14 @@ fn a_progress_send_a_hand_back_and_an_agent_end_are_one_relay_and_one_result() {
         vec![
             agent_send("lead", ts(20, 3), "aw", "halfway there"),
             hand_back("lead", ts(20, 5), "aw", "the final answer"),
-            notification("lead", ts(20, 6), "tw", "completed", "the notified answer"),
+            notification(
+                "lead",
+                ts(20, 6),
+                "aw",
+                "tw",
+                "completed",
+                "the notified answer",
+            ),
         ],
     )
     .build_query();
@@ -7587,6 +7616,7 @@ fn a_parent_message_mid_run_is_inline_in_the_subagents_turn() {
     receipts.push(notification(
         "lead",
         ts(20, 6),
+        "aw",
         "tw",
         "completed",
         "checked",
@@ -7626,7 +7656,7 @@ fn resume_home(second_end: bool) -> Home {
     ];
     let mut receipts = vec![
         hand_back("lead", ts(20, 3), "aw", "first answer"),
-        notification("lead", ts(20, 4), "tw", "completed", "first answer"),
+        notification("lead", ts(20, 4), "aw", "tw", "completed", "first answer"),
     ];
     receipts.extend(send_to_agent(
         "resume",
@@ -7638,7 +7668,14 @@ fn resume_home(second_end: bool) -> Home {
     if second_end {
         child.push(child_says(7, "fixed"));
         receipts.push(hand_back("lead", ts(20, 8), "aw", "fixed"));
-        receipts.push(notification("lead", ts(20, 9), "tw", "completed", "fixed"));
+        receipts.push(notification(
+            "lead",
+            ts(20, 9),
+            "aw",
+            "resume",
+            "completed",
+            "fixed",
+        ));
     }
     let home = background_home(vec![("aw", "tw", child)], receipts);
     home.live(51, "lead", "busy", json!({}));
@@ -7685,7 +7722,7 @@ fn a_subagent_resumed_twice_returns_its_latest_run() {
     ];
     let mut receipts = vec![
         hand_back("lead", ts(20, 3), "aw", "one"),
-        notification("lead", ts(20, 4), "tw", "completed", "notified one"),
+        notification("lead", ts(20, 4), "aw", "tw", "completed", "notified one"),
     ];
     receipts.extend(send_to_agent("r2", 5, "aw", "second task", resumed("aw")));
     receipts.push(hand_back("lead", ts(20, 8), "aw", "two"));
@@ -7693,7 +7730,8 @@ fn a_subagent_resumed_twice_returns_its_latest_run() {
     receipts.push(notification(
         "lead",
         ts(20, 10),
-        "tw",
+        "aw",
+        "r2",
         "completed",
         "notified two",
     ));
@@ -7701,7 +7739,8 @@ fn a_subagent_resumed_twice_returns_its_latest_run() {
     receipts.push(notification(
         "lead",
         ts(20, 13),
-        "tw",
+        "aw",
+        "r3",
         "completed",
         "notified three",
     ));
@@ -7792,6 +7831,7 @@ fn an_agent_end_notification_does_not_interrupt_a_reply() {
             notification(
                 "notified-agent",
                 ts(16, 3),
+                "ag1",
                 "ag",
                 "completed",
                 "agent result",
@@ -8061,7 +8101,8 @@ fn a_killed_resumed_run_does_not_show_as_working() {
     receipts.push(notification(
         "lead",
         ts(20, 8),
-        "tw",
+        "aw",
+        "again",
         "killed",
         "stopped by you",
     ));
@@ -8093,7 +8134,7 @@ fn a_killed_resumed_run_does_not_show_as_working() {
 fn a_run_ended_only_by_the_childs_hand_back_is_the_latest_result() {
     let mut receipts = vec![
         hand_back("lead", ts(20, 3), "aw", "one"),
-        notification("lead", ts(20, 4), "tw", "completed", "one"),
+        notification("lead", ts(20, 4), "aw", "tw", "completed", "one"),
     ];
     receipts.extend(send_to_agent("r2", 5, "aw", "second", resumed("aw")));
     let built = background_home(
@@ -8206,7 +8247,7 @@ fn down_and_nested_home() -> Home {
     ));
     lead.extend([
         hand_back("lead", ts(20, 7), "aw", "aw done"),
-        notification("lead", ts(20, 8), "ta", "completed", "aw done"),
+        notification("lead", ts(20, 8), "aw", "ta", "completed", "aw done"),
         hand_back("lead", ts(20, 12), "mid", "mid done"),
     ]);
     home.top("lead", &lead);
@@ -9532,6 +9573,7 @@ fn generated_steps(seed: u64) -> Vec<EquivalenceStep> {
                                     notification(
                                         &sid,
                                         generated_time(index, 2),
+                                        &call_id,
                                         &call_id,
                                         "completed",
                                         "background done",

@@ -202,7 +202,7 @@ impl Fact {
             flags: event.script,
             time: event.t,
             peer: event.peer.clone(),
-            target: None,
+            target: event.task_id.clone(),
         }
     }
 }

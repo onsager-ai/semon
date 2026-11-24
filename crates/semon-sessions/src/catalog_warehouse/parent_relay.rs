@@ -9,6 +9,7 @@ struct RunObservation<M> {
     block: u32,
     time: Option<i64>,
     step: Step,
+    invocation: Option<String>,
 }
 
 pub(in super::super) struct TraceCompletion {
@@ -48,7 +49,6 @@ pub(super) struct Plan<M> {
     member: M,
     explicit_completion: bool,
     run: Vec<RunObservation<M>>,
-    spawn: Option<String>,
     trace: bool,
 }
 
@@ -140,7 +140,9 @@ impl Plan<Arc<Member>> {
                 explicit_completion = db
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM fact_subagent_event WHERE source=?1 AND pos<?2
-                     AND ((kind='tn' AND id=?3) OR (kind='agm' AND flags & ?4<>0
+                     AND ((kind='tn' AND id=?3 AND target=?5 AND EXISTS(SELECT 1 FROM fact_claude_call c
+                       WHERE c.source=?1 AND c.call_id=?3 AND c.pos<fact_subagent_event.pos
+                         AND c.tool IN ('Agent','Task'))) OR (kind='agm' AND flags & ?4<>0
                        AND (id IN (?3,?5) OR name IN (?3,?5)))))",
                         params![id, end, spawn, AGM_FINAL, native_id],
                         |row| row.get(0),
@@ -178,7 +180,6 @@ impl Plan<Arc<Member>> {
             member,
             explicit_completion,
             run,
-            spawn,
             trace,
         }))
     }
@@ -233,7 +234,9 @@ impl Plan<SessionSourceRef> {
                 explicit_completion = db
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM fact_subagent_event WHERE source=?1 AND pos<?2
-                     AND ((kind='tn' AND id=?3) OR (kind='agm' AND flags & ?4<>0
+                     AND ((kind='tn' AND id=?3 AND target=?5 AND EXISTS(SELECT 1 FROM fact_claude_call c
+                       WHERE c.source=?1 AND c.call_id=?3 AND c.pos<fact_subagent_event.pos
+                         AND c.tool IN ('Agent','Task'))) OR (kind='agm' AND flags & ?4<>0
                        AND (id IN (?3,?5) OR name IN (?3,?5)))))",
                         params![
                             id,
@@ -277,7 +280,6 @@ impl Plan<SessionSourceRef> {
             member: reference,
             explicit_completion,
             run,
-            spawn: spawn.map(str::to_owned),
             trace,
         }))
     }
@@ -439,7 +441,7 @@ impl<M> Plan<M> {
         let failed = run.tn.is_some_and(|(_, _, _, index)| {
             matches!(
                 self.run[index].step,
-                Step::Notification { completed: false }
+                Step::Notification { failed: true, .. }
             )
         });
         // A notification may determine status even when the hand-back is the
@@ -459,11 +461,10 @@ impl<M> Plan<M> {
                     Step::Handback => {
                         crate::model::input_string(&native, row.block as usize, &["message"])
                     }
-                    Step::Notification { .. } => self
-                        .spawn
-                        .as_deref()
-                        .and_then(|id| crate::model::notification_result(&native, id)),
-                    Step::Start { .. } => None,
+                    Step::Notification { .. } => row.invocation.as_deref().and_then(|id| {
+                        crate::model::notification_result(&native, id, Some(&self.child))
+                    }),
+                    Step::Start { .. } | Step::Resume { .. } => None,
                 };
                 preview = text.map(|text| crate::model::cap(&text, crate::model::MSG_MAX));
             }
@@ -474,7 +475,7 @@ impl<M> Plan<M> {
             let start = self
                 .run
                 .iter()
-                .filter(|row| matches!(row.step, Step::Start { .. }))
+                .filter(|row| matches!(row.step, Step::Start { .. } | Step::Resume { .. }))
                 .max_by_key(|row| (row.time.is_none(), row.time, row.address.offset, row.block));
             if let Some(start) = start {
                 read(start.source, &start.member, start.address.offset)?;
@@ -502,41 +503,66 @@ fn collect_run<M: Clone>(
     parent_aliases: Option<(&str, Option<&str>)>,
     run: &mut Vec<RunObservation<M>>,
 ) -> Result<(), ReadError> {
-    use crate::events::{AGM_DOWN, AGM_FINAL};
+    use crate::events::{AGM_DOWN, AGM_FINAL, RESUMED};
     let (child, spawn) = parent_aliases.map_or((None, None), |(child, spawn)| (Some(child), spawn));
-    let mut statement = db
-        .prepare_cached(
-            "WITH events AS (
-          SELECT pos,block,kind,ts,name FROM fact_subagent_event
+    let base = run.len() + 1;
+    let mut statement = db.prepare_cached(
+        "WITH invocations AS MATERIALIZED (
+          SELECT c.call_id,c.pos,c.block,t.ts,r.pos AS result_pos,
+            CASE WHEN c.tool='SendMessage' THEN row_number() OVER(ORDER BY c.pos,c.block) ELSE 0 END AS run
+          FROM fact_claude_call c JOIN fact_tool_call t
+            ON t.source=c.source AND t.pos=c.pos AND t.block=c.block AND t.occurrence=c.occurrence
+          LEFT JOIN fact_tool_result r ON r.source=c.source AND r.call_id=c.call_id
+            AND r.call_pos=c.pos AND r.call_block=c.block AND r.flags & ?7<>0 AND r.target=?3 AND r.pos<?2
+          WHERE c.source=?1 AND c.pos<?2 AND ?4 IS NOT NULL
+            AND ((c.tool IN ('Agent','Task') AND c.call_id=?4) OR (c.tool='SendMessage' AND r.pos IS NOT NULL))
+            AND 1=(SELECT count(*) FROM fact_claude_call d WHERE d.source=?1 AND d.call_id=c.call_id AND d.pos<?2)
+        ), events AS (
+          SELECT pos,block,kind,ts,NULL AS name,0 AS run,NULL AS invocation FROM fact_subagent_event
           WHERE source=?1 AND pos<?2 AND ((?3 IS NULL AND
             ((kind='tool' AND name='SubagentHandback') OR (kind='agm' AND flags & ?5<>0)))
-            OR (?3 IS NOT NULL AND ((kind='tn' AND id=?4) OR
-              (kind='agm' AND flags & ?6<>0 AND (id IN (?3,?4) OR name IN (?3,?4))))))
+            OR (?3 IS NOT NULL AND kind='agm' AND flags & ?6<>0 AND (id IN (?3,?4) OR name IN (?3,?4))))
           UNION ALL
-          SELECT pos,block,'prompt',ts,NULL FROM fact_prompt
+          SELECT e.pos,e.block,'tn',e.ts,e.name,i.run,i.call_id
+          FROM invocations i JOIN fact_subagent_event e ON e.source=?1 AND e.kind='tn'
+            AND e.id=i.call_id AND e.target=?3 AND e.pos>coalesce(i.result_pos,i.pos) AND e.pos<?2
+          UNION ALL
+          SELECT pos,block,'resume',ts,NULL,run,NULL FROM invocations WHERE run<>0
+          UNION ALL
+          SELECT pos,block,'prompt',ts,NULL,0,NULL FROM fact_prompt
           WHERE ?3 IS NULL AND source=?1 AND pos<?2 AND kind='user' AND pos>(
             SELECT min(pos) FROM fact_prompt WHERE source=?1 AND pos<?2 AND kind='user')
-        ) SELECT e.pos,e.block,e.kind,e.ts,e.name,r.occurrence FROM events e
+        ) SELECT e.pos,e.block,e.kind,e.ts,e.name,r.occurrence,e.run,e.invocation FROM events e
           CROSS JOIN fact_record r ON r.source=?1 AND r.pos=e.pos AND r.block=0 AND NOT r.gap
           ORDER BY e.pos,e.block,r.occurrence LIMIT 129",
-        )
-        .map_err(index)?;
+    ).map_err(index)?;
     let mut rows = statement
-        .query(params![source, end, child, spawn, AGM_DOWN, AGM_FINAL])
+        .query(params![
+            source, end, child, spawn, AGM_DOWN, AGM_FINAL, RESUMED
+        ])
         .map_err(index)?;
     while let Some(row) = rows.next().map_err(index)? {
         if run.len() == 128 {
             return Err(ReadError::SourceBudget);
         }
         let kind: String = row.get(2).map_err(index)?;
+        let invocation: usize = row.get(6).map_err(index)?;
+        // Original calls share run zero. Resume keys are scoped to this source's batch.
+        let key = if invocation == 0 {
+            0
+        } else {
+            base + invocation
+        };
         let step = match kind.as_str() {
             "tool" => Step::Handback,
             "tn" => {
-                let status: Option<String> = row.get(4).map_err(index)?;
+                let status: String = row.get(4).map_err(index)?;
                 Step::Notification {
-                    completed: matches!(status.as_deref(), Some("completed" | "success" | "done")),
+                    run: key,
+                    failed: !matches!(status.as_str(), "completed" | "success" | "done"),
                 }
             }
+            "resume" => Step::Resume { run: key },
             "agm" if parent_aliases.is_some() => Step::Final,
             "agm" => Step::Start { coordinator: true },
             "prompt" => Step::Start { coordinator: false },
@@ -546,6 +572,7 @@ fn collect_run<M: Clone>(
             source,
             member: member.clone(),
             step,
+            invocation: row.get(7).map_err(index)?,
             time: row.get(3).map_err(index)?,
             block: row.get(1).map_err(index)?,
             address: Address {

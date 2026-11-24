@@ -1707,7 +1707,7 @@ struct DownMessage {
 /// agent id its result pins or resumes, and its `to` (plain name).
 type Deliveries = HashMap<usize, Vec<(Ref, Option<String>, String)>>;
 
-/// One run of a Claude subagent ([`Builder::claude_runs`]): how it ended.
+/// One run of a Claude subagent and its observed end evidence.
 pub(crate) struct Run<A = Ref> {
     /// Its hand-back as the parent received it (the latest, if several).
     pub(crate) fin: Option<A>,
@@ -1853,6 +1853,22 @@ struct Builder<'a> {
     staged_origins: BTreeMap<String, relation_stage::RelationOrigin>,
     staged_epoch: Option<i64>,
     matching_refs: Option<BTreeSet<Ref>>,
+}
+
+fn follows_call(files: &[SourceFile], call: Ref, notice: Ref, resume: bool) -> bool {
+    let start = event(files, call);
+    let end = event(files, notice);
+    let (offset, time) = if resume {
+        let Some(reply) = &start.r else { return false };
+        (reply.o, reply.t)
+    } else {
+        (start.o, start.t)
+    };
+    if call.0 == notice.0 {
+        offset < end.o
+    } else {
+        time.zip(end.t).is_some_and(|(start, end)| start < end)
+    }
 }
 
 fn event(files: &[SourceFile], at: Ref) -> &Event {
@@ -3152,7 +3168,9 @@ impl<'a> Builder<'a> {
     fn claude_spawns(&mut self) -> io::Result<()> {
         // Terminal task notifications by tool-use id, in log order: a
         // subagent's run ends (its spawning call's id) among them.
-        let mut notifications = HashMap::<String, Vec<Ref>>::new();
+        let mut notifications = HashMap::<(&str, &str), Vec<Ref>>::new();
+        let mut calls = HashMap::<(usize, &str), usize>::new();
+        let mut resumes = HashMap::<(usize, &str), Vec<Ref>>::new();
         // Every up agent message a session received: a subagent's sends to
         // `main` and its hand-backs, received in its parent, and its sends to
         // other agents. Only the parent's count for a spawn.
@@ -3170,13 +3188,23 @@ impl<'a> Builder<'a> {
                     continue;
                 }
                 match (event.k, &event.id) {
-                    (Kind::Tn, Some(id))
-                        if !matches!(event.n.as_deref(), None | Some("running" | "started")) =>
-                    {
-                        notifications
-                            .entry(id.clone())
-                            .or_default()
-                            .push((position, at));
+                    (Kind::Tn, Some(id)) => {
+                        if let Some(task) = event.task_id.as_deref() {
+                            notifications
+                                .entry((id, task))
+                                .or_default()
+                                .push((position, at));
+                        }
+                    }
+                    (Kind::Tool, Some(id)) if file.harness() == "claude" => {
+                        let session = self.of_file[position];
+                        *calls.entry((session, id)).or_default() += 1;
+                        if let Some(agent) = event.resumed_agent.as_deref() {
+                            resumes
+                                .entry((session, agent))
+                                .or_default()
+                                .push((position, at));
+                        }
                     }
                     // A receipt names its sender by `senderTaskId` (the
                     // agent id or the spawning call's id), or by the tag's
@@ -3250,6 +3278,8 @@ impl<'a> Builder<'a> {
         for (child, spawner, _, _) in &spawns {
             self.sessions[*child].parent = *spawner;
             self.sessions[*child].out.parent_source = None;
+            self.sessions[*child].out.state = "work";
+            self.sessions[*child].busy = true;
             if spawner.is_none() {
                 self.sessions[*child].out.lane = true;
             }
@@ -3301,6 +3331,7 @@ impl<'a> Builder<'a> {
                 .and_then(|at| event(self.files, at).t)
                 .unwrap_or(self.sessions[child].out.start);
             let key = self.sessions[child].key.clone();
+            let native_id = self.files[self.sessions[child].files[0]].id.as_str();
             // Both forms of receipt, by either id, in time order (a receipt
             // with no time last). Only what the spawner received is the
             // child's: its message to any other session is a relay between
@@ -3323,15 +3354,46 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .partition(|at| event(self.files, *at).script & AGM_FINAL != 0);
             let paired = self.pair_sends(child, &key, &received);
-            let ends: Vec<Ref> = tool_use_id
-                .as_deref()
-                .and_then(|id| notifications.get(id))
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|at| self.of_file[at.0] == spawner)
-                .collect();
-            let (runs, inline) = self.claude_runs(&child_events, first_prompt, &finals, &ends);
+            let resume_calls = resumes
+                .get(&(spawner, native_id))
+                .map_or(&[][..], Vec::as_slice);
+            let mut ends = Vec::new();
+            let root = self.root(spawner);
+            if let Some(original) = call
+                && matches!(
+                    event(self.files, original).n.as_deref(),
+                    Some("Agent" | "Task")
+                )
+                && self.sessions[root].kind == SessKind::Lineage
+                && self.sessions[root].parent.is_none()
+            {
+                for (run, call) in std::iter::once(original)
+                    .chain(resume_calls.iter().copied())
+                    .enumerate()
+                {
+                    let Some(id) = event(self.files, call).id.as_deref() else {
+                        continue;
+                    };
+                    if calls.get(&(spawner, id)) != Some(&1) {
+                        continue;
+                    }
+                    for &at in notifications.get(&(id, native_id)).into_iter().flatten() {
+                        if self.of_file[at.0] == spawner
+                            && follows_call(self.files, call, at, run != 0)
+                        {
+                            ends.push((at, run));
+                        }
+                    }
+                }
+            }
+            let (runs, inline) = relay_match::claude_runs(
+                self.files,
+                &child_events,
+                first_prompt,
+                &finals,
+                &ends,
+                resume_calls,
+            );
             let mut result = None;
             // The latest run that ended: its hand-back receipt's text, else
             // its notification's, else the child's `SubagentHandback`. The
@@ -3357,9 +3419,9 @@ impl<'a> Builder<'a> {
                     result = Some((text, done, failed));
                     previews.insert("result", self.receipt_preview(&key, &finals, index));
                 } else if let Some(found) = run.tn {
-                    let id = tool_use_id.clone().unwrap_or_default();
-                    let text = self.text(found, &format!("tn:{id}"), |record, _| {
-                        notification_result(record, &id)
+                    let id = event(self.files, found).id.clone().unwrap_or_default();
+                    let text = self.text(found, &format!("tn:{id}:{key}"), |record, _| {
+                        notification_result(record, &id, Some(native_id))
                     });
                     result = Some((text, done, failed));
                     let mut preview = PreviewRef::new(found, "notification");
@@ -3391,6 +3453,7 @@ impl<'a> Builder<'a> {
             }
             if result.is_none()
                 && let Some(at) = call
+                && matches!(event(self.files, at).n.as_deref(), Some("Agent" | "Task"))
                 && let Some(reply) = event(self.files, at).r.clone()
                 && reply.f & ASYNC == 0
             {
@@ -3412,21 +3475,18 @@ impl<'a> Builder<'a> {
                 result = Some((text, event(self.files, at).t, false));
                 previews.insert("result", PreviewRef::new(at, "handback"));
             }
-            let running = self.graph_root_alive(spawner);
-            // A resumed run not ended yet works while its tree runs; the
-            // spawn's result stays the previous run's.
+            // An open run stays eligible for stalls regardless of process
+            // observations. The last completed run's result remains visible.
             let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
-            let (status, state) = match &result {
-                _ if resumed && running => ("work", "work"),
-                _ if resumed => ("done", "done"),
-                Some((_, _, true)) => ("err", "err"),
-                Some(_) => ("done", "done"),
-                None if running => ("work", "work"),
-                None => ("done", "done"),
+            let state = match &result {
+                _ if resumed => "work",
+                Some((_, _, true)) => "err",
+                Some(_) => "done",
+                None => "work",
             };
             self.sessions[child].out.state = state;
             self.sessions[child].busy = state == "work";
-            self.sessions[child].alive = state == "work";
+            self.sessions[child].alive = state == "work" && self.graph_root_alive(spawner);
             let handoff = Handoff {
                 done: result.as_ref().and_then(|result| result.1),
                 result: result.map(|(text, _, _)| cap(text.as_deref().unwrap_or(""), MSG_MAX)),
@@ -3435,7 +3495,7 @@ impl<'a> Builder<'a> {
                     "spawn",
                     (self.sessions[spawner].key.clone(), key),
                     at,
-                    status,
+                    state,
                     brief.as_deref().unwrap_or("(brief not in these logs)"),
                 )
             };
@@ -3458,34 +3518,6 @@ impl<'a> Builder<'a> {
             );
         }
         Ok(())
-    }
-
-    /// A Claude subagent's runs, in order: the brief's, then one per message
-    /// that reached it after the run before had ended (a resume). A run ends
-    /// at its hand-back (the parent's final receipt, or the child's
-    /// `SubagentHandback`) or at its agent-end notification, whichever comes
-    /// first; the other then belongs to the same run. Also returns the
-    /// parent's messages (`AGM_DOWN`) that reached an open run: inline in
-    /// its turn, not a resume.
-    ///
-    /// The parent writes a run's notification seconds after its hand-back,
-    /// and its hand-back receipt at its next turn, so a resume sent in
-    /// between already opened the next run. Such a completed notification
-    /// belongs to the run before when that one handed back without one, and
-    /// such a receipt when the child handed that run back
-    /// (`SubagentHandback`) and it has no receipt. A failed or killed
-    /// notification ends the open run. One misattribution remains: if run k
-    /// hands back, the child resumes, then a late failed or killed notification
-    /// arrives, it ends run k+1 as `err`; run k+1's own completed notification
-    /// is then ignored.
-    fn claude_runs(
-        &self,
-        child_events: &[Ref],
-        first_prompt: Option<Ref>,
-        finals: &[Ref],
-        ends: &[Ref],
-    ) -> (Vec<Run>, BTreeSet<Ref>) {
-        relay_match::claude_runs(self.files, child_events, first_prompt, finals, ends)
     }
 
     /// Pairs each message `child`'s parent sent it while it ran or to resume
@@ -5182,6 +5214,9 @@ impl<'a> Builder<'a> {
                         value["block"] = serde_json::json!(reply.b);
                     }
                     value["arg"] = serde_json::json!(preview.arg);
+                    if preview.kind == "notification" {
+                        value["task"] = serde_json::json!(event(self.files, preview.at).task_id);
+                    }
                     value["skip"] = serde_json::json!(preview.skip);
                     fields[*field] = decorate(value);
                 }
@@ -6571,8 +6606,12 @@ pub(crate) fn overview_text(recipe: &Value, record: &Value, question: Option<&Va
             serde_json::json!(prompt_text(record).map(|text| cap(&text, MSG_MAX)))
         }
         Some("notification") => serde_json::json!(
-            notification_result(record, recipe["arg"].as_str().unwrap_or(""))
-                .map(|text| cap(&text, MSG_MAX))
+            notification_result(
+                record,
+                recipe["arg"].as_str().unwrap_or(""),
+                recipe["task"].as_str()
+            )
+            .map(|text| cap(&text, MSG_MAX))
         ),
         Some("received_agent") => serde_json::json!(
             received_body(
