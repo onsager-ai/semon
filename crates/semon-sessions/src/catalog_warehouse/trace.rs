@@ -46,8 +46,7 @@ pub(super) fn read(
                     )
                     .map(Some)
                 },
-            )?;
-            exact
+            )?
         } else {
             selected::trace_turn(
                 &view,

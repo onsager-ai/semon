@@ -443,14 +443,3 @@ fn member_at(
         },
     })))
 }
-
-impl std::fmt::Debug for TraceCompletion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TraceCompletion")
-            .field("address", &self.address)
-            .field("block", &self.block)
-            .field("at", &self.at)
-            .field("failed", &self.failed)
-            .finish_non_exhaustive()
-    }
-}
