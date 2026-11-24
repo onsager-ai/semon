@@ -13,7 +13,7 @@
 //  - zero overflow screens (T.overflowScreens === 0): nothing pokes past the 390px screen on any lane or trace.
 //  - every "Show more" on a handoff card fully un-clips its text (moreStillClipped === 0) and never navigates the
 //    page away (navigatedByMore === 0) — it is a text reveal, not a link.
-//  - a spawn card's brief, opened with "Show more" at 390 px, grows to its full text: its box is as tall as the text (clientHeight >= scrollHeight - 1),
+//  - a recorded question's brief, opened with "Show more" at 390 px, grows to its full text: its box is as tall as the text (clientHeight >= scrollHeight - 1),
 //    and the "Show less" button and the "Open" button sit below it, not under the spilled text; "Show less" clamps it again.
 //  - every "more" opened on a trace hop fully un-clips its text (hopMoreStillClipped === 0).
 //  - the walk actually visited screens and at least one trace (T.screens > 0, T.traces > 0), so a broken lane list
@@ -154,59 +154,54 @@ export default async function full(browser) {
     await page.screenshot({ path: path.join(ENV.out, 'full-relay.png') });
   }
 
-  // A compact linked row discloses its complete brief in place; long content stays
-  // within the expanded region and the following transcript stays below it.
+  // A recorded ask discloses its complete brief in place. Sender-only
+  // relationship cards expose no cross-session preview to expand.
   {
-    let probe = null;
-    for (const id of lanes) {
-      await openLane(id);
-      if (await page.locator('.cc-toggle').count())
-        await page.locator('.cc-toggle').first().click();
-      probe = await page.evaluate(() => {
-        const c = document.querySelector('.child-card');
-        if (!c) return null;
-        const br = c.querySelector('.cc-brief');
-        br.replaceChildren(
-          document.createTextNode(
-            Array.from(
-              { length: 14 },
-              (_, i) =>
-                'Paragraph ' +
-                i +
-                ' of a long brief. ' +
-                'It wraps over several lines on a phone. '.repeat(3),
-            ).join(' '),
-          ),
-        );
-        const b = br.getBoundingClientRect(),
-          card = c.getBoundingClientRect(),
-          next = c.nextElementSibling?.getBoundingClientRect();
-        const line = parseFloat(getComputedStyle(br).lineHeight);
-        return {
-          clamp: getComputedStyle(br).webkitLineClamp,
-          client: br.clientHeight,
-          scroll: br.scrollHeight,
-          line,
-          cardInside: b.bottom <= card.bottom + 1,
-          nextBelow: !next || next.top >= card.bottom - 1,
-          sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        };
-      });
-      if (probe) break;
-    }
-    r.results.spawnBrief = probe;
-    r.expect(!!probe, 'the fixture needs a spawn card on some session');
-    if (probe) {
-      r.expect(
-        probe.clamp === 'none' && probe.client >= probe.scroll - 1 && probe.client > probe.line * 2,
-        'the expanded linked brief retains its complete text: ' + JSON.stringify(probe),
-      );
-      r.expect(
-        probe.cardInside && probe.nextBelow && probe.sideways <= 0,
-        'a long brief stays inside its disclosure, with what follows below it: ' +
-          JSON.stringify(probe),
-      );
-    }
+    const ask = D.H.find((event) => event.kind === 'ask' && D.SESS[event.to]);
+    if (!ask) throw new Error('The fixture needs a recorded question');
+    await openLane(ask.to);
+    const card = page.locator(`.event[data-h="${ask.id}"]`);
+    await card.waitFor();
+    await card.evaluate((node) => {
+      const brief = node.querySelector('.ev-text');
+      brief.textContent = Array.from(
+        { length: 14 },
+        (_, index) =>
+          'Paragraph ' + (index + 1) + ' of a long brief. It wraps over several lines on a phone.',
+      ).join(' ');
+      brief.classList.add('clipped');
+      node.querySelector('.ev-more').hidden = false;
+    });
+    await card.locator('.ev-more').click();
+    const probe = await card.evaluate((node) => {
+      const brief = node.querySelector('.ev-text');
+      const box = brief.getBoundingClientRect();
+      const end = node.getBoundingClientRect().bottom;
+      const next = node.nextElementSibling?.getBoundingClientRect();
+      return {
+        open: brief.classList.contains('open'),
+        clamp: getComputedStyle(brief).webkitLineClamp,
+        client: brief.clientHeight,
+        scroll: brief.scrollHeight,
+        line: Number.parseFloat(getComputedStyle(brief).lineHeight),
+        cardInside: box.bottom <= end + 1,
+        nextBelow: !next || next.top >= end - 1,
+        sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    });
+    r.results.askBrief = probe;
+    r.expect(
+      probe.open &&
+        probe.clamp === 'none' &&
+        probe.client >= probe.scroll - 1 &&
+        probe.client > probe.line * 2,
+      'the expanded recorded brief retains its complete text: ' + JSON.stringify(probe),
+    );
+    r.expect(
+      probe.cardInside && probe.nextBelow && probe.sideways <= 0,
+      'a long brief stays inside its disclosure, with what follows below it: ' +
+        JSON.stringify(probe),
+    );
   }
 
   r.results.tally = T;

@@ -8,24 +8,27 @@ export async function selectedFixture(page, sid, change, { publication } = {}) {
   const progress = () => publication && digest([sid, publication().revision]);
   await page.route('**/api/sessions?**', async (route) => {
     const args = new URL(route.request().url()).searchParams;
-    if (!observation || args.get('machine') !== observation.source) return route.continue();
-    const response = await route.fetch();
-    if (response.status() !== 200) return route.fulfill({ response });
-    const data = await response.json();
-    data.items = data.items.map((item) =>
-      item.key === sid
-        ? {
-            ...item,
-            ...(args.get('sid') === sid && { details: observation.session.details }),
-            transcript: {
-              generation: progress() ?? observation.generation,
-              errors_generation: observation.errorsGeneration,
-              total: publication?.().total ?? observation.rows.length,
-            },
-          }
-        : item,
-    );
-    await route.fulfill({ response, json: data });
+    if (
+      !observation ||
+      args.get('machine') !== observation.source ||
+      args.get('sid') !== sid ||
+      args.get('observe') !== 'transcript'
+    )
+      return route.continue();
+    const published = publication?.();
+    await route.fulfill({
+      json: {
+        api: 1,
+        machine: observation.source,
+        catalog_key: sid,
+        read_scope: args.get('scope'),
+        transcript: {
+          generation: progress() ?? observation.generation,
+          errors_generation: observation.errorsGeneration,
+          total: published?.total ?? observation.rows.length,
+        },
+      },
+    });
   });
   await page.route('**/api/session-annotations?**', async (route) => {
     const args = new URL(route.request().url()).searchParams;
@@ -70,6 +73,7 @@ export async function selectedFixture(page, sid, change, { publication } = {}) {
     const data = await response.json();
     const addresses = new Map(data.entries.map((row) => [row.entry_id, row.address]));
     await change(data);
+    data.identity.generation = progress() ?? data.identity.generation;
     const rows = data.entries.map((row, index) => {
       const entry_id = digest([sid, index, row.entry_id]);
       const address = { ...(row.address ?? addresses.get(row.entry_id)), entry_id };

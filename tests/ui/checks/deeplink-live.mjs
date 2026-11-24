@@ -61,7 +61,7 @@ export default async function deepLinkLive(browser) {
         unavailable.hash = 'unrecorded-native-turn';
         await page.goto(unavailable.href);
         await page
-          .getByText('This recorded turn is unavailable in the retained history.', { exact: true })
+          .getByText('This saved transcript position is unavailable.', { exact: true })
           .waitFor();
         assert.equal(await overflow(page), 0);
         assert.deepEqual(retired, []);

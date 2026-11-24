@@ -377,12 +377,12 @@ export async function goto(page, route, D) {
       );
     }
   }
-  if (route.v === 'session')
-    await page.waitForFunction(
-      () =>
-        !!document.querySelector("#page section[aria-label='Transcript']") &&
-        !!document.querySelector('#page [data-entry-key]'),
-    );
+  if (route.v === 'session') {
+    const transcript = page.locator("#page section[aria-label='Transcript']");
+    if (D.TX?.[sid]?.length === 0)
+      await transcript.getByText('No native records in this range.', { exact: true }).waitFor();
+    else await transcript.locator('[data-entry-key]').first().waitFor({ state: 'attached' });
+  }
   // Analytics draws whole once the server's answer for its range is in (/api/analytics).
   if (route.v === 'analytics')
     await page.waitForFunction(() =>

@@ -93,7 +93,7 @@ const singleSourceInventory = {
 const list = (items) => ({
   api: 1,
   machine: 'source',
-  read_scope: 'retained_history',
+  read_scope: 'current',
   machine_info: { key: 'source', label: 'Fixture source', freshness: 'cached' },
   generation: 'a'.repeat(64),
   observed_at: null,
@@ -1572,7 +1572,7 @@ function transcript(key, p, total = 65, generation = 'b') {
     end = Math.min(first + limit, total);
   return {
     api: 1,
-    identity: { ...identity(key), read_scope: 'retained_history' },
+    identity: { ...identity(key), read_scope: p.get('scope') ?? 'current' },
     session: meta(key),
     projection: {
       version: 6,
@@ -1679,7 +1679,7 @@ for (const width of [390, 1280])
               value.identity = {
                 ...nativeIdentity,
                 source_key: machine,
-                read_scope: 'retained_history',
+                read_scope: url.searchParams.get('scope') ?? 'current',
               };
               value.entries[0].provenance.source = nativeSource;
               return route.fulfill({ json: value });
@@ -2613,7 +2613,7 @@ test('partial catalog discovery completes while retaining uncommitted search foc
           json: {
             api: 1,
             machine: 'source',
-            read_scope: 'retained_history',
+            read_scope: 'current',
             machine_info: { key: 'source', label: 'Source', freshness: 'cached' },
             generation: 'a'.repeat(64),
             observed_at: null,

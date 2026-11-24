@@ -55,7 +55,10 @@ function align(a, b) {
 export function gaps({ model, tx }) {
   const S = sample(),
     out = [];
-  const say = (x) => out.push(x);
+  // The fixture's absolute working directory changes between runners. Preserve
+  // the full recorded path relative to the synthetic root in the oracle.
+  const root = process.env.SEMON_FIXTURE_ROOT;
+  const say = (x) => out.push(root ? x.replaceAll(root + '/', '<fixture>/') : x);
   // The sample's API_PRICE is only for its static illustration. The served viewer now reads exact per-session `cost`;
   // pricing and token rates are no longer compared as frontend inputs.
   // Machines.

@@ -1358,82 +1358,29 @@ export default async function (browser) {
     }
   }
 
-  // ---- Result handoff: the transcript keeps the reply once and shows a compact marker ----------------------------
+  // The closing reply is independently rendered from its recorded address.
+  // A native reply alone does not certify a separate sender action.
   {
     const page = await served(browser, { extras: true, path: '/session/local/result-card' });
-    await page.waitForFunction(() => !!document.querySelector('.turns .event'));
-    // Wait for the result event itself. Its preview can repeat the independently
-    // rendered closing reply; the assertions below qualify the event's count.
-    await page
-      .locator('.turns .event')
-      .getByText('Unique result text for the transcript check.', { exact: true })
-      .waitFor();
-    // The overhaul draws a result as an event like any other message to you: who sent it, the text, and the time.
-    const result = await page.locator('.turns').evaluate((turns) => {
-      // Read retained content through the existing geometry adapter. An auto
-      // content-visibility subtree can skip innerText until its next paint.
-      const measured = [...turns.querySelectorAll('.turn')].filter(
-        (turn) => !turn.classList.contains('semon-measuring-turn'),
-      );
-      measured.forEach((turn) => turn.classList.add('semon-measuring-turn'));
-      try {
-        const phrase = 'Unique result text for the transcript check.';
-        const events = [...turns.querySelectorAll('.event')].filter((x) =>
-          x.querySelector('.ev-text')?.textContent.includes(phrase),
-        );
-        return {
-          phraseCount: turns.innerText.split(phrase).length - 1,
-          closingReplies: [...turns.querySelectorAll('.msg.assistant')].filter(
-            (message) => message.textContent.trim() === phrase && !message.hidden,
-          ).length,
-          events: events.length,
-          eventText: events[0]?.innerText ?? '',
-          hasVerb: /sent you a result/.test(
-            events[0]?.querySelector('.ev-head')?.textContent ?? '',
-          ),
-          oldMarkers: turns.querySelectorAll('.result-marker').length,
-        };
-      } finally {
-        measured.forEach((turn) => turn.classList.remove('semon-measuring-turn'));
-      }
-    });
-    R.resultMarker = result;
+    const reply = 'Unique result text for the transcript check.';
+    const message = page.locator('.turns .msg.assistant').getByText(reply, { exact: true });
+    await message.waitFor();
+    r.expect((await message.count()) === 1, 'the closing reply appears once as its own message');
     r.expect(
-      result.phraseCount >= 1 && result.events === 1 && result.hasVerb && result.oldMarkers === 0,
-      'the result is one event that says it sent a result, with its text: ' +
-        JSON.stringify(result),
+      (await page.locator('.turns .event').getByText(reply, { exact: true }).count()) === 0,
+      'an ordinary reply does not create a sender event',
     );
-    r.expect(
-      result.closingReplies === 1,
-      'the recorded closing reply remains one independently visible message: ' +
-        JSON.stringify(result),
-    );
-    const resultId = D.H.find((h) => h.from === 'result-card' && h.ask === 'result')?.id ?? '';
     await page.click('.turn-end .link');
-    await page.waitForSelector('.flow .hop[data-h="' + resultId + '"]');
-    const trace = await page.locator('.flow').evaluate((flow, id) => {
-      const phrase = 'Unique result text for the transcript check.';
-      const result = flow.querySelector('.hop[data-h="' + CSS.escape(id) + '"]');
-      return {
-        phraseCount: flow.innerText.split(phrase).length - 1,
-        hopText: result?.querySelector('.sent')?.innerText ?? '',
-        briefs: result?.querySelectorAll('.brief').length ?? 0,
-        moreButtons: result?.querySelectorAll('.more').length ?? 0,
-      };
-    }, resultId);
-    R.resultTrace = trace;
+    await page.locator('.flow').waitFor();
     r.expect(
-      trace.phraseCount === 0 &&
-        trace.hopText.length > 0 &&
-        trace.briefs === 0 &&
-        trace.moreButtons === 0,
-      'the trace keeps result text out of its compact marker: ' + JSON.stringify(trace),
+      (await page.locator('.flow').getByText(reply, { exact: true }).count()) === 0,
+      'trace navigation does not disclose the ordinary reply as a sender event',
     );
-    r.expect(page.errors.length === 0, 'result marker page errors: ' + page.errors.join(' | '));
+    r.expect(page.errors.length === 0, 'closing reply page errors: ' + page.errors.join(' | '));
     await page.context().close();
   }
 
-  // ---- Selected result read state persists; unavailable storage leaves retained pages usable -----------------
+  // ---- The selected reader leaves overview read state alone and tolerates unavailable storage -----------------
   {
     const resultHandoff = D.H.find(
       (h) => h.kind === 'toyou' && h.ask === 'result' && h.from === 'result-card',
@@ -1455,13 +1402,16 @@ export default async function (browser) {
     await page.goto(ENV.extraBase + '/session/local/result-card?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
-    await page.waitForFunction(() => !!document.querySelector('.turns .event'));
+    await page
+      .locator('.turns .msg.assistant')
+      .getByText('Unique result text for the transcript check.')
+      .waitFor();
     const stored = await page.evaluate(() =>
       JSON.parse(localStorage.getItem('semon.seen') ?? '[]'),
     );
     r.expect(
-      stored.includes(resultKey),
-      'opening the session stores its result id as seen: ' + JSON.stringify(stored),
+      !stored.includes(resultKey),
+      'reading an ordinary reply does not mark the overview result: ' + JSON.stringify(stored),
     );
     await page.goto(ENV.extraBase + '/?t=' + ENV.extraToken, {
       waitUntil: 'load',
@@ -1476,7 +1426,10 @@ export default async function (browser) {
     const persisted = await page.evaluate(() =>
       JSON.parse(localStorage.getItem('semon.seen') ?? '[]'),
     );
-    r.expect(persisted.includes(resultKey), 'selected result read state survives reload');
+    r.expect(
+      JSON.stringify(persisted) === JSON.stringify(stored),
+      'Sessions leaves result read state unchanged',
+    );
     r.expect((await page.locator('#page .ib').count()) === 0, 'Sessions retains no Home inbox');
     await page.context().close();
 
@@ -1496,7 +1449,10 @@ export default async function (browser) {
     await blocked.goto(ENV.extraBase + '/session/local/result-card?t=' + ENV.extraToken, {
       waitUntil: 'load',
     });
-    await blocked.waitForFunction(() => !!document.querySelector('.turns .event'));
+    await blocked
+      .locator('.turns .msg.assistant')
+      .getByText('Unique result text for the transcript check.')
+      .waitFor();
     r.expect(
       blocked.errors.length === 0,
       'Sessions and the session page render when localStorage throws: ' +
@@ -1675,105 +1631,43 @@ export default async function (browser) {
         X.screens,
     );
   }
-  // ---- Spawn cards: the kind is named once, in the card's meta line, and the name shares the first row with the state -----------
+  // ---- A sender spawn card has a recorded outcome and no target identity -----------------
   {
+    const spawn = D.H.find((event) => event.kind === 'spawn' && event.reason === 'not linked yet');
     const kid = Object.values(D.SESS).find(
-      (s) => s.kind === 'Subagent' && D.H.some((h) => h.kind === 'spawn' && h.to === s.id),
+      (session) => session.kind === 'Subagent' && session.parent,
     );
-    r.expect(!!kid, 'the extras fixture needs a subagent with a spawn handoff');
-    if (kid) {
-      const parent = D.H.find((h) => h.kind === 'spawn' && h.to === kid.id).from;
-      const cards = (R.spawnCards = {});
-      for (const size of ['phone', 'desktop'])
-        for (const dark of [false, true]) {
-          const tag = size + '-' + (dark ? 'dark' : 'light');
-          const page = await served(browser, { extras: true, size, dark });
-          await goto(page, { v: 'session', id: parent }, D);
-          await page.waitForTimeout(150);
-          const probe = () =>
-            page.evaluate(() =>
-              [...document.querySelectorAll('.child-card')].map((c) => {
-                const name = c.querySelector('.cc-name'),
-                  state = c.querySelector('.cc-head .state'),
-                  meta = c.querySelector('.cc-meta')?.textContent ?? '';
-                const a = name?.getBoundingClientRect(),
-                  b = state?.getBoundingClientRect();
-                return {
-                  name: name?.textContent ?? '',
-                  meta,
-                  dTop:
-                    a && b
-                      ? Math.round(Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) * 10) /
-                        10
-                      : null,
-                  stateRightOfName: a && b ? b.left >= a.right - 0.5 : false,
-                  mark: !!c.querySelector('.cc-meta > .hicon'),
-                  delegate: !!c.querySelector('.kind-delegate'),
-                  person: !!c.querySelector("svg path[d*='a4 4 0 1 0 0-8']"),
-                };
-              }),
-            );
-          const before = await probe();
-          cards[tag] = before.length;
-          r.expect(before.length > 0, tag + ': no spawn cards to check');
-          for (const c of before) {
-            r.expect(
-              c.dTop != null && c.dTop <= 12 && c.stateRightOfName,
-              tag + ": the card's name and state share a row: " + JSON.stringify(c),
-            );
-            const kinds = ['Subagent', 'Codex run', 'Relayed'].filter((k) => c.meta.startsWith(k));
-            r.expect(
-              !kinds.some((k) => c.name.endsWith(' · ' + k)) && !c.person,
-              tag +
-                ': the card repeats its kind in the name, or carries the person icon: ' +
-                JSON.stringify(c),
-            );
-            // The card's kind line names the harness by its mark and the kind by its word: no delegation glyph (the top bar's chip keeps it).
-            r.expect(
-              c.mark && !c.delegate,
-              tag +
-                ": the card's kind line has no harness mark, or carries a delegation glyph: " +
-                JSON.stringify(c),
-            );
-          }
-          // A long name never widens the page.
-          await page.evaluate(() => {
-            for (const t of document.querySelectorAll('.child-card .cc-name'))
-              t.textContent =
-                'A deliberately long handoff title that has to fit a phone ' + t.textContent;
-          });
-          const sideways = await page.evaluate(
-            () => document.documentElement.scrollWidth - innerWidth,
-          );
+    if (!spawn || !kid) throw new Error('The fixture needs a sender spawn and a native subagent');
+    for (const size of ['phone', 'desktop'])
+      for (const dark of [false, true]) {
+        const tag = size + '-' + (dark ? 'dark' : 'light');
+        const page = await served(browser, { extras: true, size, dark });
+        await goto(page, { v: 'session', id: spawn.from }, D);
+        const card = page.locator(`.event[data-h="${spawn.id}"]`);
+        await card.getByText('not linked yet', { exact: true }).waitFor();
+        r.expect(
+          (await card.getByText('Spawn requested', { exact: true }).count()) === 1 &&
+            (await card.locator('a, .hicon, .ev-head button').count()) === 0,
+          tag + ': the sender spawn exposes no target identity or navigation',
+        );
+        await card.scrollIntoViewIfNeeded();
+        r.expect((await overflow(page)) === 0, tag + ': the sender card fits the window');
+        await page.screenshot({ path: path.join(ENV.out, 'spawn-card-' + tag + '.png') });
+        if (size === 'desktop') {
+          await goto(page, { v: 'session', id: kid.id }, D);
           r.expect(
-            sideways <= 0,
-            tag + ': the long name pushed the page ' + sideways + 'px sideways',
+            (await page
+              .locator('#topbar .meta-line > .lab')
+              .getByText('Subagent', { exact: true })
+              .count()) === 1 &&
+              (await page.locator("#topbar .meta-line svg path[d*='a4 4 0 1 0 0-8']").count()) ===
+                0,
+            tag + ': the native subagent bar names its kind with a plain label',
           );
-          await page.locator('.child-card').first().scrollIntoViewIfNeeded();
-          await page.screenshot({ path: path.join(ENV.out, 'spawn-card-' + tag + '.png') });
-          if (size === 'desktop') {
-            await goto(page, { v: 'session', id: kid.id }, D);
-            // The overhaul's bar names the kind in its line of labels, as plain text with no icon: the person icon is never used for it.
-            const meta = await page.evaluate(() => {
-              const labs = [...document.querySelectorAll('#topbar .meta-line > .lab')];
-              return {
-                present: labs.some((x) => x.textContent === 'Subagent'),
-                person: !!document.querySelector(
-                  "#topbar .meta-line svg path[d*='a4 4 0 1 0 0-8']",
-                ),
-              };
-            });
-            r.expect(
-              meta.present && !meta.person,
-              tag +
-                ": the subagent's top bar line should name the kind as a plain label, without the person icon: " +
-                JSON.stringify(meta),
-            );
-          }
-          r.expect(page.errors.length === 0, tag + ': page errors ' + page.errors.join(' | '));
-          await page.context().close();
         }
-    }
+        r.expect(page.errors.length === 0, tag + ': page errors ' + page.errors.join(' | '));
+        await page.context().close();
+      }
   }
 
   return r.done();
