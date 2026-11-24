@@ -88,20 +88,21 @@ function SourceLink({ link }: { link: string }) {
 }
 
 function LaneRow({ lane, now }: { lane: Lane; now: number }) {
-  const split = lane.status.Next.lastIndexOf(' · due ');
-  const milestone = lane.status.Next.slice(0, split);
-  const due = lane.status.Next.slice(split + ' · due '.length);
-  const stale =
-    lane.status.State === 'active' && now - Date.parse(lane.last_seen_at) >= 390 * minute;
-  const overdue = lane.status.State === 'active' && now > Date.parse(due);
+  const { Next: next, State: state } = lane.status;
+  const dueMarker = ' · due ';
+  const split = next.lastIndexOf(dueMarker);
+  const milestone = split === -1 ? next : next.slice(0, split);
+  const due = split === -1 ? null : next.slice(split + dueMarker.length);
+  const stale = state === 'active' && now - Date.parse(lane.last_seen_at) >= 390 * minute;
+  const overdue = state === 'active' && due !== null && now > Date.parse(due);
   return (
     <li>
       <h3>{lane.status.Lane}</h3>
       <p>
-        <Status color={lane.health} label={lane.health} /> · {lane.status.State}
+        <Status color={lane.health} label={lane.health} /> · {state}
       </p>
       <p>
-        {milestone} · Due {when(due)}
+        {milestone} · {due === null ? 'no scheduled due' : <>Due {when(due)}</>}
       </p>
       {overdue && (
         <p>

@@ -72,6 +72,15 @@ try {
     assert.equal(await page.getByText('Prior Shanghai day.').count(), 0);
     assert.equal(await page.getByText('Deferred the optional fixture batch.').count(), 1);
     assert.equal(await page.getByText('Stale heartbeat').count(), Number(age >= 90));
+    const unscheduledLane = page.locator('li').filter({
+      has: page.getByRole('heading', { name: 'Eval · Notes', exact: true }),
+    });
+    assert.equal(
+      await unscheduledLane.getByText('Write the fixture notes · no scheduled due').count(),
+      1,
+    );
+    assert.equal(await unscheduledLane.getByText('Overdue', { exact: true }).count(), 0);
+    assert.equal(await page.getByText('Overdue', { exact: true }).count(), Number(age > 30));
     assert.equal(await page.getByText('64 °C', { exact: false }).count(), 1);
     assert.equal(await page.getByRole('heading', { name: 'Stalled sessions' }).count(), 1);
     assert.ok(

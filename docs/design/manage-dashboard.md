@@ -113,7 +113,7 @@ below, including timestamp and URL checks.
         "Lane": { "$ref": "#/$defs/text" },
         "State": { "enum": ["active", "parked", "done"] },
         "Goal": { "$ref": "#/$defs/text" },
-        "Next": { "type": "string", "pattern": "^.+ · due [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z$" },
+        "Next": { "type": "string", "pattern": "^(?:(?!.* · due )[^\\r\\n]+|[^\\r\\n]+ · due [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z)$" },
         "Blockers": { "$ref": "#/$defs/text" },
         "Decisions": { "$ref": "#/$defs/text" },
         "Spend": { "$ref": "#/$defs/text" },
@@ -184,13 +184,13 @@ A small example with synthetic values follows.
 ### Lane fields
 
 The following is the full `kind=status` field list from the
-[Agent Workbench v0.2.13 manager-sync reference](https://github.com/onsager-ai/agent-workbench/blob/v0.2.13/skills/orchestrate-harnesses/references/manager-sync.md#lane-status-and-alerts).
+[Agent Workbench v0.2.14 manager-sync reference](https://github.com/onsager-ai/agent-workbench/blob/v0.2.14/skills/orchestrate-harnesses/references/manager-sync.md#lane-status-and-alerts).
 
 ```text
 Lane: <project> · <scope>
 State: active|parked|done
 Goal: <one sentence>
-Next: <milestone> · due <YYYY-MM-DDTHH:MMZ>
+Next: <milestone>[ · due <YYYY-MM-DDTHH:MMZ>]
 Blockers: none | <item>; <item>
 Decisions: none | <lane>-D<n> <question> · to owner|chief-pm · asked <YYYY-MM-DDTHH:MMZ>; ...
 Spend: none | spent=<number> cap=<number> unit=<unit>; ...
@@ -200,7 +200,8 @@ State-of-work: open PRs <#n@sha>, ...; holds none | <item>; next action <one lin
 
 The Chief PM splits these lines into exact key and value pairs under `status`.
 Keep the text and embedded time format, including the complete `State-of-work`
-handover record. `State` and `Next` describe lane work and its milestone.
+handover record. `State` and `Next` describe lane work and its milestone. Include the `Next` due
+suffix only when a wait is scheduled.
 `last_update_at` timestamps the last full status. A heartbeat advances
 `last_seen_at` and keeps the last full status. For each lane and listed agent,
 `last_seen_at` is the last heartbeat or direct observation at that scope. An
@@ -209,7 +210,7 @@ does not advance any of these timestamps.
 
 The reference says `kind=alert` messages “Name the lane, what happened
 and what is needed.” Carry the current alert texts for that lane in `alerts`.
-The Chief PM supplies `health`. V0.2.13 defines no run state. The separate
+The Chief PM supplies `health`. The separate
 `activity` fields report observed lane and agent execution, or `unknown` when
 there is no evidence. A `finished` run leaves `State` and `Next` as reported.
 Use stable Chief PM agent IDs within the snapshot. These IDs identify the spend
@@ -224,8 +225,9 @@ the infra lane's `Thermal` reading and its observation time.
   JSON, duplicate object keys, unknown fields or versions and invalid enums.
   Version `1` is the sole current contract under the pre-release policy.
 - Parse structured timestamps as UTC RFC 3339 with an uppercase `Z` and
-  seconds. Require a real UTC date and time in the minute-precision `Next`
-  suffix and preserve the manager-sync text. Give `generated_at` the time the
+  seconds. Require a single-line milestone in `Next` and, when the ` · due `
+  suffix is present, a real UTC date and time in `YYYY-MM-DDTHH:MMZ` format.
+  Preserve the manager-sync text. Give `generated_at` the time the
   Chief PM assembled the snapshot and `chief_pm_checked_at` the time it last
   reviewed the reported state. Reject `generated_at` over five minutes ahead
   of receiver time. The check, decision, lane update and host observation
@@ -295,11 +297,13 @@ snapshot, show “No snapshot received.”
    known. Rows use the parent budget's unit and reporting period. Breakdown
    rows can cover part of a budget. Use the budget's reported total.
 3. **Lane health.** Show one row per `Lane` with reported color and text, work
-   `State`, milestone and due time from `Next`, and `last_update_at`. Label
-   lane and agent `activity` as run activity and show their `last_seen_at`
-   times separately. Show unavailable timestamps as unknown. Flag an active
-   lane as overdue when its due time has passed and stale when its last contact
-   is 6 hours 30 minutes old, allowing 30 minutes beyond the six-hour heartbeat.
+   `State`, milestone and due time from `Next`, and `last_update_at`. Show
+   “no scheduled due” when `Next` has no due time. Label lane and agent
+   `activity` as run activity and show their `last_seen_at` times separately.
+   Show unavailable timestamps as unknown. Flag an active lane as overdue only
+   when it has a due time and that time has passed. Flag an active lane as stale
+   when its last contact is 6 hours 30 minutes old, allowing 30 minutes beyond
+   the six-hour heartbeat.
    Parked and done lanes have no heartbeat requirement. The separate Catalog
    stalls list uses a fixed `idle_minutes = 60`.
    Surface current alerts with their lane.

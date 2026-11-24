@@ -377,12 +377,20 @@ pub(crate) fn validate(body: &[u8], now: DateTime<Utc>) -> Result<(DateTime<Utc>
             links: _,
             state_of_work: _,
         } = status;
-        let (milestone, due) = next.0.rsplit_once(" · due ").ok_or(Invalid)?;
+        const DUE_FORMAT: &str = "%Y-%m-%dT%H:%MZ";
+        let milestone = if let Some((milestone, due)) = next.0.rsplit_once(" · due ") {
+            if due.len() != 17
+                || !chrono::NaiveDateTime::parse_from_str(due, DUE_FORMAT)
+                    .is_ok_and(|time| time.format(DUE_FORMAT).to_string() == due)
+            {
+                return Err(Invalid);
+            }
+            milestone
+        } else {
+            next.0.as_str()
+        };
         if milestone.is_empty()
             || milestone.contains(['\n', '\r'])
-            || due.len() != 17
-            || !due.ends_with('Z')
-            || chrono::NaiveDateTime::parse_from_str(due, "%Y-%m-%dT%H:%MZ").is_err()
             || last_seen_at.0 < last_update_at.0
             || last_seen_at.0 > generation
             || !lanes.insert(lane.0.as_str())

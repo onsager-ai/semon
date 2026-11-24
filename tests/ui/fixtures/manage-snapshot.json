@@ -65,6 +65,25 @@
       "last_update_at": "2026-01-01T11:29:00Z",
       "last_seen_at": "2026-01-01T11:30:00Z",
       "agents": [{ "id": "fixture-review", "activity": "finished", "last_seen_at": null }]
+    },
+    {
+      "status": {
+        "Lane": "Eval · Notes",
+        "State": "active",
+        "Goal": "Document the findings.",
+        "Next": "Write the fixture notes",
+        "Blockers": "none",
+        "Decisions": "none",
+        "Spend": "none",
+        "Links": "https://example.com/issues/9",
+        "State-of-work": "open PRs none; holds none; next action Write notes; owner sources none"
+      },
+      "alerts": [],
+      "health": "green",
+      "activity": "idle",
+      "last_update_at": "2026-01-01T16:20:00Z",
+      "last_seen_at": "2026-01-01T16:20:00Z",
+      "agents": []
     }
   ],
   "hosts": [

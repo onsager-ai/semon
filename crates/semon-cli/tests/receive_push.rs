@@ -1222,6 +1222,18 @@ fn management_snapshot_write_scope_validation_and_append_order() {
         ("/chief_pm_checked_at", json!("2026-01-01T12:00:00+00:00")),
         ("/hosts/0/gate", json!("warning")),
         (
+            "/lanes/0/status/Next",
+            json!("Finish fixture review · due 2026-02-31T17:00Z"),
+        ),
+        (
+            "/lanes/0/status/Next",
+            json!("Finish fixture review · due 2026-01-01T 7:00Z"),
+        ),
+        (
+            "/lanes/0/status/Next",
+            json!("Finish fixture review · due "),
+        ),
+        (
             "/decisions_waiting/0/question",
             json!("Bearer fixture-credential"),
         ),
@@ -1299,6 +1311,11 @@ fn management_snapshot_write_scope_validation_and_append_order() {
     let accepted = post(fixture_json);
     assert!(accepted.starts_with("HTTP/1.1 204"));
     assert!(accepted.ends_with("\r\n\r\n"));
+    assert_eq!(
+        read()["snapshot"]["lanes"][1]["status"]["Next"],
+        "Write the fixture notes",
+        "the receiver preserves a milestone without a due time"
+    );
     let store = fixture.dir().join("manage-snapshots");
     let first = fs::read_dir(&store)
         .unwrap()

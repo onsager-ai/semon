@@ -168,6 +168,9 @@ and its cookies on the next request. Creation and revocation are audited.
 Open `/manage` on the receiver after signing in with an owner read token. It
 shows decisions waiting on the owner, spend, lane health, decisions made today,
 and host health with live Catalog stalled sessions. Today follows Asia/Shanghai.
+For each lane, `status.Next` gives the milestone. Include ` · due YYYY-MM-DDTHH:MMZ`
+only when a wait is scheduled. The dashboard shows “no scheduled due” when the
+suffix is absent and flags an active lane as overdue only after its due time passes.
 
 Mint a write-only snapshot bearer with `semon token --dir DIR --snapshot` and
 issue it to the Chief PM. The command prints the bearer once. Use
