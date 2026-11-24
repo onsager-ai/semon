@@ -131,9 +131,9 @@ export default async function copilotCheck(browser) {
     };
     fs.writeFileSync(resumed.file, bytes);
     originals.set(resumed.file, bytes);
-    const deadline = Date.now() + 5000;
+    const appendDeadline = Date.now() + 5000;
     while (!(await updated())) {
-      assert.ok(Date.now() < deadline, 'live Copilot append did not arrive');
+      assert.ok(Date.now() < appendDeadline, 'live Copilot append did not arrive');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     server.proc.kill();

@@ -60,7 +60,7 @@ export default async function liveCatalog(browser) {
       await selectedRecovery.getByText('Rebuilding history (2 of 3 sources)').first().waitFor();
       await selectedRecovery.unroute(routePattern);
       await selectedRecovery
-        .locator('[aria-label="Transcript"] [data-entry-key]')
+        .locator('[aria-label="Transcript"] [data-entry-key]:visible')
         .first()
         .waitFor();
       assert.deepEqual(selectedRecovery.errors, []);
@@ -99,7 +99,10 @@ export default async function liveCatalog(browser) {
         });
         try {
           await page.goto(fixture.base + '/session/local/harbor');
-          await page.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
+          await page
+            .locator('[aria-label="Transcript"] [data-entry-key]:visible')
+            .first()
+            .waitFor();
           const root = await page.locator('[aria-label="Transcript"]').elementHandle();
           const idleReads = reads.length;
           const observe = () =>
