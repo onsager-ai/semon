@@ -8,9 +8,10 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { catalogTranscriptBlocks, recordedRelationshipViews } = await import(
-  'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
-);
+const { catalogTranscriptBlocks, recordedRelationshipViews, retainedTranscriptTrace } =
+  await import(
+    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+  );
 test('recorded child cards retain kind, duration, steps and cost without claiming historical activity', () => {
   const previous = globalThis.matchMedia;
   globalThis.matchMedia = () => ({ matches: false });
@@ -446,4 +447,36 @@ test('clipped tool notices stay with tool details while message loading actions 
     shown.filter((row) => row.kind === 'label' && row.className === 'signal-marker').length,
     1,
   );
+});
+
+test('unavailable outgoing actions never link through shared participant summaries', () => {
+  for (const kind of ['relay', 'spawn']) {
+    const [row] = recordedRelationshipViews(
+      entry(1, 'turn', { k: 'h', id: 'unknown' }),
+      {
+        edge: { id: 'unknown', kind, from: 'owner', to: 'child', status: 'off', at: 0 },
+        reason: 'Receipt unavailable',
+      },
+      'owner',
+      { child: { name: 'Known from an unrelated edge', harness: 'claude' } },
+      {},
+    );
+    assert.equal(row.kind, 'event');
+    assert.equal(row.stateLabel, 'Unavailable');
+    assert.ok(row.parts.every((part) => !part.action));
+  }
+});
+
+test('a retained peer Trace action needs the selected turn address and keeps its witness', () => {
+  const peer = { trace: 'original', witness: 'a'.repeat(64) },
+    address = {
+      binding: 'b'.repeat(64),
+      entry_id: 'prompt',
+      block: 0,
+      record: { path: 'child.jsonl', offset: 21, block: 0, occurrence: 0 },
+    },
+    context = { turns: [{ id: 'turn', address }] };
+  assert.deepEqual(retainedTranscriptTrace('turn', context, peer), { address, peer });
+  assert.equal(retainedTranscriptTrace('different-turn', context, peer), null);
+  assert.deepEqual(retainedTranscriptTrace('turn', context), {});
 });

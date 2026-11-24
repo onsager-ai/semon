@@ -32,7 +32,7 @@ pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_annotations,
     retained_launch_between, retained_member_bounds, retained_peer_launch_in_view,
     retained_peer_trace_window, retained_preview_turns, retained_relay_in_view,
-    retained_spawn_return, retained_spawn_window, retained_turn,
+    retained_spawn_return, retained_spawn_return_between, retained_spawn_window, retained_turn,
 };
 #[cfg(test)]
 pub(super) use retained::{
@@ -398,6 +398,33 @@ fn relay_receipts(
     let Some(correlation) = correlation.flatten() else {
         return Ok(Vec::new());
     };
+    // A delivery id is evidence only when its exact physical send has one owner
+    // in this source namespace at the selected revision.
+    let owned: bool = db.query_row(
+        "WITH owners AS MATERIALIZED (
+           SELECT DISTINCT r.source,c.pos,c.block,c.call_id FROM fact_relay_result r INDEXED BY relay_result_correlation
+           CROSS JOIN warehouse_source w ON w.source=r.source AND w.origin=?1
+           CROSS JOIN warehouse_current active ON active.source=r.source
+           CROSS JOIN fact_relay_send c ON c.source=r.source AND c.call_id=r.call_id
+             AND c.pos<r.pos AND ((r.call_pos=c.pos AND r.call_block=c.block) OR
+               (r.call_pos IS NULL AND (SELECT count(*) FROM fact_tool_call t
+                WHERE t.source=r.source AND t.call_id=r.call_id AND t.pos<r.pos)=1))
+           WHERE r.correlation=?2 AND NOT r.failed AND r.pos<(
+             SELECT json_extract(p.ledger,'$.offset') FROM warehouse_prefix p
+             WHERE p.source=r.source AND p.revision<=?3 ORDER BY p.revision DESC LIMIT 1
+           ) LIMIT 2
+         ) SELECT (SELECT count(*) FROM owners)=1 AND EXISTS (
+             SELECT 1 FROM owners o CROSS JOIN fact_relay_result r ON r.source=o.source
+               AND r.call_id=o.call_id AND (r.call_pos IS NULL OR (r.call_pos=o.pos AND r.call_block=o.block))
+             WHERE r.source=?4 AND r.pos=?5 AND r.block=?6 AND r.occurrence=?7
+               AND r.correlation=?2 AND NOT r.failed
+         )",
+        params![source.namespace.binding(), correlation, view, result.source,
+            result.offset, result.block, result.occurrence], |row| row.get(0),
+    ).map_err(index)?;
+    if !owned {
+        return Ok(Vec::new());
+    }
     let mut receipts = db.prepare_cached(EXACT_RELAY_RECEIPTS).map_err(index)?;
     let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
     let mut rows = receipts
@@ -2545,7 +2572,7 @@ fn read_current(
     let need_latest_turn =
         need_pending_turn || !causal.is_empty() || include_home_detail || home_activity.is_some();
     if harness == "claude" && need_latest_turn {
-        let trace_spawn = matches!(target, Target::Turns([turn], None)
+        let trace_spawn = matches!(target, Target::Turns([turn], _)
             if *turn == crate::model::spawn_turn_id(&harness, key));
         if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view, trace_spawn)?
         {

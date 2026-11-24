@@ -231,7 +231,7 @@ pub(super) fn read(
     let children = child_keys(&view, source, key, peer)?;
     relay_limit_reached |= children.len() > 16;
     for child in children.into_iter().take(16) {
-        let Some((launch, block)) =
+        let Some((launch, block, unique)) =
             available_relationship(launch_location(&view, source, key, &child, peer, provider))?
                 .flatten()
         else {
@@ -255,6 +255,14 @@ pub(super) fn read(
         else {
             continue;
         };
+        if !unique {
+            let id = unavailable_spawn_id(&launch, block, &child);
+            launched.push(id.clone());
+            handoffs.push(json!({"id":id,"kind":"spawn","from":key,"to":child,"at":at,
+                "status":"off","declined":false,"source_turn":root}));
+            evidence.push(json!({"catalog_key":child,"reason":"More than one certified child claims the launch."}));
+            continue;
+        }
         let Some((window, target)) =
             available_relationship(spawn_window(&view, source, &child, peer, provider))?.flatten()
         else {
@@ -273,7 +281,15 @@ pub(super) fn read(
             })
             .ok_or(ReadError::Restart)?;
         let native = receiving.address.clone();
-        let (status, done) = spawn_outcome(&parent, &window, &launch, block);
+        let certified = match peer {
+            Some(peer) if window.harness == "claude" => available_relationship(
+                selected::retained_spawn_return_between(&view, source, peer, &child, key, provider),
+            )?
+            .flatten(),
+            _ => None,
+        };
+        let (status, done, result, _) =
+            spawn_outcome(&parent, &window, &launch, block, certified.as_ref());
         let address = selected::render::turn_address(&window, source_key, &child, &target);
         let (end, last) = trace_end(&view, source, &window, receiving, peer, provider)?;
         let received_at = receiving.at;
@@ -283,7 +299,7 @@ pub(super) fn read(
         ids.insert(target.clone());
         launched.push(target.clone());
         handoffs.push(json!({"id":target,"kind":"spawn","from":key,"to":child,"at":at,
-            "status":status,"done":done,"declined":false,"source_turn":root,"target_turn":target,"brief_session":child}));
+            "status":status,"done":done,"result":result,"declined":false,"source_turn":root,"target_turn":target,"brief_session":child}));
         evidence.push(match address {
             Some(address) => json!({"catalog_key":child,"turn":target,"address":address,
                 "peer":peer.filter(|peer| child != peer.trace).map(|peer| json!({"trace":peer.trace,"witness":peer.witness}))}),
@@ -320,17 +336,9 @@ pub(super) fn read(
                 record,
                 provider,
                 &mut refusals,
-                false,
+                None,
             )?,
-            None => current_relays(
-                &view,
-                source,
-                &component,
-                from,
-                record,
-                &mut refusals,
-                false,
-            )?,
+            None => current_relays(&view, source, &component, from, record, &mut refusals, None)?,
         };
         relay_limit_reached |= limited;
         reads += 1;
@@ -629,6 +637,7 @@ pub(super) fn session_summary(
             "name":name,"harness":component.harness,"model":model,"state":status.unwrap_or("off"),"live_observation":status.is_some(),"start":first,"last":last,
             "kind":current.map(|row| row.presentation_kind.unwrap_or(row.kind)).or_else(|| metadata.and_then(|row| row["presentation_kind"].as_str().or(row["kind"].as_str()))),
             "calls":current.and_then(|row| row.details.as_ref()).and_then(|details| details["calls"].as_u64()),
+            "activity":current.and_then(|row| row.details.as_ref()).and_then(|details| details.get("activity")),
             "usd":cost["usd"],"tokens":tokens,"cost":cost,"busy":[],"wait_edges":[],"wait_edges_truncated":false,
     })
 }
@@ -982,12 +991,52 @@ pub(super) struct RelayRefusal {
     pub(super) qualified: bool,
 }
 
-struct Send {
+pub(super) struct Send {
     address: selected::Address,
     block: u32,
     recipient: String,
     at: i64,
     untyped_delivery: bool,
+}
+
+// The page already proved these source IDs and record offsets. Probe exactly
+// those positions, using their individual committed prefix bounds for results.
+pub(super) fn page_relay_sends(
+    view: &selected::ReadView<'_>,
+    component: &selected::Component,
+) -> Result<std::collections::BTreeMap<usize, Vec<Send>>, ReadError> {
+    use std::collections::BTreeMap;
+    let positions = component
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.source,
+                record.address.offset,
+                record.reference.offset,
+            )
+        })
+        .collect::<Vec<_>>();
+    let tx = view.lock()?;
+    let mut query = tx
+        .prepare_cached(include_str!("page_relay_sends.sql"))
+        .map_err(super::index)?;
+    let mut rows = query
+        .query(params![super::encode(&positions)?, crate::events::PIN])
+        .map_err(super::index)?;
+    let mut sends = BTreeMap::<usize, Vec<_>>::new();
+    while let Some(row) = rows.next().map_err(super::index)? {
+        let index: usize = row.get(0).map_err(super::index)?;
+        let target = row.get::<_, Option<String>>(4).map_err(super::index)?;
+        sends.entry(index).or_default().push(Send {
+            address: component.records[index].address.clone(),
+            block: row.get(1).map_err(super::index)?,
+            recipient: target.clone().unwrap_or(row.get(2).map_err(super::index)?),
+            at: row.get(3).map_err(super::index)?,
+            untyped_delivery: target.is_some(),
+        });
+    }
+    Ok(sends)
 }
 
 fn relay_sends(
@@ -996,7 +1045,6 @@ fn relay_sends(
     component: &selected::Component,
     root: &selected::Record,
     retained: Option<&str>,
-    exact: bool,
 ) -> Result<(Vec<Send>, bool), ReadError> {
     let Some(harness) = crate::InputRoot::parse(&component.harness) else {
         return Ok((Vec::new(), false));
@@ -1013,14 +1061,14 @@ fn relay_sends(
            WHERE ?1 IS NULL AND w.path=?2
          )
          SELECT s.pos,r.occurrence,s.block,s.target,s.ts,(
-           SELECT min(t.target) FROM fact_tool_result t
+           SELECT min(t.target) FROM fact_tool_result t INDEXED BY tool_result_identity
            WHERE t.source=s.source AND t.call_id=s.call_id AND t.call_pos=s.pos AND t.call_block=s.block
-             AND t.pos<?5 AND NOT t.failed AND t.flags & ?9<>0 AND t.correlation IS NULL
+             AND t.pos<?5 AND NOT t.failed AND t.flags & ?7<>0 AND t.correlation IS NULL
            HAVING count(DISTINCT t.target)=1
          ) FROM member m
          CROSS JOIN fact_relay_send s ON s.source=m.source AND s.pos>=?4 AND s.pos<?5
          CROSS JOIN fact_record r ON r.source=s.source AND r.pos=s.pos AND r.block=0 AND NOT r.gap
-         WHERE s.ts>=?6 AND (NOT ?7 OR (r.pos=?4 AND r.occurrence=?8)) ORDER BY s.pos,s.block,s.occurrence LIMIT 17",
+         WHERE s.ts>=?6 ORDER BY s.pos,s.block,s.occurrence LIMIT 17",
         )
         .map_err(super::index)?;
     let mut sends = Vec::new();
@@ -1028,9 +1076,6 @@ fn relay_sends(
     for member in &component.identity.source_refs {
         let reference = &member.source;
         let same = reference.path == root.address.path;
-        if exact && !same {
-            continue;
-        }
         let start = if same {
             i64::try_from(root.address.offset).map_err(super::index)?
         } else {
@@ -1050,8 +1095,6 @@ fn relay_sends(
                 start,
                 i64::try_from(reference.offset).map_err(super::index)?,
                 since,
-                exact,
-                root.address.occurrence,
                 crate::events::PIN
             ])
             .map_err(super::index)?;
@@ -1094,7 +1137,7 @@ pub(super) fn retained_relays(
     root: &selected::Record,
     provider: Option<&dyn SessionSourceReader>,
     refusals: &mut Vec<RelayRefusal>,
-    exact: bool,
+    page_sends: Option<Vec<Send>>,
 ) -> Result<(Vec<Relay>, bool), ReadError> {
     let sender = component.identity.catalog_key.as_str();
     let (bounds, identity, observed) = {
@@ -1106,7 +1149,11 @@ pub(super) fn retained_relays(
         let observed = identity.observed_peers().map_err(super::index)?;
         (bounds, identity, observed)
     };
-    let (sends, limited) = relay_sends(view, source, component, root, Some(&bounds), exact)?;
+    let exact = page_sends.is_some();
+    let (sends, limited) = match page_sends {
+        Some(sends) => (sends, false),
+        None => relay_sends(view, source, component, root, Some(&bounds))?,
+    };
     let mut relays = Vec::new();
     let mut attempts = 0;
     for Send {
@@ -1286,9 +1333,13 @@ pub(super) fn current_relays(
     key: &str,
     root: &selected::Record,
     refusals: &mut Vec<RelayRefusal>,
-    exact: bool,
+    page_sends: Option<Vec<Send>>,
 ) -> Result<(Vec<Relay>, bool), ReadError> {
-    let (sends, limited) = relay_sends(view, source, component, root, None, exact)?;
+    let exact = page_sends.is_some();
+    let (sends, limited) = match page_sends {
+        Some(sends) => (sends, false),
+        None => relay_sends(view, source, component, root, None)?,
+    };
     let mut out = Vec::new();
     for Send {
         address: mut call,
@@ -1373,7 +1424,6 @@ pub(super) fn current_relays(
             if target == key {
                 return Ok(None);
             }
-            qualified_target = Some(target.clone());
             let Some(path) = selected::relative(source.options, &harness, &carrier) else {
                 return Ok(None);
             };
@@ -1386,6 +1436,16 @@ pub(super) fn current_relays(
             let Some(window) = selected::trace_record(view, source, &target, &native)? else {
                 return Ok(None);
             };
+            let intended = recipient == target
+                || window.identity.native_ids.contains(&recipient)
+                || (recipient == "main"
+                    && current_metadata(view, source, component)?
+                        .is_some_and(|row| row.parent.as_deref() == Some(target.as_str())));
+            if !intended {
+                reason = "The receipt does not belong to the recorded relay recipient.";
+                return Ok(None);
+            }
+            qualified_target = Some(target.clone());
             let Some(record) = window
                 .records
                 .iter()
@@ -1513,13 +1573,17 @@ pub(super) fn child_keys(
         return Ok(Vec::new());
     };
     let children = super::parents::Parents::new(&tx)?.owner_children(owner)?;
-    Ok(super::relative_keys(
-        &tx,
-        &super::encode(&children.into_iter().take(129).collect::<Vec<_>>())?,
-    )?
-    .into_iter()
-    .map(|(_, key, _)| key)
-    .collect())
+    Ok(super::relative_keys(&tx, &super::encode(&children)?)?
+        .into_iter()
+        .map(|(_, key, _)| key)
+        .collect())
+}
+
+pub(super) fn unavailable_spawn_id(address: &selected::Address, block: u32, child: &str) -> String {
+    crate::model::legacy_relay_turn_id(&format!(
+        "launch:{}:{}:{block}:{child}",
+        address.path, address.offset
+    ))
 }
 
 pub(super) fn launch_location(
@@ -1529,13 +1593,14 @@ pub(super) fn launch_location(
     child: &str,
     peer: Option<selected::PeerBinding<'_>>,
     provider: Option<&dyn SessionSourceReader>,
-) -> Result<Option<(selected::Address, u32)>, ReadError> {
+) -> Result<Option<(selected::Address, u32, bool)>, ReadError> {
     match peer {
         Some(peer) => {
             selected::retained_launch_between(view, source, peer, child, parent, provider)
-                .map(|(address, block, _)| Some((address, block)))
+                .map(|(address, block, _, unique)| Some((address, block, unique)))
         }
-        None => current_launch_location(view, source, child, parent),
+        None => current_launch_location(view, source, child, parent)
+            .map(|location| location.map(|(address, block)| (address, block, true))),
     }
 }
 
@@ -1587,8 +1652,9 @@ pub(super) fn spawn_outcome(
     window: &selected::Component,
     address: &selected::Address,
     block: u32,
-) -> (&'static str, Option<i64>) {
-    if let Some(completion) = &window.trace_completion {
+    certified: Option<&selected::TraceCompletion>,
+) -> (&'static str, Option<i64>, Option<String>, bool) {
+    if let Some(completion) = certified.or(window.trace_completion.as_ref()) {
         return (
             if completion.failed {
                 "err"
@@ -1598,15 +1664,22 @@ pub(super) fn spawn_outcome(
                 "done"
             },
             completion.at,
+            completion.preview.clone(),
+            completion.in_child,
         );
     }
     if let Some(completion) = &window.legacy_completion {
-        return ("done", completion.at);
+        return ("done", completion.at, None, false);
     }
     if let Some(completion) = synchronous_return(parent, address, block) {
-        return (completion.status(), completion.at);
+        return (
+            completion.status(),
+            completion.at,
+            completion.preview,
+            false,
+        );
     }
-    (window.runtime_status.unwrap_or("off"), None)
+    (window.runtime_status.unwrap_or("off"), None, None, false)
 }
 
 fn current_launch_location(

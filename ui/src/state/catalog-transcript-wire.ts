@@ -71,7 +71,7 @@ export interface CatalogTranscriptPage {
   relationship_context: {
     state: 'incomplete' | 'complete';
     turn_ids: string[];
-    turns: RecordedTurn[];
+    turns: (RecordedTurn & { address?: NativeEntryAddress })[];
     handoffs: (RecordedRelationship & {
       targetEvidence?: { address: NativeEntryAddress; peer?: RetainedPeerAddress };
     })[];
@@ -247,7 +247,11 @@ function parseRelationshipContext(
   const turns = array(context.turns ?? [], (value) => {
       const row = object(value);
       if (row.sid !== identity.catalog_key) throw Error('Invalid ranged turn owner');
-      return parseRecordedTurn(row);
+      const turn = parseRecordedTurn(row);
+      if (row.address == null) return turn;
+      if (!native || identity.read_scope !== 'retained_history')
+        throw Error('Invalid retained transcript turn address');
+      return { ...turn, address: parseNativeEntryAddress(row.address) };
     }),
     turnIds = new Set(entries.flatMap((item) => (item.entry.turn ? [item.entry.turn] : []))),
     starts = new Set(turns.flatMap((turn) => (turn.start ? [turn.start] : [])));

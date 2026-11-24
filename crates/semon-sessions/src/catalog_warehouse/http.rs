@@ -845,9 +845,11 @@ pub(crate) fn home_with_mode(
                     ));
                 }
                 let brief = previews.get(id.as_str())?;
+                let result = (id == &crate::model::spawn_turn_id(&component.harness, key))
+                    .then(|| component.trace_completion.as_ref()?.preview.as_deref()).flatten();
                 Some((
                     id.clone(),
-                    json!({"brief":brief,"answer":null,"origin":null}),
+                    json!({"brief":brief,"result":result,"answer":null,"origin":null}),
                 ))
             })
             .collect::<serde_json::Map<_, _>>();
@@ -1287,6 +1289,7 @@ fn read_transcript(
                     witness: &peer.witness,
                 }),
                 retained_provider,
+                address.is_some(),
             )
             .map_err(read_error)?,
         )
@@ -1367,6 +1370,7 @@ fn read_transcript(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn relationship_context(
     view: &selected::ReadView<'_>,
     source: &Source<'_>,
@@ -1375,6 +1379,7 @@ fn relationship_context(
     entries: &mut Vec<Value>,
     origin: Option<selected::PeerBinding<'_>>,
     provider: Option<&dyn crate::SessionSourceReader>,
+    addressed: bool,
 ) -> Result<Value, ReadError> {
     use super::trace::{self, available_relationship};
     use std::collections::{BTreeMap, BTreeSet};
@@ -1414,8 +1419,8 @@ fn relationship_context(
         }
         Ok(())
     };
-    let mut relay_reads = 0;
-    for record in &component.records {
+    let mut page_sends = trace::page_relay_sends(view, component)?;
+    for (index, record) in component.records.iter().enumerate() {
         let Some(turn) = record
             .causal
             .turn
@@ -1436,6 +1441,14 @@ fn relationship_context(
             row["end"] = end;
             row["last"] = json!(last);
             row["at"] = json!(record.at);
+            if origin.is_some() {
+                row["address"] = json!(selected::render::turn_address(
+                    component,
+                    source.namespace.as_str(),
+                    key,
+                    &turn.id
+                ));
+            }
             if actions.contains(turn.id.as_str())
                 && let Some(at) = record.at
             {
@@ -1470,21 +1483,13 @@ fn relationship_context(
                 }
             }
         }
-        let relay_call = record.causal.calls.iter().any(|call| {
-            matches!(
-                call.tool.as_str(),
-                "SendMessage"
-                    | "send_message"
-                    | "followup_task"
-                    | "collaboration.send_message"
-                    | "collaboration.followup_task"
-            )
-        });
-        if (!boundary && !relay_call) || relay_reads == 32 {
-            incomplete |= relay_call && relay_reads == 32;
+        let sends = if addressed && boundary {
+            None
+        } else if let Some(sends) = page_sends.remove(&index) {
+            Some(sends)
+        } else {
             continue;
-        }
-        relay_reads += 1;
+        };
         let mut refusals = Vec::new();
         let relays = match peer {
             Some(peer) => trace::retained_relays(
@@ -1495,17 +1500,11 @@ fn relationship_context(
                 record,
                 provider,
                 &mut refusals,
-                !boundary,
+                sends,
             ),
-            None => trace::current_relays(
-                view,
-                source,
-                component,
-                key,
-                record,
-                &mut refusals,
-                !boundary,
-            ),
+            None => {
+                trace::current_relays(view, source, component, key, record, &mut refusals, sends)
+            }
         };
         let Some((relays, limited)) = available_relationship(relays)? else {
             incomplete = true;
@@ -1546,11 +1545,11 @@ fn relationship_context(
     // considers peers that were observed when the original component froze.
     if !turns.is_empty() {
         let children = trace::child_keys(view, source, key, peer)?;
-        incomplete |= children.len() > 32;
-        for child in children.into_iter().take(32) {
-            let Some(Some((address, block))) = available_relationship(trace::launch_location(
-                view, source, key, &child, peer, provider,
-            ))?
+        let mut matched = 0;
+        for child in children {
+            let Some(Some((address, block, unique))) = available_relationship(
+                trace::launch_location(view, source, key, &child, peer, provider),
+            )?
             else {
                 continue;
             };
@@ -1591,9 +1590,17 @@ fn relationship_context(
             else {
                 continue;
             };
-            let resolution =
+            if matched == 32 {
+                incomplete = true;
+                break;
+            }
+            matched += 1;
+            let resolution = if unique {
                 available_relationship(trace::spawn_window(view, source, &child, peer, provider))?
-                    .flatten();
+                    .flatten()
+            } else {
+                None
+            };
             let target = resolution.and_then(|(window, target)| {
                 let entry = selected::render::turn_address(
                     &window,
@@ -1605,14 +1612,32 @@ fn relationship_context(
             });
             let edge = if let Some((window, target, entry)) = target {
                 remember(&window, Some(at))?;
-                let (status, done) = trace::spawn_outcome(parent, &window, &address, block);
-                json!({"id":target,"kind":"spawn","from":key,"to":child,"at":at,"status":status,"done":done,
+                let certified = match peer {
+                    Some(peer) if window.harness == "claude" => {
+                        available_relationship(selected::retained_spawn_return_between(
+                            view, source, peer, &child, key, provider,
+                        ))?
+                        .flatten()
+                    }
+                    _ => None,
+                };
+                let (status, done, result, in_child) =
+                    trace::spawn_outcome(parent, &window, &address, block, certified.as_ref());
+                let result_session = result
+                    .as_ref()
+                    .map(|_| if in_child { child.as_str() } else { key });
+                if result_session == Some(key) {
+                    remember(component, Some(at))?;
+                }
+                json!({"id":target,"kind":"spawn","from":key,"to":child,"at":at,"status":status,"done":done,"result":result,
+                    "result_session":result_session,
                     "declined":false,"source_turn":turn.id,"target_turn":target,"brief_session":child,
                     "target_evidence":peer.map(|peer| retained_target(peer, &child, entry))})
             } else {
-                json!({"id":crate::model::legacy_relay_turn_id(&format!("launch:{}:{}:{block}",address.path,address.offset)),
+                json!({"id":trace::unavailable_spawn_id(&address, block, &child),
                     "kind":"spawn","from":key,"to":child,"at":at,"status":"off","declined":false,
-                    "source_turn":turn.id,"reason":"The launch has no qualified child turn in the selected prefixes."})
+                    "source_turn":turn.id,"reason":if unique {"The launch has no qualified child turn in the selected prefixes."}
+                        else {"More than one certified child claims the launch."}})
             };
             let id = edge["id"].as_str().expect("launch edge id").to_owned();
             placements.push(((address, block), id.clone()));
@@ -1620,12 +1645,12 @@ fn relationship_context(
         }
     }
 
-    incomplete |= handoffs.len() > 120;
+    incomplete |= handoffs.len() > 200;
     let mut handoffs = handoffs.into_values().collect::<Vec<_>>();
     handoffs.sort_by(|a, b| {
         (a["at"].as_i64(), a["id"].as_str()).cmp(&(b["at"].as_i64(), b["id"].as_str()))
     });
-    handoffs.truncate(120);
+    handoffs.truncate(200);
     let ids = handoffs
         .iter()
         .filter_map(|edge| edge["id"].as_str())
@@ -1655,6 +1680,23 @@ fn relationship_context(
     }
     sessions.retain(|id, _| linked.contains(id.as_str()));
     previews.retain(|id, _| linked.contains(id.as_str()));
+    if previews.len() > 128 {
+        incomplete = true;
+        let issued = handoffs
+            .iter()
+            .flat_map(|edge| {
+                [
+                    edge["brief_session"].as_str(),
+                    edge["result_session"].as_str(),
+                    edge["to"].as_str(),
+                ]
+            })
+            .flatten()
+            .filter(|owner| previews.contains_key(*owner))
+            .collect::<BTreeSet<_>>();
+        let keep = issued.into_iter().take(128).collect::<BTreeSet<_>>();
+        previews.retain(|owner, _| keep.contains(owner.as_str()));
+    }
     let mut actions_at = BTreeMap::<_, BTreeSet<_>>::new();
     for ((record, block), id) in placements {
         if ids.contains(id.as_str()) {

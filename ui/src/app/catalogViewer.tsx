@@ -102,6 +102,7 @@ import { EffectScope } from './effects';
 import {
   catalogTranscriptBlocks,
   recordedRelationshipViews,
+  retainedTranscriptTrace,
   recordedSignalLabel,
 } from './catalogTranscriptView';
 import { parseNativeRelationships } from '../domain/relationships';
@@ -1771,6 +1772,16 @@ export function createCatalogViewer(
   function displayEntries(view: SelectedView): CatalogDisplayedEntry[] {
     return view.nativeStore?.entries() ?? view.store.entries();
   }
+  function openTranscriptTrace(view: SelectedView, turn: string) {
+    const target = retainedTranscriptTrace(turn, relationshipContext(view), view.peer);
+    if (!target) return;
+    const url =
+      tracePath(view.sourceKey, view.key, turn) +
+      '?' +
+      sessionControls(view.readScope, target.address, target.peer);
+    history.pushState(null, '', url);
+    goCausal(view.key, turn, view.readScope, target.address, target.peer);
+  }
   function relationshipContext(view: SelectedView) {
     return view.nativeStore?.context() ?? view.store.context();
   }
@@ -2033,6 +2044,7 @@ export function createCatalogViewer(
         relationshipContext(view).turns.some(
           (row) =>
             row.id === turn &&
+            (!view.peer || row.address) &&
             row.sent.some((id) =>
               relationshipContext(view).handoffs.some(
                 ({ edge }) => edge.id === id && edge.kind !== 'move',
@@ -2090,14 +2102,7 @@ export function createCatalogViewer(
               });
           });
         } else if (key === 'trace' && turn && view) {
-          navigateFromPanel(panel, () => {
-            history.pushState(
-              null,
-              '',
-              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope),
-            );
-            goCausal(view.key, turn, view.readScope);
-          });
+          navigateFromPanel(panel, () => openTranscriptTrace(view, turn));
         }
       },
     });
@@ -2853,10 +2858,7 @@ export function createCatalogViewer(
         {
           committed() {},
           trace(turn) {
-            const url =
-              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope);
-            history.pushState(null, '', url);
-            goCausal(view.key, turn, view.readScope);
+            openTranscriptTrace(view, turn);
           },
           session(key) {
             void goSession(key, undefined, true, undefined, view?.readScope);
@@ -3088,15 +3090,16 @@ export function createCatalogViewer(
       {
         committed() {},
         trace(turn) {
-          const url =
-            tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope);
-          history.pushState(null, '', url);
-          goCausal(view.key, turn, view.readScope);
+          openTranscriptTrace(view, turn);
         },
         session(key, turn) {
           const evidence = turn
             ? relationshipContext(view).handoffs.find(
-                (row) => row.edge.to === key && row.targetTurn === turn && row.targetEvidence,
+                (row) =>
+                  row.edge.to === key &&
+                  row.targetTurn === turn &&
+                  row.targetEvidence &&
+                  !row.reason,
               )?.targetEvidence
             : undefined;
           if (evidence)
@@ -3705,7 +3708,10 @@ export function createCatalogViewer(
     const owners = new Map<string, Set<string>>(),
       certified: ContextJob[] = [];
     for (const relationship of context.handoffs)
-      for (const owner of [relationship.briefOwner, relationship.resultOwner]) {
+      for (const owner of [
+        relationship.briefOwner,
+        relationship.edge.result == null ? relationship.resultOwner : undefined,
+      ]) {
         if (!owner || !context.previews[owner]) continue;
         const key = JSON.stringify([owner, context.previews[owner], relationship.edge.id]);
         if (cache.has(key)) continue;

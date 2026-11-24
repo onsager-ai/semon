@@ -421,7 +421,8 @@ export function catalogTranscriptBlocks(
     if (start && start.kind !== 'ask' && !descriptor.u) {
       const sender = context?.sessions[start.from],
         harness = sender && HARNESSES[sender.harness],
-        linked = sender && start.from !== sessionKey && start.from !== 'you';
+        linked =
+          !relationship?.reason && sender && start.from !== sessionKey && start.from !== 'you';
       block.turn.header = {
         mark: harness
           ? {
@@ -459,6 +460,16 @@ export function catalogTranscriptBlocks(
   );
 }
 
+export function retainedTranscriptTrace(
+  turn: string,
+  context: CatalogTranscriptPage['relationship_context'],
+  peer?: import('../lib/sessionRoute').RetainedPeerAddress,
+) {
+  if (!peer) return {};
+  const address = context.turns.find((row) => row.id === turn)?.address;
+  return address ? { address, peer } : null;
+}
+
 export function recordedRelationshipViews(
   item: CatalogDisplayedEntry,
   relationship: RecordedRelationship,
@@ -477,7 +488,7 @@ export function recordedRelationshipViews(
     source = participants[edge.from];
   const name = (id: string) =>
     id === 'you' ? 'You' : (participants[id]?.name ?? 'Recorded session');
-  if (edge.kind === 'spawn' && edge.from === selected && target) {
+  if (edge.kind === 'spawn' && edge.from === selected && target && !relationship.reason) {
     const mark = HARNESSES[target.harness],
       status =
         target.state === 'work' || target.state === 'wait'
@@ -521,7 +532,7 @@ export function recordedRelationshipViews(
         stateLabel: STATE[status] ?? 'Recorded history',
         meta,
         brief: preview(native.brief ?? ''),
-        result: native.result,
+        result: native.result ?? edge.result,
         activity:
           target.live_observation && status === 'work' && !native.result && native.activity
             ? [runningToolLabel(native.activity[0]), native.activity[1]]
@@ -561,8 +572,9 @@ export function recordedRelationshipViews(
           ]
         : []),
     ];
-  const sourceLinked = source && edge.from !== selected && edge.from !== 'you',
-    targetLinked = target && edge.to !== selected && edge.to !== 'you',
+  const sourceLinked =
+      !relationship.reason && source && edge.from !== selected && edge.from !== 'you',
+    targetLinked = !relationship.reason && target && edge.to !== selected && edge.to !== 'you',
     parts = [
       {
         className: 'who who-link',
@@ -630,7 +642,7 @@ export function recordedRelationshipViews(
       parts,
       time: clock(edge.at, Date.now()),
       brief: preview(native.brief ?? item.native_action_text ?? ''),
-      result: relationship.reason ?? native.result,
+      result: relationship.reason ?? native.result ?? edge.result,
       resultLabel: relationship.reason ? 'Evidence' : 'Result',
       answers:
         native.answer == null

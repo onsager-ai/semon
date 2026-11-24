@@ -407,6 +407,20 @@ fn warehouse_actual_reader_plans_use_indexed_exact_probes_and_local_usage() {
     );
     let exact = plan(&db, EXACT, params![":claude:same", "[]", "reader-plan"]);
     let usage = plan(&db, USAGE, ["[1]", "[]"]);
+    let sends = plan(
+        &db,
+        include_str!("page_relay_sends.sql"),
+        params!["[[1,2,9]]", crate::events::PIN],
+    );
+    assert!(
+        sends.contains("SEARCH s USING PRIMARY KEY (source=? AND pos=?)"),
+        "{sends}"
+    );
+    assert!(
+        sends.contains("tool_result_identity (source=? AND call_id=?)"),
+        "{sends}"
+    );
+
     for plan in [&list, &exact, &usage] {
         assert!(
             !plan.contains("CORRELATED SCALAR SUBQUERY")
@@ -2456,6 +2470,170 @@ fn warehouse_transcript_records_spawn_relay_handback_resume_and_unavailable_send
                 && edge["to"] == "root"
                 && edge["status"] == "done")
     );
+
+    let child_relative = "projects/proj/root/subagents/agent-worker.jsonl";
+    let original = RelayFixtureProvider(BTreeMap::from([
+        ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
+        (child_relative.into(), fs::read(&child).unwrap()),
+    ]));
+    fs::rename(&root, root.with_extension("saved")).unwrap();
+    fixture.claude("root", "Replacement");
+    let retained = relationship_fixture_page(
+        &fixture,
+        &[("sid", "root"), ("scope", "retained_history")],
+        Some(&original),
+    );
+    let launch = retained["relationship_context"]["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["kind"] == "spawn" && edge["to"] == "worker")
+        .unwrap_or_else(|| panic!("{retained}"));
+    assert_eq!(launch["status"], "done", "{retained}");
+    assert!(launch["done"].is_number());
+    assert_eq!(launch["result_session"], "worker");
+    assert_eq!(launch["result"], "Done");
+}
+
+#[test]
+fn warehouse_transcript_refuses_reused_relay_correlation() {
+    let mut fixture = Fixture::new("multiple-delivery-owners");
+    let a = fixture.claude("owner-a", "Send to B");
+    let _b = fixture.claude("owner-b", "B");
+    let c = fixture.claude("owner-c", "Send to D");
+    let d = fixture.claude("owner-d", "D");
+    for (path, owner, recipient) in [(&a, "owner-a", "owner-b"), (&c, "owner-c", "owner-d")] {
+        append_native(
+            path,
+            json!({"type":"assistant","sessionId":owner,
+            "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"send","name":"SendMessage","input":{"to":recipient,"message":"Hello"}}
+            ]}}),
+        );
+        append_native(
+            path,
+            json!({"type":"user","sessionId":owner,
+            "timestamp":"2026-09-24T00:00:02Z","toolUseResult":{"success":true,"msg_id":"reused"},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]}}),
+        );
+    }
+    append_native(
+        &d,
+        json!({"type":"user","sessionId":"owner-d","timestamp":"2026-09-24T00:00:03Z",
+        "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/111.sock","name":"owner-c",
+            "fromMode":"prompting","msg_id":"reused","body":"Hello","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+        "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\">Hello</cross-session-message>"}}),
+    );
+    publish_relationship_fixture(&mut fixture);
+    for (owner, recipient) in [("owner-a", "owner-b"), ("owner-c", "owner-d")] {
+        let page = relationship_fixture_page(&fixture, &[("sid", owner)], None);
+        let edges = page["relationship_context"]["handoffs"].as_array().unwrap();
+        let relay = edges
+            .iter()
+            .find(|edge| edge["kind"] == "relay")
+            .unwrap_or_else(|| panic!("{page}"));
+        assert_eq!(relay["to"], recipient, "{page}");
+        assert_eq!(relay["status"], "off", "{page}");
+        assert!(relay["target_turn"].is_null());
+        assert!(relay["target_evidence"].is_null());
+    }
+}
+
+fn publish_relationship_fixture(fixture: &mut Fixture) {
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+}
+
+fn relationship_fixture_page(
+    fixture: &Fixture,
+    fields: &[(&str, &str)],
+    provider: Option<&dyn crate::SessionSourceReader>,
+) -> serde_json::Value {
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let reply = http::transcript(
+        &configured,
+        &crate::native_html::query(fields),
+        None,
+        provider,
+    );
+    let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{page}");
+    page
+}
+
+#[test]
+fn warehouse_retained_transcript_refuses_ambiguous_codex_spawn() {
+    let mut fixture = Fixture::new("retained-ambiguous-spawn");
+    let parent = fixture.codex("parent");
+    append_native(
+        &parent,
+        json!({"type":"response_item","timestamp":"2026-09-24T00:00:01Z",
+        "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Delegate"}]}}),
+    );
+    append_native(
+        &parent,
+        json!({"type":"response_item","timestamp":"2026-09-24T00:00:02Z",
+        "payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn",
+            "arguments":"{\"task_name\":\"solo\",\"message\":\"Work\"}"}}),
+    );
+    let mut files = BTreeMap::new();
+    for child in ["first", "second"] {
+        let path = parent.with_file_name(format!("rollout-{child}.jsonl"));
+        fs::write(&path, []).unwrap();
+        append_native(
+            &path,
+            json!({"type":"session_meta","timestamp":"2026-09-24T00:00:03Z",
+            "payload":{"id":child,"cwd":"/work/synthetic","originator":"codex_exec","thread_source":"subagent",
+                "parent_thread_id":"parent","agent_nickname":"solo"}}),
+        );
+        append_native(
+            &path,
+            json!({"type":"response_item","timestamp":"2026-09-24T00:00:04Z",
+            "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Work"}]}}),
+        );
+        files.insert(
+            format!("sessions/2026/09/24/rollout-{child}.jsonl"),
+            fs::read(path).unwrap(),
+        );
+    }
+    publish_relationship_fixture(&mut fixture);
+    files.insert(
+        "sessions/2026/09/24/rollout-parent.jsonl".into(),
+        fs::read(&parent).unwrap(),
+    );
+    fs::rename(&parent, parent.with_extension("saved")).unwrap();
+    fixture.codex("parent");
+    let provider = RelayFixtureProvider(files);
+    let page = relationship_fixture_page(
+        &fixture,
+        &[("sid", "parent"), ("scope", "retained_history")],
+        Some(&provider),
+    );
+    let edges = page["relationship_context"]["handoffs"].as_array().unwrap();
+    for child in ["first", "second"] {
+        let edge = edges
+            .iter()
+            .find(|edge| edge["kind"] == "spawn" && edge["to"] == child)
+            .unwrap_or_else(|| panic!("{page}"));
+        assert_eq!(edge["status"], "off", "{page}");
+        assert_eq!(
+            edge["reason"],
+            "More than one certified child claims the launch."
+        );
+        assert!(edge["target_turn"].is_null());
+        assert!(edge["target_evidence"].is_null());
+    }
 }
 
 #[test]
@@ -3475,6 +3653,35 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
             .any(|row| row["id"] == turn && row["sent"].as_array().unwrap().contains(&edge["id"]))
     );
     assert!(relationships["previews"]["peer"].is_string());
+    let target_address = edge["target_evidence"]["address"].to_string();
+    let target_peer = edge["target_evidence"]["peer"].to_string();
+    let target = relationship_fixture_page(
+        &fixture,
+        &[
+            ("sid", "peer"),
+            ("scope", "retained_history"),
+            ("address", &target_address),
+            ("peer", &target_peer),
+        ],
+        Some(&original),
+    );
+    assert_eq!(target["position"], "address");
+    assert!(
+        target["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["address"] == edge["target_evidence"]["address"])
+    );
+    assert!(
+        target["relationship_context"]["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|turn| turn["id"] == edge["target_turn"]
+                && turn["address"] == edge["target_evidence"]["address"])
+    );
+
     assert!(
         !page["entries"]
             .as_array()
