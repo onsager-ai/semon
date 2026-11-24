@@ -1804,9 +1804,55 @@ fn malformed_spawn_notice_and_unknown_parent_liveness_leave_child_stalled() {
     };
     writeln!(append, "{}", notice("bad id")).unwrap();
     assert_working(&mut query);
+    for content in [
+        "<task-notification><task-id>example-agent<tool-use-id>spawn</tool-use-id><status>completed</status></task-notification>",
+        "<task-notification><task-id>example-agent</task-id><task-id>other</task-id><tool-use-id>spawn</tool-use-id><status>completed</status></task-notification>",
+    ] {
+        writeln!(
+            append,
+            "{}",
+            json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 4),
+            "origin":{"kind":"task-notification"}, "message":{"role":"user","content":content}})
+        )
+        .unwrap();
+        assert_working(&mut query);
+    }
     writeln!(append, "{}", notice("example-agent")).unwrap();
     let listed = call(&mut query, "list_sessions", json!({"parent":"parent"}));
     assert_eq!(listed["sessions"][0]["state"], "ended");
+}
+
+#[test]
+fn nested_child_with_missing_root_remains_stalled() {
+    let home = Home::new("testbox");
+    home.agent("missing-root", "outer", "spawn-outer", &[
+        user("outer", ts(1, 0), "Delegate"),
+        assistant("outer", ts(1, 1), vec![tool("spawn-inner", "Agent", json!({"prompt":"Review"}))]),
+        json!({"type":"user", "sessionId":"outer", "timestamp":ts(1, 2),
+            "toolUseResult":{"status":"async_launched", "agentId":"inner"},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn-inner","content":"Started"}]}}),
+    ]);
+    home.agent(
+        "outer",
+        "inner",
+        "spawn-inner",
+        &[
+            user("inner", ts(1, 2), "Review"),
+            assistant("inner", ts(1, 3), vec![text("Still working")]),
+        ],
+    );
+    let mut query = home.query();
+    let listed = call(&mut query, "list_sessions", json!({"parent":"outer"}));
+    assert_eq!(listed["sessions"][0]["id"], "inner");
+    assert_eq!(listed["sessions"][0]["state"], "working");
+    let stalls = call(&mut query, "stalls", json!({"idle_minutes":60}));
+    assert!(
+        stalls["stalls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "inner" && row["stall_reason"] == "no-output")
+    );
 }
 
 #[test]

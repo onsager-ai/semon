@@ -2230,11 +2230,11 @@ impl<'a> Builder<'a> {
             return endpoint.root_alive;
         }
         let root = &self.sessions[self.root(session)];
+        if root.kind != SessKind::Lineage {
+            return None;
+        }
         if root.alive {
             return Some(true);
-        }
-        if root.kind != SessKind::Lineage {
-            return Some(false);
         }
         let mut candidates = root.pid_files.iter().filter(|pid| {
             pid.updated
@@ -2248,7 +2248,12 @@ impl<'a> Builder<'a> {
     }
 
     fn graph_root_alive(&self, session: usize) -> bool {
-        self.graph_root_liveness(session) == Some(true)
+        self.staged_endpoints
+            .get(&self.sessions[session].key)
+            .map_or_else(
+                || self.sessions[self.root(session)].alive,
+                |endpoint| endpoint.root_alive == Some(true),
+            )
     }
 
     fn match_selected(&self, at: Ref) -> bool {

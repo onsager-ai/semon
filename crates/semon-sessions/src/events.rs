@@ -106,7 +106,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// retains the native end-turn marker.
 /// v44: retain qualified Claude task headers and explicit SendMessage resumes.
 /// v45: remove assistant end-turn as subagent lifecycle evidence.
-pub(crate) const CACHE_VERSION: u32 = 46;
+/// v47: retain invalid and ambiguous Claude task IDs.
+pub(crate) const CACHE_VERSION: u32 = 47;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -4760,6 +4761,28 @@ pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str
     result
 }
 
+fn notification_task_id(header: &str) -> Option<Result<String, ()>> {
+    let openings = header.match_indices("<task-id").count();
+    let closings = header.match_indices("</task-id>").count();
+    if openings == 0 && closings == 0 {
+        return None;
+    }
+    if openings != 1 || closings != 1 {
+        return Some(Err(()));
+    }
+    Some(
+        inner(header, "task-id")
+            .filter(|id| {
+                !id.is_empty()
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            .map(str::to_owned)
+            .ok_or(()),
+    )
+}
+
 fn notification_header(body: &str) -> &str {
     let end = ["<result>", "<summary>"]
         .into_iter()
@@ -4932,17 +4955,7 @@ fn prompt_events(
             origin.and_then(|origin| field(origin, "kind")) == Some("task-notification");
         for (id, status, body) in notifications(text) {
             let task_id = if delivered {
-                inner(notification_header(body), "task-id").map(|id| {
-                    if !id.is_empty()
-                        && id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-                    {
-                        Ok(id.to_owned())
-                    } else {
-                        Err(())
-                    }
-                })
+                notification_task_id(notification_header(body))
             } else {
                 None
             };

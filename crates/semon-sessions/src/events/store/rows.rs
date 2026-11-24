@@ -15,7 +15,7 @@ struct EventState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     poll_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    task_id: Option<String>,
+    task_id: Option<Result<String, ()>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resumed_agent: Option<String>,
     #[serde(default)]
