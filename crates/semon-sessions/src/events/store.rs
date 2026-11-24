@@ -10265,7 +10265,7 @@ mod tests {
                 Event {
                     k: Kind::Tn,
                     o: 19,
-                    task_id: Some("example-agent".to_owned()),
+                    task_id: Some(Ok("example-agent".to_owned())),
                     ..Event::default()
                 },
                 // A peer with nothing known is still a peer.

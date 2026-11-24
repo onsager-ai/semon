@@ -1771,7 +1771,7 @@ struct SessionInputs {
     files: Vec<(PathBuf, FileRevision)>,
     baseline: String,
     links: Vec<String>,
-    root_alive: bool,
+    root_alive: Option<bool>,
     background_liveness: Vec<(PathBuf, Option<i64>)>,
     liveness: (bool, bool, bool),
     clock: Option<i64>,
@@ -2225,13 +2225,30 @@ impl<'a> Builder<'a> {
             .unwrap_or_else(|| self.sessions[self.root(session)].key.clone())
     }
 
+    fn graph_root_liveness(&self, session: usize) -> Option<bool> {
+        if let Some(endpoint) = self.staged_endpoints.get(&self.sessions[session].key) {
+            return endpoint.root_alive;
+        }
+        let root = &self.sessions[self.root(session)];
+        if root.alive {
+            return Some(true);
+        }
+        if root.kind != SessKind::Lineage {
+            return Some(false);
+        }
+        let mut candidates = root.pid_files.iter().filter(|pid| {
+            pid.updated
+                .zip(root.last)
+                .is_some_and(|(updated, last)| updated.saturating_sub(last) > 5 * 60_000)
+        });
+        match (candidates.next(), candidates.next()) {
+            (Some(pid), None) if pid.gone => Some(false),
+            _ => None,
+        }
+    }
+
     fn graph_root_alive(&self, session: usize) -> bool {
-        self.staged_endpoints
-            .get(&self.sessions[session].key)
-            .map_or_else(
-                || self.sessions[self.root(session)].alive,
-                |endpoint| endpoint.root_alive,
-            )
+        self.graph_root_liveness(session) == Some(true)
     }
 
     fn match_selected(&self, at: Ref) -> bool {
@@ -3192,7 +3209,7 @@ impl<'a> Builder<'a> {
                             .entry(id.clone())
                             .or_default()
                             .push((position, at));
-                        if let Some(task_id) = &event.task_id {
+                        if let Some(Ok(task_id)) = &event.task_id {
                             task_notifications
                                 .entry(task_id.clone())
                                 .or_default()
@@ -3370,8 +3387,8 @@ impl<'a> Builder<'a> {
                     self.of_file[at.0] == spawner
                         && event(self.files, *at)
                             .task_id
-                            .as_deref()
-                            .is_none_or(|id| id == native_id)
+                            .as_ref()
+                            .is_none_or(|id| id.as_deref() == Ok(native_id))
                 })
                 .map(|at| (at, None));
             let resume_calls = resumes
@@ -3493,7 +3510,7 @@ impl<'a> Builder<'a> {
                 result = Some((text, event(self.files, at).t, false));
                 previews.insert("result", PreviewRef::new(at, "handback"));
             }
-            let running = self.graph_root_alive(spawner);
+            let running = self.graph_root_liveness(spawner) != Some(false);
             // A resumed run not ended yet works while its tree runs; the
             // spawn's result stays the previous run's.
             let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
@@ -5403,7 +5420,7 @@ impl<'a> Builder<'a> {
             background_liveness,
             baseline: serde_json::to_string(&session.out).expect("session serializes"),
             links,
-            root_alive: self.graph_root_alive(index),
+            root_alive: self.graph_root_liveness(index),
             liveness: (session.alive, session.busy, session.waiting),
             clock: session.first.is_none().then_some(self.now),
         }

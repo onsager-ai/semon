@@ -106,7 +106,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// retains the native end-turn marker.
 /// v44: retain qualified Claude task headers and explicit SendMessage resumes.
 /// v45: remove assistant end-turn as subagent lifecycle evidence.
-pub(crate) const CACHE_VERSION: u32 = 45;
+pub(crate) const CACHE_VERSION: u32 = 46;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -4270,7 +4270,7 @@ pub(crate) struct Event {
     pub(crate) script: u8,
     /// A Claude task notification's native task ID, independent of tool-use ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) task_id: Option<String>,
+    pub(crate) task_id: Option<Result<String, ()>>,
     /// A successful Claude SendMessage result's explicit `resumedAgentId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resumed_agent: Option<String>,
@@ -4932,11 +4932,16 @@ fn prompt_events(
             origin.and_then(|origin| field(origin, "kind")) == Some("task-notification");
         for (id, status, body) in notifications(text) {
             let task_id = if delivered {
-                inner(notification_header(body), "task-id").filter(|id| {
-                    !id.is_empty()
+                inner(notification_header(body), "task-id").map(|id| {
+                    if !id.is_empty()
                         && id
                             .bytes()
                             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                    {
+                        Ok(id.to_owned())
+                    } else {
+                        Err(())
+                    }
                 })
             } else {
                 None
@@ -4949,7 +4954,7 @@ fn prompt_events(
                     t: time,
                     id: id.map(str::to_owned),
                     n: status.map(str::to_owned),
-                    task_id: task_id.map(str::to_owned),
+                    task_id,
                     script: (if !matches!(status, Some("killed" | "stopped"))
                         && (status == Some("failed")
                             || inner(body, "summary")

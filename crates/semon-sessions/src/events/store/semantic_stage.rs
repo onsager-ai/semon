@@ -137,8 +137,12 @@ fn phase(p: Phase) -> &'static str {
         Phase::Publication => "publication",
     }
 }
-fn root_alive(c: &Connection, key: &str) -> rusqlite::Result<bool> {
-    c.query_row("SELECT COALESCE(json_extract(metadata,'$.alive'),0) FROM catalog_semantic_endpoints WHERE session_key=?1",[key],|r|r.get(0)).optional().map(|v|v.unwrap_or(false))
+fn root_alive(c: &Connection, key: &str) -> rusqlite::Result<Option<bool>> {
+    c.query_row(
+        "SELECT json_extract(metadata,'$.root_alive') FROM catalog_semantic_endpoints WHERE session_key=?1",
+        [key],
+        |row| row.get(0),
+    ).optional().map(Option::flatten)
 }
 fn normalized_endpoint(c: &Connection, key: &str, used: &mut usize) -> rusqlite::Result<Endpoint> {
     let(text,parent,root):(Option<String>,Option<String>,Option<String>)=c.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;

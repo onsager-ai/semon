@@ -1755,6 +1755,61 @@ fn busy_claude_process_that_dies_after_its_last_pid_update_still_stalls() {
 }
 
 #[test]
+fn malformed_spawn_notice_and_unknown_parent_liveness_leave_child_stalled() {
+    use std::io::Write;
+
+    let home = Home::new("testbox");
+    home.write(
+        "claude/sessions/50.json",
+        &json!({
+            "pid": 50, "sessionId": "parent", "status": "busy"
+        })
+        .to_string(),
+    );
+    let parent = home.lines("claude/projects/-work-proj/parent.jsonl", &[
+        human("parent", ts(1, 0), "Run the example"),
+        assistant("parent", ts(1, 1), vec![tool("spawn", "Agent", json!({"prompt":"Review"}))]),
+        json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 2),
+            "toolUseResult":{"status":"async_launched", "agentId":"example-agent"},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn","content":"Started"}]}}),
+    ]);
+    home.agent(
+        "parent",
+        "example-agent",
+        "spawn",
+        &[
+            user("parent", ts(1, 2), "Review"),
+            assistant("parent", ts(1, 3), vec![text("Still working")]),
+        ],
+    );
+    let mut query = home.query();
+    let assert_working = |query: &mut Query| {
+        let listed = call(query, "list_sessions", json!({"parent":"parent"}));
+        assert_eq!(listed["sessions"][0]["state"], "working");
+        let stalls = call(query, "stalls", json!({"idle_minutes":60}));
+        assert!(
+            stalls["stalls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == "example-agent" && row["stall_reason"] == "no-output")
+        );
+    };
+    assert_working(&mut query);
+    let mut append = fs::OpenOptions::new().append(true).open(parent).unwrap();
+    let notice = |task: &str| {
+        json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 4),
+        "origin":{"kind":"task-notification"}, "message":{"role":"user","content":format!(
+            "<task-notification><task-id>{task}</task-id><tool-use-id>spawn</tool-use-id><status>completed</status><result>Done</result></task-notification>")}})
+    };
+    writeln!(append, "{}", notice("bad id")).unwrap();
+    assert_working(&mut query);
+    writeln!(append, "{}", notice("example-agent")).unwrap();
+    let listed = call(&mut query, "list_sessions", json!({"parent":"parent"}));
+    assert_eq!(listed["sessions"][0]["state"], "ended");
+}
+
+#[test]
 fn resumed_claude_subagent_ends_when_its_parent_receives_the_result() {
     use std::io::Write;
 

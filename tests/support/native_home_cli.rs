@@ -2,6 +2,7 @@ use std::{
     fs,
     path::PathBuf,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,12 +13,16 @@ pub struct Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("semon-home-cli-{}-{nonce}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "semon-home-cli-{}-{nonce}-{serial}",
+            std::process::id()
+        ));
         fs::create_dir(&root).unwrap();
         let fixture = Self {
             claude: root.join("configured-claude"),
