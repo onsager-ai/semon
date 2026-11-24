@@ -1633,7 +1633,17 @@ pub(in super::super) fn retained_launch_between(
                     *storage_parent == Path::new(&parent.path).with_extension("")
                 }));
             let native_call = claude_parent.and_then(|_| member.receipt.claude_agent_call());
-            let marker = if native_call.is_none() {
+            let codex_spawn = if child.harness == "codex" && observed.harness == "codex" {
+                tx.query_row(
+                    "SELECT nickname FROM fact_session_observation WHERE source=?1 AND pos=0
+                     AND pos<?2 AND kind='header' AND parent_id=?3 AND nickname IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM fact_record WHERE source=?1 AND pos=0 AND kind='session_meta' AND NOT gap)
+                     ORDER BY occurrence DESC LIMIT 1",
+                    params![member.source, i64::try_from(child_reference.offset).map_err(index)?, observed.native_id],
+                    |row| row.get::<_, String>(0),
+                ).optional().map_err(index)?
+            } else { None };
+            let marker = if native_call.is_none() && codex_spawn.is_none() {
                 let marker_offset: i64 = tx.query_row(
                     "SELECT p.pos FROM fact_parent_observation p
                      JOIN fact_record r ON r.source=p.source AND r.pos=p.pos AND r.block=0 AND NOT r.gap
@@ -1652,7 +1662,7 @@ pub(in super::super) fn retained_launch_between(
                 None
             };
             let call_id = native_call.or_else(|| marker.as_ref().and_then(|marker| marker.tool_id.as_deref()));
-            let prompt = if call_id.is_none() {
+            let prompt = if call_id.is_none() && codex_spawn.is_none() {
                 Some(marker.as_ref().and_then(|marker| marker.handoff.as_deref()).ok_or_else(unavailable)?)
             } else {
                 None
@@ -1663,7 +1673,7 @@ pub(in super::super) fn retained_launch_between(
                     .map(|(id, reference)| (*id, reference.offset))
                     .collect::<BTreeMap<_, _>>(),
             )?;
-            let candidates = certified_launch_calls(db, &bounds, call_id)?;
+            let candidates = certified_launch_calls(db, &bounds, call_id, codex_spawn.as_deref())?;
             if candidates.len() > crate::handoff::MAX_CALLS {
                 return Err(unavailable());
             }
@@ -1751,6 +1761,7 @@ fn certified_launch_calls(
     db: &chunk_proofs::Snapshot,
     bounds: &str,
     call: Option<&str>,
+    spawn_name: Option<&str>,
 ) -> Result<Vec<LaunchCallRow>, ReadError> {
     let tx = db.lock().map_err(index)?;
     let mut statement = tx
@@ -1760,13 +1771,19 @@ fn certified_launch_calls(
          CROSS JOIN fact_tool_call c ON c.source=CAST(prefix.key AS INTEGER) AND c.pos<prefix.value
          CROSS JOIN fact_record r ON r.source=c.source AND r.pos=c.pos AND r.block=0 AND NOT r.gap
          WHERE c.call_id IS NOT NULL AND c.tool IS NOT NULL AND
-           ((?2 IS NULL AND c.tool IN ('Bash','Skill')) OR c.call_id=?2)
-         ORDER BY c.source,c.pos,c.block,c.occurrence LIMIT ?3",
+           ((?2 IS NULL AND ?3 IS NULL AND c.tool IN ('Bash','Skill')) OR c.call_id=?2
+            OR (?3 IS NOT NULL AND c.tool IN ('spawn_agent','collaboration.spawn_agent') AND c.task_name=?3))
+         ORDER BY c.source,c.pos,c.block,c.occurrence LIMIT ?4",
         )
         .map_err(index)?;
     statement
         .query_map(
-            params![bounds, call, crate::handoff::MAX_CALLS as i64 + 1],
+            params![
+                bounds,
+                call,
+                spawn_name,
+                crate::handoff::MAX_CALLS as i64 + 1
+            ],
             |row| {
                 Ok((
                     row.get(0)?,

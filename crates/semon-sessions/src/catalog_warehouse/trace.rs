@@ -281,7 +281,7 @@ pub(super) fn read(
         sessions[child.as_str()] = session_summary(&window, current.as_ref(), receiving.at);
         previews[child.as_str()] = json!(window.identity.generation);
         ids.insert(target.clone());
-        launched.push(json!(target));
+        launched.push(target.clone());
         handoffs.push(json!({"id":target,"kind":"spawn","from":key,"to":child,"at":at,
             "status":status,"done":done,"declined":false,"source_turn":root,"target_turn":target,"brief_session":child}));
         evidence.push(match address {

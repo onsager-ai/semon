@@ -1,5 +1,10 @@
 import { array, boolean, dictionary, number, object, text } from '../domain/validate';
-import { parseNativeEntryAddress, type NativeEntryAddress } from '../lib/sessionRoute';
+import {
+  parseNativeEntryAddress,
+  parseRetainedPeerAddress,
+  type NativeEntryAddress,
+  type RetainedPeerAddress,
+} from '../lib/sessionRoute';
 import {
   parseRecordedRelationship,
   parseRecordedTurn,
@@ -67,7 +72,9 @@ export interface CatalogTranscriptPage {
     state: 'incomplete' | 'complete';
     turn_ids: string[];
     turns: RecordedTurn[];
-    handoffs: RecordedRelationship[];
+    handoffs: (RecordedRelationship & {
+      targetEvidence?: { address: NativeEntryAddress; peer?: RetainedPeerAddress };
+    })[];
     sessions: Record<string, RecordedSessionPresentation>;
     previews: Record<string, string>;
   };
@@ -216,7 +223,27 @@ function parseRelationshipContext(
     context.handoffs.length > 200
   )
     throw Error('Invalid ranged relationship context');
-  const relationships = array(context.handoffs, parseRecordedRelationship);
+  const relationships = array(context.handoffs, (value) => {
+    const reading = parseRecordedRelationship(value),
+      raw = object(value).target_evidence;
+    if (raw == null) return reading;
+    if (
+      !native ||
+      identity.read_scope !== 'retained_history' ||
+      reading.edge.from !== identity.catalog_key ||
+      !reading.targetTurn ||
+      reading.reason
+    )
+      throw Error('Invalid retained transcript relationship evidence');
+    const target = object(raw);
+    return {
+      ...reading,
+      targetEvidence: {
+        address: parseNativeEntryAddress(target.address),
+        peer: target.peer == null ? undefined : parseRetainedPeerAddress(target.peer),
+      },
+    };
+  });
   const turns = array(context.turns ?? [], (value) => {
       const row = object(value);
       if (row.sid !== identity.catalog_key) throw Error('Invalid ranged turn owner');

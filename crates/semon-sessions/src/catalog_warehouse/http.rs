@@ -1523,7 +1523,8 @@ fn relationship_context(
                 json!({
                     "id":relay.turn,"kind":"relay","from":key,"to":relay.key,"at":relay.sent_at,
                     "status":"done","declined":false,"source_turn":turn.id,"target_turn":relay.turn,
-                    "brief_session":peer.is_none().then_some(&relay.key),
+                    "brief_session":relay.key,
+                    "target_evidence":peer.map(|peer| retained_target(peer, &relay.key, relay.address)),
                 }),
             );
         }
@@ -1593,11 +1594,21 @@ fn relationship_context(
             let resolution =
                 available_relationship(trace::spawn_window(view, source, &child, peer, provider))?
                     .flatten();
-            let edge = if let Some((window, target)) = resolution {
+            let target = resolution.and_then(|(window, target)| {
+                let entry = selected::render::turn_address(
+                    &window,
+                    source.namespace.as_str(),
+                    &child,
+                    &target,
+                )?;
+                Some((window, target, entry))
+            });
+            let edge = if let Some((window, target, entry)) = target {
                 remember(&window, Some(at))?;
                 let (status, done) = trace::spawn_outcome(parent, &window, &address, block);
                 json!({"id":target,"kind":"spawn","from":key,"to":child,"at":at,"status":status,"done":done,
-                    "declined":false,"source_turn":turn.id,"target_turn":target,"brief_session":peer.is_none().then_some(&child)})
+                    "declined":false,"source_turn":turn.id,"target_turn":target,"brief_session":child,
+                    "target_evidence":peer.map(|peer| retained_target(peer, &child, entry))})
             } else {
                 json!({"id":crate::model::legacy_relay_turn_id(&format!("launch:{}:{}:{block}",address.path,address.offset)),
                     "kind":"spawn","from":key,"to":child,"at":at,"status":"off","declined":false,
@@ -1680,6 +1691,10 @@ fn relationship_context(
         json!({"state":if incomplete {"incomplete"} else {"complete"},"turn_ids":turn_ids,
         "turns":turns.into_values().collect::<Vec<_>>(),"handoffs":handoffs,"sessions":sessions,"previews":previews}),
     )
+}
+
+fn retained_target(peer: selected::PeerBinding<'_>, target: &str, address: Value) -> Value {
+    json!({"address":address,"peer":(target != peer.trace).then_some(json!({"trace":peer.trace,"witness":peer.witness}))})
 }
 
 fn read_annotations(

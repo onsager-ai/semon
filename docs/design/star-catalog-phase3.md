@@ -136,8 +136,9 @@ For linked participants, the Viewer reads `name`, `harness` and `model` from
 `live_observation` and `activity` (`tool`, `since`) for child cards. `previews`
 keys are Catalog keys and their values are 64-character generation hashes.
 Preview owners use those hashes when requesting body text through the selected
-reader. Retained Trace evidence continues to carry its certified address and
-peer witness. Plain session links keep opening the current owner.
+reader. Retained relationship targets and Trace evidence carry their certified address
+and, for a peer, the original Trace witness. Plain session links keep opening
+the current owner.
 
 ## Pagination and committed transcript prefixes
 
