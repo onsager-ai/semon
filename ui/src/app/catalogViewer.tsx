@@ -33,7 +33,6 @@ import type { ViewerHost, ViewerPage } from '../viewer-host';
 import { parseCatalogCapabilities, type CatalogCapabilities } from '../state/catalog-capabilities';
 import {
   catalogSessionKey,
-  parseCatalogIdentity,
   parseCatalogPage,
   type CatalogPage,
   type CatalogSession,
@@ -70,7 +69,7 @@ import {
   updateSessionJump,
 } from '../lib/transcript';
 import { releaseScreen, Glyph, screenText } from '../lib/screens';
-import { ApiError, requestJson, retryable } from '../lib/api';
+import { ApiError, requestJson } from '../lib/api';
 import { parseAccount } from '../lib/account';
 import {
   setGeometry,
@@ -696,9 +695,9 @@ export function createCatalogViewer(
     causalEpoch = 0,
     causalLoading = false;
   const causalExpanded = new Map<string, Set<string>>();
-  const api = async (path: string, body?: unknown): Promise<unknown> => {
+  const api = async (path: string, body?: unknown, timeoutMs = 15_000): Promise<unknown> => {
     const controller = scope.request(),
-      deadline = scope.timeout(() => controller.abort(), 15000);
+      deadline = scope.timeout(() => controller.abort(), timeoutMs);
     if (
       path === '/api/viewer/home' ||
       path.startsWith('/api/viewer/home?') ||
@@ -2731,6 +2730,24 @@ export function createCatalogViewer(
     if (status === 0) return 'Source observation is unavailable. Retrying…';
     return 'History could not be read. Retry after checking your connection.';
   }
+  function retryable(error: unknown) {
+    if (
+      error instanceof ApiError &&
+      (error.history === 'recovery_failed' || error.code === 'retained_source_unavailable')
+    )
+      return false;
+    if (!(error && typeof error === 'object' && 'status' in error))
+      return error instanceof Error && error.name === 'AbortError';
+    const status = error && typeof error === 'object' && 'status' in error ? error.status : 0;
+    return (
+      status === 0 ||
+      status === 429 ||
+      status === 500 ||
+      status === 502 ||
+      status === 503 ||
+      status === 504
+    );
+  }
   function preserveScroll() {
     const scroll = window.matchMedia('(max-width: 760px)').matches
       ? window.scrollY
@@ -2764,6 +2781,7 @@ export function createCatalogViewer(
   }
   function observeSelectedProgress(view: SelectedView, progress: CatalogRecoveryProgress) {
     if (view.sourceKey !== capabilities.source_key) return;
+    if (view.nativeStore && !view.nativeStore.selectedPage()) return;
     if (!view.recovery.observeProgress(progress)) return;
     view.note = '';
     view.transientNote = false;
@@ -3417,7 +3435,7 @@ export function createCatalogViewer(
     drawSelected(view);
     try {
       const loaded = await readNativeTranscript(store, window, {
-        read: () => api('/api/session-transcript?' + p),
+        read: (timeoutMs) => api('/api/session-transcript?' + p, undefined, timeoutMs),
         current,
         recovery: view.recovery,
         retry(delay, error) {
@@ -3470,14 +3488,10 @@ export function createCatalogViewer(
         newest = true;
       } else {
         view.note =
-          error instanceof ApiError &&
-          error.status === 503 &&
-          error.retryable === false &&
-          !error.history
+          error instanceof ApiError && error.status === 503 && !error.history
             ? error.message
             : readError(error);
-        view.transientNote =
-          error instanceof ApiError ? (error.retryable ?? retryable(error)) : retryable(error);
+        view.transientNote = error instanceof ApiError && error.retryable === true;
       }
     } finally {
       if (view.navigationEpoch === epoch) {
@@ -3597,48 +3611,16 @@ export function createCatalogViewer(
     }
   }
   async function observeSelected(view: SelectedView) {
-    if (disposed || active !== view || view.loading || view.observing) return;
     if (view.nativeStore) {
-      const store = view.nativeStore,
-        page = store.selectedPage(),
-        epoch = view.navigationEpoch;
       if (
-        !page ||
-        page.position !== 'latest' ||
-        !view.following ||
-        view.readScope !== 'current' ||
-        view.retry !== undefined ||
-        !capabilities.selected_identity
+        view.following &&
+        !view.loading &&
+        view.nativeStore.selectedPage()?.position !== 'address'
       )
-        return;
-      const p = params(view.readScope);
-      p.set('sid', view.key);
-      view.observing = true;
-      try {
-        const result = object(await api('/api/session-identity?' + p));
-        const identity = parseCatalogIdentity(result.identity);
-        if (
-          result.api === 1 &&
-          identity.source_key === view.sourceKey &&
-          identity.catalog_key === view.key &&
-          identity.read_scope === view.readScope &&
-          !disposed &&
-          active === view &&
-          view.navigationEpoch === epoch &&
-          view.following &&
-          view.retry === undefined &&
-          view.nativeStore === store &&
-          store.selectedPage() === page &&
-          identity.generation !== page.identity.generation
-        )
-          await loadNative(view);
-      } catch {
-        // Keep the accepted native range and observe again on the next tick.
-      } finally {
-        view.observing = false;
-      }
+        await loadNative(view);
       return;
     }
+    if (disposed || active !== view || view.loading || view.observing) return;
     const source = view.sourceKey,
       p = params(view.readScope);
     p.set('sid', view.key);
@@ -4828,7 +4810,7 @@ export function createCatalogViewer(
       : main.scrollHeight - main.scrollTop - main.clientHeight;
   }
   const readingScroll = () => {
-    if (!active || active.opening || !(active.nativeStore ?? active.store).selectedPage()) return;
+    if (!active || active.opening || !active.store.selectedPage()) return;
     const gap = readingGap();
     // Content-visibility can adjust a scroll offset after layout has settled,
     // without changing the observed boxes. Keep the initial tail transaction
@@ -4942,7 +4924,7 @@ export function createCatalogViewer(
     if (
       active &&
       capabilities.selected_transcript &&
-      (active.nativeStore ?? active.store).selectedPage() &&
+      active.store.selectedPage() &&
       document.visibilityState === 'visible'
     )
       void observeSelected(active);

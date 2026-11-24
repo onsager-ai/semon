@@ -1270,28 +1270,6 @@ fn read_transcript(
     )
     .map_err(read_error)?;
     let Some(component) = component else {
-        // Check publication in the same snapshot that missed the key. A
-        // concurrent completion cannot turn an older partial miss into a 404.
-        let db = view.lock().map_err(read_error)?;
-        let complete: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')
-                 AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_completeness' AND value='complete')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| read_error(index(error)))?;
-        if !complete
-            || crate::events::store::catalog_publication_pending(&db)
-                .map_err(|error| read_error(index(error)))?
-        {
-            return Err(error(
-                503,
-                "catalog_unavailable",
-                "The session Catalog is still publishing.",
-                true,
-            ));
-        }
         return Err(not_found());
     };
     let entries =

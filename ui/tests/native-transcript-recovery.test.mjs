@@ -74,24 +74,29 @@ const page = {
 function fixture(t, answers) {
   let requests = 0;
   t.mock.method(globalThis, 'fetch', async () => {
-    const [status, body] = answers[requests++];
+    const answer = answers[requests++];
+    const [status, body] = typeof answer === 'function' ? await answer() : answer;
     return Response.json(body, { status });
   });
   const store = new CatalogNativeTranscriptStore(selection, 'current');
-  const delays = [];
+  const delays = [],
+    timeouts = [];
   const recovery = new CatalogRecovery(5);
   const read = () =>
     readNativeTranscript(
       store,
       { position: 'latest' },
       {
-        read: () => requestJson('/api/session-transcript?sid=example'),
+        read(timeoutMs) {
+          timeouts.push(timeoutMs);
+          return requestJson('/api/session-transcript?sid=example');
+        },
         current: () => true,
         recovery,
         retry: (delay) => delays.push(delay),
       },
     );
-  return { store, read, delays, requests: () => requests };
+  return { store, read, delays, timeouts, recovery, requests: () => requests };
 }
 
 const failure = (status, code, retryable, progress) => [
@@ -100,13 +105,14 @@ const failure = (status, code, retryable, progress) => [
 ];
 
 test('the initial native transcript loads after history, Catalog and retained retries', async (t) => {
+  t.mock.method(Math, 'random', () => 0.5);
   const { store, read, delays, requests } = fixture(t, [
     failure(503, 'history_rebuilding', true, { done: 1, total: 4 }),
     failure(503, 'catalog_unavailable', true),
     failure(503, 'retained_source_preparing', true),
     [200, page],
   ]);
-  const backoff = [1000, 2000, 4000];
+  const backoff = [500, 1000, 2000];
   for (const [attempt, delay] of backoff.entries()) {
     assert.equal(await read(), false);
     assert.equal(delays.at(-1), delay);
@@ -130,12 +136,55 @@ test('the initial native transcript surfaces a non-retryable 503 without schedul
 });
 
 test('persistent publication failure stops after five automatic retries', async (t) => {
+  t.mock.method(Math, 'random', () => 0.5);
   const { read, delays, requests } = fixture(
     t,
     Array(6).fill(failure(503, 'catalog_unavailable', true)),
   );
   for (let i = 0; i < 5; ++i) assert.equal(await read(), false);
   await assert.rejects(read, { code: 'catalog_unavailable' });
-  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000]);
+  assert.deepEqual(delays, [500, 1000, 2000, 4000, 8000]);
   assert.equal(requests(), 6);
+});
+
+test('503 without a retryable flag does not schedule an initial retry', async (t) => {
+  const { read, delays, requests } = fixture(t, [failure(503, 'catalog_unavailable')]);
+  await assert.rejects(read, { code: 'catalog_unavailable' });
+  assert.deepEqual(delays, []);
+  assert.equal(requests(), 1);
+});
+
+test('success from a stalled retry is ignored after the overall deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  t.mock.method(Math, 'random', () => 0.5);
+  const pending = failure(503, 'catalog_unavailable', true);
+  const { store, read, delays, timeouts, recovery, requests } = fixture(t, [
+    pending,
+    pending,
+    () => new Promise((resolve) => setTimeout(() => resolve([200, page]), 15_000)),
+  ]);
+  assert.equal(await read(), false);
+  t.mock.timers.tick(14_000);
+  assert.equal(await read(), false);
+  t.mock.timers.tick(26_000);
+  const stalled = read();
+  assert.deepEqual(timeouts, [15_000, 15_000, 5_000]);
+  t.mock.timers.tick(5_000);
+  assert.equal(recovery.stopped, true);
+  t.mock.timers.tick(10_000);
+  assert.equal(await stalled, false);
+  assert.deepEqual(delays, [500, 1000]);
+  assert.equal(store.selectedPage(), null);
+  assert.equal(await read(), false);
+  assert.equal(requests(), 3);
+});
+
+test('full jitter samples different offsets across the backoff window', async (t) => {
+  const samples = [0.1, 0.9];
+  t.mock.method(Math, 'random', () => samples.shift());
+  const pending = failure(503, 'catalog_unavailable', true);
+  const { read, delays } = fixture(t, [pending, pending]);
+  assert.equal(await read(), false);
+  assert.equal(await read(), false);
+  assert.deepEqual(delays, [100, 1800]);
 });

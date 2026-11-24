@@ -106,22 +106,3 @@ export async function requestJson(
   }
   return response.json() as Promise<unknown>;
 }
-
-export function retryable(error: unknown) {
-  if (
-    error instanceof ApiError &&
-    (error.history === 'recovery_failed' || error.code === 'retained_source_unavailable')
-  )
-    return false;
-  if (!(error && typeof error === 'object' && 'status' in error))
-    return error instanceof Error && error.name === 'AbortError';
-  const status = error && typeof error === 'object' && 'status' in error ? error.status : 0;
-  return (
-    status === 0 ||
-    status === 429 ||
-    status === 500 ||
-    status === 502 ||
-    status === 503 ||
-    status === 504
-  );
-}

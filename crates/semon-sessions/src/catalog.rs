@@ -9808,41 +9808,6 @@ mod tests {
     }
 
     #[test]
-    fn native_transcript_requires_complete_publication_to_report_a_missing_session() {
-        let fixture = Fixture::new();
-        fixture.source("cold-transcript");
-        drop(fixture.open_index());
-        let source = warehouse::host_source(&fixture.options, "local");
-        let read = |query| {
-            let reply = warehouse::http::transcript(&source, query, None, None);
-            let body: Value = serde_json::from_slice(&reply.body).unwrap();
-            (reply.status, body)
-        };
-        let (status, cold) = read("sid=cold-transcript");
-        assert_eq!(status, 503, "{cold}");
-        assert_eq!(cold["error"]["code"], "catalog_unavailable");
-        assert_eq!(cold["error"]["retryable"], true);
-
-        fixture.publish_existing();
-        assert_eq!(read("sid=cold-transcript").0, 200);
-        let (status, missing) = read("sid=missing");
-        assert_eq!(status, 404, "{missing}");
-        assert_eq!(missing["error"]["code"], "session_not_found");
-        assert_eq!(missing["error"]["retryable"], false);
-
-        let unpublished = fixture.source("unpublished");
-        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        db.execute(
-            "INSERT INTO session_catalog_invalidations VALUES (?1,1,'changed',0)",
-            [unpublished.to_str().unwrap()],
-        )
-        .unwrap();
-        let (status, pending) = read("sid=unpublished");
-        assert_eq!(status, 503, "{pending}");
-        assert_eq!(pending["error"]["retryable"], true);
-    }
-
-    #[test]
     fn initial_catalog_wait_does_not_demand_when_publication_predates_wait() {
         let fixture = Fixture::new();
         fixture.source("published-before-wait");
