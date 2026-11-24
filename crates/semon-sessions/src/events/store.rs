@@ -888,11 +888,24 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
     connection
         .busy_timeout(Duration::from_millis(100))
         .map_err(io::Error::other)?;
-    let stages: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='catalog_semantic_stage')", [], |row| row.get(0)).map_err(io::Error::other)?;
-    let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining')) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_gc' AND value='1')",[],|row|row.get(0)).map_err(io::Error::other)?;
+    if catalog_publication_pending(&connection).map_err(io::Error::other)? {
+        return Ok(true);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_gc' AND value='1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(io::Error::other)
+}
+
+pub(crate) fn catalog_publication_pending(connection: &Connection) -> rusqlite::Result<bool> {
+    let stages: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='catalog_semantic_stage')", [], |row| row.get(0))?;
+    let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining'))",[],|row|row.get(0))?;
     Ok(pending
-        || catalog_version_blocked(&connection).map_err(io::Error::other)?
-        || (stages && semantic_stage::active(&connection).map_err(io::Error::other)?))
+        || catalog_version_blocked(connection)?
+        || (stages && semantic_stage::active(connection)?))
 }
 
 /// Qualify a former Catalog source as a verified relocation of a current one.

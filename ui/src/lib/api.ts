@@ -8,6 +8,7 @@ export class ApiError extends Error {
     readonly status: number,
     readonly history?: { done: number; total: number; retryMs: number } | 'recovery_failed',
     readonly code?: string,
+    readonly retryable?: boolean,
   ) {
     super(message);
   }
@@ -43,7 +44,17 @@ export async function requestJson(
         const error = payload.error;
         if (error && typeof error === 'object' && 'code' in error) {
           if (response.status === 503 && error.code === 'history_recovery_failed')
-            throw new ApiError('History recovery failed', 503, 'recovery_failed');
+            throw new ApiError(
+              'History recovery failed',
+              503,
+              'recovery_failed',
+              error.code,
+              false,
+            );
+          const retryable =
+            'retryable' in error && typeof error.retryable === 'boolean'
+              ? error.retryable
+              : undefined;
           if (
             response.status === 503 &&
             error.code === 'history_rebuilding' &&
@@ -63,11 +74,17 @@ export async function requestJson(
               progress.total >= progress.done
             ) {
               const seconds = Number(response.headers.get('Retry-After')) || 1;
-              throw new ApiError('History rebuilding', 503, {
-                done: progress.done,
-                total: progress.total,
-                retryMs: Math.min(8000, Math.max(1000, seconds * 1000)),
-              });
+              throw new ApiError(
+                'History rebuilding',
+                503,
+                {
+                  done: progress.done,
+                  total: progress.total,
+                  retryMs: Math.min(8000, Math.max(1000, seconds * 1000)),
+                },
+                error.code,
+                retryable,
+              );
             }
           }
           if (typeof error.code === 'string') {
@@ -75,7 +92,7 @@ export async function requestJson(
               'message' in error && typeof error.message === 'string'
                 ? error.message
                 : response.status + ' ' + response.statusText;
-            throw new ApiError(message, response.status, undefined, error.code);
+            throw new ApiError(message, response.status, undefined, error.code, retryable);
           }
         }
       }
@@ -88,4 +105,23 @@ export async function requestJson(
     throw new ApiError(response.status + ' ' + response.statusText, response.status);
   }
   return response.json() as Promise<unknown>;
+}
+
+export function retryable(error: unknown) {
+  if (
+    error instanceof ApiError &&
+    (error.history === 'recovery_failed' || error.code === 'retained_source_unavailable')
+  )
+    return false;
+  if (!(error && typeof error === 'object' && 'status' in error))
+    return error instanceof Error && error.name === 'AbortError';
+  const status = error && typeof error === 'object' && 'status' in error ? error.status : 0;
+  return (
+    status === 0 ||
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  );
 }

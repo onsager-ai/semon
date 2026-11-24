@@ -9,6 +9,8 @@ export class CatalogRecovery {
   private terminal = false;
   private progress: CatalogRecoveryProgress = {};
 
+  constructor(private readonly maxRetries = 3) {}
+
   get stopped(): boolean {
     if (
       !this.terminal &&
@@ -26,7 +28,7 @@ export class CatalogRecovery {
     }
     this.startedAt ??= now;
     ++this.failures;
-    if (this.failures > 3) {
+    if (this.failures > this.maxRetries) {
       this.terminal = true;
       return null;
     }

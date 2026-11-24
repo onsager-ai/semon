@@ -33,6 +33,7 @@ import type { ViewerHost, ViewerPage } from '../viewer-host';
 import { parseCatalogCapabilities, type CatalogCapabilities } from '../state/catalog-capabilities';
 import {
   catalogSessionKey,
+  parseCatalogIdentity,
   parseCatalogPage,
   type CatalogPage,
   type CatalogSession,
@@ -47,6 +48,7 @@ import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catal
 import {
   CatalogNativeTranscriptStore,
   CatalogTranscriptStore,
+  readNativeTranscript,
   type CatalogNativeWindow,
 } from '../state/catalog-transcript';
 import { CatalogRecovery, type CatalogRecoveryProgress } from '../state/catalog-recovery';
@@ -68,7 +70,7 @@ import {
   updateSessionJump,
 } from '../lib/transcript';
 import { releaseScreen, Glyph, screenText } from '../lib/screens';
-import { ApiError, requestJson } from '../lib/api';
+import { ApiError, requestJson, retryable } from '../lib/api';
 import { parseAccount } from '../lib/account';
 import {
   setGeometry,
@@ -2729,24 +2731,6 @@ export function createCatalogViewer(
     if (status === 0) return 'Source observation is unavailable. Retrying…';
     return 'History could not be read. Retry after checking your connection.';
   }
-  function retryable(error: unknown) {
-    if (
-      error instanceof ApiError &&
-      (error.history === 'recovery_failed' || error.code === 'retained_source_unavailable')
-    )
-      return false;
-    if (!(error && typeof error === 'object' && 'status' in error))
-      return error instanceof Error && error.name === 'AbortError';
-    const status = error && typeof error === 'object' && 'status' in error ? error.status : 0;
-    return (
-      status === 0 ||
-      status === 429 ||
-      status === 500 ||
-      status === 502 ||
-      status === 503 ||
-      status === 504
-    );
-  }
   function preserveScroll() {
     const scroll = window.matchMedia('(max-width: 760px)').matches
       ? window.scrollY
@@ -2830,7 +2814,7 @@ export function createCatalogViewer(
             ? 'Recorded history is unavailable'
             : 'Recorded history is updating',
           retry:
-            view.recovery.stopped || (view.note && !view.loading)
+            view.recovery.stopped || (view.note && !view.loading && view.retry === undefined)
               ? {
                   label: 'Retry selected transcript',
                   run() {
@@ -3419,8 +3403,7 @@ export function createCatalogViewer(
       return;
     scope.clearTimeout(view.retry);
     view.retry = undefined;
-    const request = store.request(window),
-      p = params(view.readScope);
+    const p = params(view.readScope);
     p.set('sid', view.key);
     if (view.peer) p.set('peer', JSON.stringify(view.peer));
     if (window.position === 'earlier') p.set('cursor', window.cursor);
@@ -3433,8 +3416,23 @@ export function createCatalogViewer(
     view.root.setAttribute('aria-busy', 'true');
     drawSelected(view);
     try {
-      const value = await api('/api/session-transcript?' + p);
-      if (!current() || !store.accept(request, value)) return;
+      const loaded = await readNativeTranscript(store, window, {
+        read: () => api('/api/session-transcript?' + p),
+        current,
+        recovery: view.recovery,
+        retry(delay, error) {
+          view.note =
+            error?.history || error?.code === 'retained_source_preparing' ? readError(error) : '';
+          view.transientNote = false;
+          view.retry = scope.timeout(() => {
+            view.retry = undefined;
+            if (!current()) return;
+            if (view.recovery.stopped) drawSelected(view);
+            else void loadNative(view, window);
+          }, delay);
+        },
+      });
+      if (!loaded || !current()) return;
       const page = store.selectedPage()!;
       view.note = '';
       view.transientNote = false;
@@ -3471,19 +3469,17 @@ export function createCatalogViewer(
         view.anchorNote = 'This saved transcript position is unavailable.';
         newest = true;
       } else {
-        view.note = readError(error);
-        view.transientNote = retryable(error);
-        if (error instanceof ApiError && error.code === 'retained_source_preparing') {
-          const delay = view.recovery.fail();
-          if (delay !== null)
-            view.retry = scope.timeout(() => {
-              view.retry = undefined;
-              if (current()) void loadNative(view, window);
-            }, delay);
-        }
+        view.note =
+          error instanceof ApiError &&
+          error.status === 503 &&
+          error.retryable === false &&
+          !error.history
+            ? error.message
+            : readError(error);
+        view.transientNote =
+          error instanceof ApiError ? (error.retryable ?? retryable(error)) : retryable(error);
       }
     } finally {
-      store.reject(request);
       if (view.navigationEpoch === epoch) {
         view.loading = false;
         view.root.setAttribute('aria-busy', 'false');
@@ -3601,16 +3597,48 @@ export function createCatalogViewer(
     }
   }
   async function observeSelected(view: SelectedView) {
+    if (disposed || active !== view || view.loading || view.observing) return;
     if (view.nativeStore) {
+      const store = view.nativeStore,
+        page = store.selectedPage(),
+        epoch = view.navigationEpoch;
       if (
-        view.following &&
-        !view.loading &&
-        view.nativeStore.selectedPage()?.position !== 'address'
+        !page ||
+        page.position !== 'latest' ||
+        !view.following ||
+        view.readScope !== 'current' ||
+        view.retry !== undefined ||
+        !capabilities.selected_identity
       )
-        await loadNative(view);
+        return;
+      const p = params(view.readScope);
+      p.set('sid', view.key);
+      view.observing = true;
+      try {
+        const result = object(await api('/api/session-identity?' + p));
+        const identity = parseCatalogIdentity(result.identity);
+        if (
+          result.api === 1 &&
+          identity.source_key === view.sourceKey &&
+          identity.catalog_key === view.key &&
+          identity.read_scope === view.readScope &&
+          !disposed &&
+          active === view &&
+          view.navigationEpoch === epoch &&
+          view.following &&
+          view.retry === undefined &&
+          view.nativeStore === store &&
+          store.selectedPage() === page &&
+          identity.generation !== page.identity.generation
+        )
+          await loadNative(view);
+      } catch {
+        // Keep the accepted native range and observe again on the next tick.
+      } finally {
+        view.observing = false;
+      }
       return;
     }
-    if (disposed || active !== view || view.loading || view.observing) return;
     const source = view.sourceKey,
       p = params(view.readScope);
     p.set('sid', view.key);
@@ -3887,7 +3915,7 @@ export function createCatalogViewer(
         note: '',
         opening: true,
         identityLoading: false,
-        recovery: new CatalogRecovery(),
+        recovery: new CatalogRecovery(capabilities.native_transcript ? 5 : undefined),
         renderedRevision: -1,
         renderedNote: '',
         renderedFooter: '',
@@ -3917,6 +3945,12 @@ export function createCatalogViewer(
     }
     sessionPanel?.destroy();
     active = view;
+    if (view.nativeStore && !view.nativeStore.selectedPage()) {
+      scope.clearTimeout(view.retry);
+      view.retry = undefined;
+      view.recovery.reset();
+      view.note = '';
+    }
     const turn = savedPositionUnavailable
       ? undefined
       : (anchor ?? (push ? undefined : sessionAnchor()));
@@ -4347,15 +4381,17 @@ export function createCatalogViewer(
       Object.assign(capabilities, next);
       if (next.source_candidates && !candidateLoaded && !active && !sourcesOpen)
         void loadCandidates(false);
-      if (active) void loadIdentity(active);
-      if (ready && active && !active.store.selectedPage()) void loadSelected(active);
+      if (active && (!active.nativeStore || active.nativeStore.selectedPage()))
+        void loadIdentity(active);
+      if (ready && active && !(active.nativeStore ?? active.store).selectedPage())
+        void loadSelected(active);
       if (capabilities.global_union) {
         if (!active && !sourcesOpen && items.length <= 60) await loadList(false);
       } else await refreshMetadata(observedSource, observedEpoch);
     } catch (error) {
       if (disposed || observedEpoch !== sourcesEpoch || observedSource !== capabilities.source_key)
         return;
-      if (active && !active.store.selectedPage()) {
+      if (active && !active.nativeStore && !active.store.selectedPage()) {
         active.note = readError(error);
         drawSelected(active);
       }
@@ -4792,7 +4828,7 @@ export function createCatalogViewer(
       : main.scrollHeight - main.scrollTop - main.clientHeight;
   }
   const readingScroll = () => {
-    if (!active || active.opening || !active.store.selectedPage()) return;
+    if (!active || active.opening || !(active.nativeStore ?? active.store).selectedPage()) return;
     const gap = readingGap();
     // Content-visibility can adjust a scroll offset after layout has settled,
     // without changing the observed boxes. Keep the initial tail transaction
@@ -4906,7 +4942,7 @@ export function createCatalogViewer(
     if (
       active &&
       capabilities.selected_transcript &&
-      active.store.selectedPage() &&
+      (active.nativeStore ?? active.store).selectedPage() &&
       document.visibilityState === 'visible'
     )
       void observeSelected(active);
