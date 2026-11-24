@@ -166,10 +166,11 @@ export default async function viewerBacklog(browser) {
           );
         }
       }
-      const trace = D.turns.find((t) => t.sent.length && D.SESS[t.sid]);
-      assert(trace, 'fixture needs an outgoing trace');
-      await goto(page, { v: 'session', id: trace.sid, turn: trace.id }, D);
-      await page.locator('#page .turn[data-turn="' + trace.id + '"]').scrollIntoViewIfNeeded();
+      await goto(page, { v: 'session', id: 'harbor' }, D);
+      const senderTurn = page
+        .locator('#page .turn')
+        .filter({ has: page.locator('.turn-end .link') });
+      await senderTurn.first().scrollIntoViewIfNeeded();
       await page.locator('#more-btn').click();
       const traceIcon = await page.locator('.menu-trace > svg').boundingBox();
       assert(
@@ -178,6 +179,9 @@ export default async function viewerBacklog(browser) {
       );
       await page.locator('.menu-trace').click();
       await ready(page, 'trace');
+      const outgoing = page.locator('#page .hop.child.k-spawn');
+      assert.match(await outgoing.first().textContent(), /not linked yet/);
+      assert.equal(await outgoing.locator('a, button').count(), 0);
       assert.equal(await page.locator('#topbar .t').textContent(), 'Trace');
       assert.equal(await page.locator('#topbar #more-btn').count(), 1);
       assert.equal(await page.locator('#topbar .trace-back').count(), 1);
