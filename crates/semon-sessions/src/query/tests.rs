@@ -1799,11 +1799,30 @@ fn busy_claude_process_that_dies_after_its_last_pid_update_still_stalls() {
     assert_eq!(crash["id"], "crash");
     assert_eq!(crash["last_activity"], at(1, 2));
     assert_eq!(crash["alive"], Value::Null);
+    assert_eq!(crash["state"], "unknown");
     assert_eq!(crash["stall_reason"], "no-output");
+    assert_eq!(
+        call(&mut query, "list_sessions", json!({}))["sessions"][0]["state"],
+        "unknown"
+    );
+    assert_eq!(
+        call(&mut query, "get_session", json!({"id":"crash"}))["session"]["state"],
+        "unknown"
+    );
     let recent = query
         .call_at("stalls", &json!({"idle_minutes":60}), at(1, 30))
         .unwrap();
     assert_eq!(recent["stalls"], json!([]));
+
+    fs::remove_file(home.root.join("claude/sessions/42.json")).unwrap();
+    assert_eq!(
+        call(&mut query, "list_sessions", json!({}))["sessions"][0]["state"],
+        "ended"
+    );
+    assert_eq!(
+        call(&mut query, "stalls", json!({"idle_minutes":60}))["stalls"],
+        json!([])
+    );
 }
 
 #[test]
