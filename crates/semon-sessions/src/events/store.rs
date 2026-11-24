@@ -1583,8 +1583,6 @@ pub(crate) fn enqueue_facts(
         &crate::facts::MachineFacts::Recorded(Box::new(after.clone())),
     ) {
         if before.proc_starts.get(&pid.pid) != after.proc_starts.get(&pid.pid)
-            || before.missing_claude_pids.contains(&pid.pid)
-                != after.missing_claude_pids.contains(&pid.pid)
             || before.runs.get(&pid.pid) != after.runs.get(&pid.pid)
             || before.process_ancestors.get(&pid.pid) != after.process_ancestors.get(&pid.pid)
         {
@@ -10228,8 +10226,6 @@ mod tests {
                     parent: Some(7),
                     script: STDIN | SENDS,
                     poll_target: Some("26789".to_owned()),
-                    task_id: None,
-                    resumed_agent: None,
                     result_source: true,
                     y: Some(Box::new(Yield {
                         polls: vec![1, 2, u64::MAX],
@@ -10261,18 +10257,6 @@ mod tests {
                     u: Some("uuid-1".to_owned()),
                     activity_observation: None,
                     activity_tool: None,
-                },
-                Event {
-                    k: Kind::Tn,
-                    o: 19,
-                    task_id: Some(Ok("example-agent".to_owned())),
-                    ..Event::default()
-                },
-                Event {
-                    k: Kind::Tn,
-                    o: 19,
-                    task_id: Some(Err(())),
-                    ..Event::default()
                 },
                 // A peer with nothing known is still a peer.
                 Event {

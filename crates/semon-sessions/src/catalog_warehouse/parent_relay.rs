@@ -439,10 +439,7 @@ impl<M> Plan<M> {
         let failed = run.tn.is_some_and(|(_, _, _, index)| {
             matches!(
                 self.run[index].step,
-                Step::Notification {
-                    completed: false,
-                    ..
-                }
+                Step::Notification { completed: false }
             )
         });
         // A notification may determine status even when the hand-back is the
@@ -466,7 +463,7 @@ impl<M> Plan<M> {
                         .spawn
                         .as_deref()
                         .and_then(|id| crate::model::notification_result(&native, id)),
-                    Step::Resume { .. } | Step::Start { .. } => None,
+                    Step::Start { .. } => None,
                 };
                 preview = text.map(|text| crate::model::cap(&text, crate::model::MSG_MAX));
             }
@@ -538,7 +535,6 @@ fn collect_run<M: Clone>(
                 let status: Option<String> = row.get(4).map_err(index)?;
                 Step::Notification {
                     completed: matches!(status.as_deref(), Some("completed" | "success" | "done")),
-                    resume: None,
                 }
             }
             "agm" if parent_aliases.is_some() => Step::Final,

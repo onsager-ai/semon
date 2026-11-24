@@ -48,7 +48,7 @@ use crate::{
     Marker, Options, events,
     events::{
         ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASYNC, DENIED, Event,
-        EventCache, FileIndex, Kind, PIN, SEND_FAILED, TASK_NOTIFICATION_ORIGIN, UNKNOWN,
+        EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
     field, file_list, handoff,
@@ -1771,7 +1771,7 @@ struct SessionInputs {
     files: Vec<(PathBuf, FileRevision)>,
     baseline: String,
     links: Vec<String>,
-    root_alive: Option<bool>,
+    root_alive: bool,
     background_liveness: Vec<(PathBuf, Option<i64>)>,
     liveness: (bool, bool, bool),
     clock: Option<i64>,
@@ -2225,34 +2225,12 @@ impl<'a> Builder<'a> {
             .unwrap_or_else(|| self.sessions[self.root(session)].key.clone())
     }
 
-    fn graph_root_liveness(&self, session: usize) -> Option<bool> {
-        if let Some(endpoint) = self.staged_endpoints.get(&self.sessions[session].key) {
-            return endpoint.root_alive;
-        }
-        let root = &self.sessions[self.root(session)];
-        if root.kind != SessKind::Lineage {
-            return None;
-        }
-        if root.alive {
-            return Some(true);
-        }
-        let mut candidates = root.pid_files.iter().filter(|pid| {
-            pid.updated
-                .zip(root.last)
-                .is_some_and(|(updated, last)| updated.saturating_sub(last) > 5 * 60_000)
-        });
-        match (candidates.next(), candidates.next()) {
-            (Some(pid), None) if pid.gone => Some(false),
-            _ => None,
-        }
-    }
-
     fn graph_root_alive(&self, session: usize) -> bool {
         self.staged_endpoints
             .get(&self.sessions[session].key)
             .map_or_else(
                 || self.sessions[self.root(session)].alive,
-                |endpoint| endpoint.root_alive == Some(true),
+                |endpoint| endpoint.root_alive,
             )
     }
 
@@ -2282,45 +2260,43 @@ impl<'a> Builder<'a> {
                 }
                 let (kind, pid, alive, recorded_status, run) = match session.kind {
                     SessKind::Lineage => {
-                        if let Some(pid) = session.pid_files.iter().find(|pid| pid.alive) {
-                            (
+                        const PID_CLOCK_SKEW_MS: i64 = 5 * 60_000;
+                        match session.pid_files.as_slice() {
+                            [pid] if pid.start.is_some() && pid.updated.is_some() && pid.alive => (
                                 "session",
                                 Some(pid.pid),
                                 Some(true),
                                 pid.status.clone(),
                                 run_of(pid.pid, pid.start),
-                            )
-                        } else {
-                            // A dead process's record cannot describe an unobserved
-                            // continuation whose transcript outlasts that record.
-                            const PID_CLOCK_SKEW_MS: i64 = 5 * 60_000;
-                            let mut candidates = session.pid_files.iter().filter(|pid| {
-                                pid.updated
-                                    .zip(session.last)
-                                    .is_some_and(|(updated, last)| {
-                                        updated.saturating_sub(last) > PID_CLOCK_SKEW_MS
-                                    })
-                            });
-                            match (candidates.next(), candidates.next()) {
-                                (Some(pid), None) if pid.gone => (
+                            ),
+                            [pid]
+                                if pid.start.is_some()
+                                    && pid.gone
+                                    && pid.updated.zip(session.last).is_some_and(
+                                        |(updated, last)| {
+                                            updated.saturating_sub(last) > PID_CLOCK_SKEW_MS
+                                        },
+                                    ) =>
+                            {
+                                (
                                     "session",
                                     Some(pid.pid),
                                     Some(false),
                                     pid.status.clone(),
                                     None,
-                                ),
-                                _ => (
-                                    "session",
-                                    None,
-                                    None,
-                                    session
-                                        .pid_files
-                                        .iter()
-                                        .any(PidFile::busy)
-                                        .then(|| "busy".to_owned()),
-                                    None,
-                                ),
+                                )
                             }
+                            _ => (
+                                "session",
+                                None,
+                                None,
+                                session
+                                    .pid_files
+                                    .iter()
+                                    .any(PidFile::busy)
+                                    .then(|| "busy".to_owned()),
+                                None,
+                            ),
                         }
                     }
                     // A subagent runs in its parent's process: no record of
@@ -3177,8 +3153,6 @@ impl<'a> Builder<'a> {
         // Terminal task notifications by tool-use id, in log order: a
         // subagent's run ends (its spawning call's id) among them.
         let mut notifications = HashMap::<String, Vec<Ref>>::new();
-        let mut resumes = HashMap::<(usize, &str), Vec<Ref>>::new();
-        let mut task_notifications = HashMap::<String, Vec<Ref>>::new();
         // Every up agent message a session received: a subagent's sends to
         // `main` and its hand-backs, received in its parent, and its sends to
         // other agents. Only the parent's count for a spawn.
@@ -3197,37 +3171,12 @@ impl<'a> Builder<'a> {
                 }
                 match (event.k, &event.id) {
                     (Kind::Tn, Some(id))
-                        if event.script & TASK_NOTIFICATION_ORIGIN != 0
-                            && matches!(
-                                event.n.as_deref(),
-                                Some(
-                                    "completed"
-                                        | "success"
-                                        | "done"
-                                        | "failed"
-                                        | "killed"
-                                        | "stopped"
-                                )
-                            ) =>
+                        if !matches!(event.n.as_deref(), None | Some("running" | "started")) =>
                     {
                         notifications
                             .entry(id.clone())
                             .or_default()
                             .push((position, at));
-                        if let Some(Ok(task_id)) = &event.task_id {
-                            task_notifications
-                                .entry(task_id.clone())
-                                .or_default()
-                                .push((position, at));
-                        }
-                    }
-                    (Kind::Tool, Some(_)) => {
-                        if let Some(agent) = event.resumed_agent.as_deref() {
-                            resumes
-                                .entry((self.of_file[position], agent))
-                                .or_default()
-                                .push((position, at));
-                        }
                     }
                     // A receipt names its sender by `senderTaskId` (the
                     // agent id or the spawning call's id), or by the tag's
@@ -3296,15 +3245,9 @@ impl<'a> Builder<'a> {
                     })
                     .map(|file| self.of_file[file])
             });
-            spawns.push((
-                child,
-                spawner,
-                call,
-                meta.tool_use_id.clone(),
-                file.id.as_str(),
-            ));
+            spawns.push((child, spawner, call, meta.tool_use_id.clone()));
         }
-        for (child, spawner, ..) in &spawns {
+        for (child, spawner, _, _) in &spawns {
             self.sessions[*child].parent = *spawner;
             self.sessions[*child].out.parent_source = None;
             if spawner.is_none() {
@@ -3328,7 +3271,7 @@ impl<'a> Builder<'a> {
         });
         // Each spawner's sends delivered to one of its agents, read once.
         let mut deliveries = HashMap::new();
-        for (child, spawner, call, tool_use_id, native_id) in spawns {
+        for (child, spawner, call, tool_use_id) in spawns {
             let Some(spawner) = spawner else {
                 continue;
             };
@@ -3380,60 +3323,15 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .partition(|at| event(self.files, *at).script & AGM_FINAL != 0);
             let paired = self.pair_sends(child, &key, &received);
-            let original_ends = call
-                .map(|at| event(self.files, at))
-                .filter(|call| matches!(call.n.as_deref(), Some("Agent" | "Task")))
-                .and_then(|call| call.id.as_deref())
+            let ends: Vec<Ref> = tool_use_id
+                .as_deref()
                 .and_then(|id| notifications.get(id))
                 .into_iter()
                 .flatten()
                 .copied()
-                .filter(|at| {
-                    self.of_file[at.0] == spawner
-                        && event(self.files, *at)
-                            .task_id
-                            .as_ref()
-                            .is_none_or(|id| id.as_deref() == Ok(native_id))
-                })
-                .map(|at| (at, None));
-            let resume_calls = resumes
-                .get(&(spawner, native_id))
-                .map_or(&[][..], Vec::as_slice);
-            let resume_ids: HashMap<Ref, usize> = resume_calls
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(index, at)| (at, index))
-                .collect();
-            // The native task ID and SendMessage reply must identify the same
-            // child. The specific call closes only the run it resumed.
-            let resumed_ends = task_notifications
-                .get(native_id)
-                .into_iter()
-                .flatten()
-                .copied()
                 .filter(|at| self.of_file[at.0] == spawner)
-                .filter_map(|at| {
-                    let notice = event(self.files, at);
-                    let id = notice.id.as_deref()?;
-                    if Some(id) == tool_use_id.as_deref() {
-                        return None;
-                    }
-                    let resume = self
-                        .find_in(spawner, id)
-                        .and_then(|call| resume_ids.get(&call))
-                        .copied();
-                    resume.map(|resume| (at, Some(resume)))
-                });
-            let ends = original_ends.chain(resumed_ends).collect::<Vec<_>>();
-            let (runs, inline) = relay_match::claude_runs(
-                self.files,
-                &child_events,
-                first_prompt,
-                &finals,
-                &ends,
-                resume_calls,
-            );
+                .collect();
+            let (runs, inline) = self.claude_runs(&child_events, first_prompt, &finals, &ends);
             let mut result = None;
             // The latest run that ended: its hand-back receipt's text, else
             // its notification's, else the child's `SubagentHandback`. The
@@ -3459,7 +3357,7 @@ impl<'a> Builder<'a> {
                     result = Some((text, done, failed));
                     previews.insert("result", self.receipt_preview(&key, &finals, index));
                 } else if let Some(found) = run.tn {
-                    let id = event(self.files, found).id.clone().unwrap_or_default();
+                    let id = tool_use_id.clone().unwrap_or_default();
                     let text = self.text(found, &format!("tn:{id}"), |record, _| {
                         notification_result(record, &id)
                     });
@@ -3493,9 +3391,8 @@ impl<'a> Builder<'a> {
             }
             if result.is_none()
                 && let Some(at) = call
-                && matches!(event(self.files, at).n.as_deref(), Some("Agent" | "Task"))
                 && let Some(reply) = event(self.files, at).r.clone()
-                && reply.f & (ASYNC | UNKNOWN) == 0
+                && reply.f & ASYNC == 0
             {
                 let text = self.result_text(at, "result", tool_result_text);
                 result = Some((text, reply.t, reply.e));
@@ -3515,7 +3412,7 @@ impl<'a> Builder<'a> {
                 result = Some((text, event(self.files, at).t, false));
                 previews.insert("result", PreviewRef::new(at, "handback"));
             }
-            let running = self.graph_root_liveness(spawner) != Some(false);
+            let running = self.graph_root_alive(spawner);
             // A resumed run not ended yet works while its tree runs; the
             // spawn's result stays the previous run's.
             let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
@@ -3561,6 +3458,34 @@ impl<'a> Builder<'a> {
             );
         }
         Ok(())
+    }
+
+    /// A Claude subagent's runs, in order: the brief's, then one per message
+    /// that reached it after the run before had ended (a resume). A run ends
+    /// at its hand-back (the parent's final receipt, or the child's
+    /// `SubagentHandback`) or at its agent-end notification, whichever comes
+    /// first; the other then belongs to the same run. Also returns the
+    /// parent's messages (`AGM_DOWN`) that reached an open run: inline in
+    /// its turn, not a resume.
+    ///
+    /// The parent writes a run's notification seconds after its hand-back,
+    /// and its hand-back receipt at its next turn, so a resume sent in
+    /// between already opened the next run. Such a completed notification
+    /// belongs to the run before when that one handed back without one, and
+    /// such a receipt when the child handed that run back
+    /// (`SubagentHandback`) and it has no receipt. A failed or killed
+    /// notification ends the open run. One misattribution remains: if run k
+    /// hands back, the child resumes, then a late failed or killed notification
+    /// arrives, it ends run k+1 as `err`; run k+1's own completed notification
+    /// is then ignored.
+    fn claude_runs(
+        &self,
+        child_events: &[Ref],
+        first_prompt: Option<Ref>,
+        finals: &[Ref],
+        ends: &[Ref],
+    ) -> (Vec<Run>, BTreeSet<Ref>) {
+        relay_match::claude_runs(self.files, child_events, first_prompt, finals, ends)
     }
 
     /// Pairs each message `child`'s parent sent it while it ran or to resume
@@ -4808,10 +4733,7 @@ impl<'a> Builder<'a> {
                         }
                     }
                     None => {
-                        if self.graph_root_alive(index)
-                            && (self.sessions[index].kind != SessKind::Agent
-                                || self.sessions[index].alive)
-                        {
+                        if self.graph_root_alive(index) {
                             handoff.status = "wait";
                         }
                     }
@@ -5425,7 +5347,7 @@ impl<'a> Builder<'a> {
             background_liveness,
             baseline: serde_json::to_string(&session.out).expect("session serializes"),
             links,
-            root_alive: self.graph_root_liveness(index),
+            root_alive: self.graph_root_alive(index),
             liveness: (session.alive, session.busy, session.waiting),
             clock: session.first.is_none().then_some(self.now),
         }

@@ -102,12 +102,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v39: activity steps retain exact Codex call provenance for transcript anchors.
 /// v41: usage and compaction signals retain physical record ordinals for ASI anchors.
 /// v42: retain the next physical record ordinal for qualified Copilot sources.
-/// v43: Claude task notifications retain the task ID, and assistant text
-/// retains the native end-turn marker.
-/// v44: retain qualified Claude task headers and explicit SendMessage resumes.
-/// v45: remove assistant end-turn as subagent lifecycle evidence.
-/// v47: retain invalid and ambiguous Claude task IDs.
-pub(crate) const CACHE_VERSION: u32 = 47;
+pub(crate) const CACHE_VERSION: u32 = 42;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -4168,8 +4163,6 @@ pub(crate) const SENDS: u8 = 2;
 pub(crate) const BACKGROUND: u8 = 4;
 /// A task notification reports failure by status or a nonzero summary exit code.
 pub(crate) const BACKGROUND_FAILED: u8 = 8;
-/// A Claude task notification delivered with native task-notification origin.
-pub(crate) const TASK_NOTIFICATION_ORIGIN: u8 = 1;
 /// An agent message sent by an agent to the session that receives it: a
 /// subagent's hand-back or send, or a Codex child's message to its parent.
 pub(crate) const AGM_UP: u8 = 16;
@@ -4269,12 +4262,6 @@ pub(crate) struct Event {
     /// [`AGM_UP`], [`AGM_DOWN`], [`AGM_SIDE`], [`AGM_FINAL`] and [`AGM_PROGRESS`].
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub(crate) script: u8,
-    /// A Claude task notification's native task ID, independent of tool-use ID.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) task_id: Option<Result<String, ()>>,
-    /// A successful Claude SendMessage result's explicit `resumedAgentId`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) resumed_agent: Option<String>,
     /// A bounded literal code-mode `write_stdin` target. Retained so an
     /// output arriving after the terminal event can still be checked exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4755,41 +4742,9 @@ pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str
             continue;
         }
         let body = &text[*start..close];
-        let header = notification_header(body);
-        result.push((inner(header, "tool-use-id"), inner(header, "status"), body));
+        result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
     }
     result
-}
-
-fn notification_task_id(header: &str) -> Option<Result<String, ()>> {
-    let openings = header.match_indices("<task-id").count();
-    let closings = header.match_indices("</task-id>").count();
-    if openings == 0 && closings == 0 {
-        return None;
-    }
-    if openings != 1 || closings != 1 {
-        return Some(Err(()));
-    }
-    Some(
-        inner(header, "task-id")
-            .filter(|id| {
-                !id.is_empty()
-                    && id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            })
-            .map(str::to_owned)
-            .ok_or(()),
-    )
-}
-
-fn notification_header(body: &str) -> &str {
-    let end = ["<result>", "<summary>"]
-        .into_iter()
-        .filter_map(|tag| body.find(tag))
-        .min()
-        .unwrap_or(body.len());
-    &body[..end]
 }
 
 fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
@@ -4951,14 +4906,7 @@ fn prompt_events(
             );
             found = true;
         }
-        let delivered =
-            origin.and_then(|origin| field(origin, "kind")) == Some("task-notification");
         for (id, status, body) in notifications(text) {
-            let task_id = if delivered {
-                notification_task_id(notification_header(body))
-            } else {
-                None
-            };
             push(
                 summary,
                 Event {
@@ -4967,18 +4915,13 @@ fn prompt_events(
                     t: time,
                     id: id.map(str::to_owned),
                     n: status.map(str::to_owned),
-                    task_id,
-                    script: (if !matches!(status, Some("killed" | "stopped"))
+                    script: if !matches!(status, Some("killed" | "stopped"))
                         && (status == Some("failed")
                             || inner(body, "summary")
                                 .and_then(notification_exit)
                                 .is_some_and(|exit| exit != 0))
                     {
                         BACKGROUND_FAILED
-                    } else {
-                        0
-                    }) | if delivered {
-                        TASK_NOTIFICATION_ORIGIN
                     } else {
                         0
                     },
@@ -6837,16 +6780,6 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                     kind: "tool_result",
                                 }
                             });
-                            if !error
-                                && flags & (DENIED | SEND_FAILED) == 0
-                                && let Some(index) = summary.pending.get(id).copied()
-                                && let Some(call) = summary.event_mut(index)
-                                && call.n.as_deref() == Some("SendMessage")
-                            {
-                                call.resumed_agent = tool_result
-                                    .and_then(|result| field(result, "resumedAgentId"))
-                                    .map(str::to_owned);
-                            }
                             resolve(summary, id, |_| reply);
                         }
                     }

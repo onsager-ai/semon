@@ -151,7 +151,7 @@ pub(crate) struct Endpoint {
     pub(crate) parent: Option<String>,
     pub(crate) native_parents: Vec<(String, String)>,
     pub(crate) root: String,
-    pub(crate) root_alive: Option<bool>,
+    pub(crate) root_alive: bool,
     pub(crate) tokens: crate::Tokens,
     pub(crate) facts_kind: String,
     pub(crate) pid: Option<u32>,
@@ -469,7 +469,7 @@ impl Context {
                     root: builder.sessions[builder.root(builder.by_key[&row.key])]
                         .key
                         .clone(),
-                    root_alive: builder.graph_root_liveness(builder.by_key[&row.key]),
+                    root_alive: builder.graph_root_alive(builder.by_key[&row.key]),
                     tokens: session.tokens.clone(),
                     facts_kind: observed.kind.to_owned(),
                     pid: observed.pid,

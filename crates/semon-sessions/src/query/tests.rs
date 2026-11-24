@@ -1167,7 +1167,7 @@ impl Home {
     fn pid_file(&self, pid: u32, session: &str, status: &str, start: u64) {
         self.write(
             &format!("claude/sessions/{pid}.json"),
-            &json!({"pid": pid, "sessionId": session, "procStart": start, "status": status, "name": format!("{session}-lane")})
+            &json!({"pid": pid, "sessionId": session, "procStart": start, "status": status, "updatedAt": NOW, "name": format!("{session}-lane")})
                 .to_string(),
         );
     }
@@ -1696,6 +1696,36 @@ fn stalls_require_process_evidence_for_the_current_claude_session() {
     home.write("claude/sessions/42.json", &pid_record.to_string());
     assert_observation(&mut query, json!(42), json!(false), json!("process-gone"));
 
+    // A second registration makes the evidence ambiguous before timestamp filtering.
+    let duplicate = home.write(
+        "claude/sessions/43.json",
+        &json!({
+            "pid":43, "sessionId":"resumed", "status":"busy"
+        })
+        .to_string(),
+    );
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    home.write(
+        "claude/sessions/43.json",
+        &json!({
+            "pid":43, "sessionId":"resumed", "procStart":123, "status":"busy", "updatedAt":at(1, 0)
+        })
+        .to_string(),
+    );
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    fs::remove_file(duplicate).unwrap();
+    let mut incomplete = pid_record.clone();
+    incomplete.as_object_mut().unwrap().remove("procStart");
+    home.write("claude/sessions/42.json", &incomplete.to_string());
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    incomplete = pid_record.clone();
+    for key in ["startedAt", "statusUpdatedAt", "updatedAt"] {
+        incomplete.as_object_mut().unwrap().remove(key);
+    }
+    home.write("claude/sessions/42.json", &incomplete.to_string());
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    home.write("claude/sessions/42.json", &pid_record.to_string());
+
     // Absence is distinct from unreadable and survives a recorded Facts read.
     fs::remove_file(stat).unwrap();
     fs::remove_dir(home.root.join("proc/42")).unwrap();
@@ -1752,292 +1782,6 @@ fn busy_claude_process_that_dies_after_its_last_pid_update_still_stalls() {
         .call_at("stalls", &json!({"idle_minutes":60}), at(1, 30))
         .unwrap();
     assert_eq!(recent["stalls"], json!([]));
-}
-
-#[test]
-fn malformed_spawn_notice_and_unknown_parent_liveness_leave_child_stalled() {
-    use std::io::Write;
-
-    let home = Home::new("testbox");
-    home.write(
-        "claude/sessions/50.json",
-        &json!({
-            "pid": 50, "sessionId": "parent", "status": "busy"
-        })
-        .to_string(),
-    );
-    let parent = home.lines("claude/projects/-work-proj/parent.jsonl", &[
-        human("parent", ts(1, 0), "Run the example"),
-        assistant("parent", ts(1, 1), vec![tool("spawn", "Agent", json!({"prompt":"Review"}))]),
-        json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 2),
-            "toolUseResult":{"status":"async_launched", "agentId":"example-agent"},
-            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn","content":"Started"}]}}),
-    ]);
-    home.agent(
-        "parent",
-        "example-agent",
-        "spawn",
-        &[
-            user("parent", ts(1, 2), "Review"),
-            assistant("parent", ts(1, 3), vec![text("Still working")]),
-        ],
-    );
-    let mut query = home.query();
-    let assert_working = |query: &mut Query| {
-        let listed = call(query, "list_sessions", json!({"parent":"parent"}));
-        assert_eq!(listed["sessions"][0]["state"], "working");
-        let stalls = call(query, "stalls", json!({"idle_minutes":60}));
-        assert!(
-            stalls["stalls"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|row| row["id"] == "example-agent" && row["stall_reason"] == "no-output")
-        );
-    };
-    assert_working(&mut query);
-    let mut append = fs::OpenOptions::new().append(true).open(parent).unwrap();
-    let notice = |task: &str| {
-        json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 4),
-        "origin":{"kind":"task-notification"}, "message":{"role":"user","content":format!(
-            "<task-notification><task-id>{task}</task-id><tool-use-id>spawn</tool-use-id><status>completed</status><result>Done</result></task-notification>")}})
-    };
-    writeln!(append, "{}", notice("bad id")).unwrap();
-    assert_working(&mut query);
-    for content in [
-        "<task-notification><task-id>example-agent<tool-use-id>spawn</tool-use-id><status>completed</status></task-notification>",
-        "<task-notification><task-id>example-agent</task-id><task-id>other</task-id><tool-use-id>spawn</tool-use-id><status>completed</status></task-notification>",
-    ] {
-        writeln!(
-            append,
-            "{}",
-            json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 4),
-            "origin":{"kind":"task-notification"}, "message":{"role":"user","content":content}})
-        )
-        .unwrap();
-        assert_working(&mut query);
-    }
-    writeln!(append, "{}", notice("example-agent")).unwrap();
-    let listed = call(&mut query, "list_sessions", json!({"parent":"parent"}));
-    assert_eq!(listed["sessions"][0]["state"], "ended");
-}
-
-#[test]
-fn nested_child_with_missing_root_remains_stalled() {
-    let home = Home::new("testbox");
-    home.agent("missing-root", "outer", "spawn-outer", &[
-        user("outer", ts(1, 0), "Delegate"),
-        assistant("outer", ts(1, 1), vec![tool("spawn-inner", "Agent", json!({"prompt":"Review"}))]),
-        json!({"type":"user", "sessionId":"outer", "timestamp":ts(1, 2),
-            "toolUseResult":{"status":"async_launched", "agentId":"inner"},
-            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"spawn-inner","content":"Started"}]}}),
-    ]);
-    home.agent(
-        "outer",
-        "inner",
-        "spawn-inner",
-        &[
-            user("inner", ts(1, 2), "Review"),
-            assistant("inner", ts(1, 3), vec![text("Still working")]),
-        ],
-    );
-    let mut query = home.query();
-    let listed = call(&mut query, "list_sessions", json!({"parent":"outer"}));
-    assert_eq!(listed["sessions"][0]["id"], "inner");
-    assert_eq!(listed["sessions"][0]["state"], "working");
-    let stalls = call(&mut query, "stalls", json!({"idle_minutes":60}));
-    assert!(
-        stalls["stalls"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["id"] == "inner" && row["stall_reason"] == "no-output")
-    );
-}
-
-#[test]
-fn resumed_claude_subagent_ends_when_its_parent_receives_the_result() {
-    use std::io::Write;
-
-    let home = Home::new("testbox");
-    home.process(50, 123);
-    home.pid_file(50, "parent", "busy", 123);
-    let notification = |minute, call: &str| {
-        json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, minute),
-            "origin":{"kind":"task-notification"}, "message":{"role":"user","content":format!(
-                "<task-notification><task-id>example-agent</task-id><tool-use-id>{call}</tool-use-id><status>completed</status><result>Example result</result></task-notification>")}})
-    };
-    let reply = |minute, call: &str, result: Value| {
-        json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, minute),
-            "toolUseResult":result, "message":{"role":"user","content":[
-                {"type":"tool_result","tool_use_id":call,"content":"Example tool result"}]}})
-    };
-    let parent = home.lines(
-        "claude/projects/-work-proj/parent.jsonl",
-        &[
-            human("parent", ts(1, 0), "Run the example"),
-            assistant(
-                "parent",
-                ts(1, 1),
-                vec![tool(
-                    "spawn",
-                    "Agent",
-                    json!({"prompt":"Review the example"}),
-                )],
-            ),
-            reply(
-                2,
-                "spawn",
-                json!({"status":"async_launched", "agentId":"example-agent"}),
-            ),
-            assistant(
-                "parent",
-                ts(1, 6),
-                vec![tool(
-                    "resume",
-                    "SendMessage",
-                    json!({"to":"example-agent", "message":"Check another case"}),
-                )],
-            ),
-            reply(
-                7,
-                "resume",
-                json!({"success":true, "resumedAgentId":"example-agent"}),
-            ),
-        ],
-    );
-    home.agent("parent", "example-agent", "spawn", &[
-        user("parent", ts(1, 2), "Review the example"),
-        assistant("parent", ts(1, 4), vec![text("First example result")]),
-        json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 6), "origin":{"kind":"coordinator"},
-            "message":{"role":"user","content":"Check another case"}}),
-        assistant("parent", ts(1, 8), vec![text("Second example result")]),
-    ]);
-    let mut query = home.query();
-    let assert_child = |query: &mut Query, state| {
-        let listed = call(query, "list_sessions", json!({"parent":"parent"}));
-        let child = &listed["sessions"][0];
-        assert_eq!(listed["total"], 1);
-        assert_eq!(child["id"], "example-agent");
-        assert_eq!(child["state"], state);
-        assert_eq!(child["last_activity"], at(1, 8));
-        let stalls = call(query, "stalls", json!({"idle_minutes": 60}));
-        let rows = stalls["stalls"].as_array().unwrap();
-        let child_stall = rows.iter().find(|row| row["id"] == "example-agent");
-        if state == "working" {
-            assert_eq!(child_stall.unwrap()["stall_reason"], "no-output");
-        } else {
-            assert!(child_stall.is_none());
-        }
-        assert!(
-            rows.iter()
-                .any(|row| row["id"] == "parent" && row["stall_reason"] == "no-output")
-        );
-    };
-    assert_child(&mut query, "working");
-    let mut append = fs::OpenOptions::new().append(true).open(&parent).unwrap();
-    writeln!(append, "{}", notification(9, "spawn")).unwrap();
-    assert_child(&mut query, "working");
-
-    let mut fake = notification(10, "resume");
-    fake.as_object_mut().unwrap().remove("origin");
-    writeln!(append, "{fake}").unwrap();
-    assert_child(&mut query, "working");
-
-    let mut quoted = notification(11, "resume");
-    quoted["message"]["content"] = json!(
-        "<task-notification><task-id>example-agent</task-id><result><tool-use-id>resume</tool-use-id><status>completed</status></result></task-notification>"
-    );
-    writeln!(append, "{quoted}").unwrap();
-    assert_child(&mut query, "working");
-
-    writeln!(
-        append,
-        "{}",
-        assistant(
-            "parent",
-            ts(1, 11),
-            vec![
-                tool(
-                    "other-resume",
-                    "SendMessage",
-                    json!({"to":"other-agent", "message":"Continue"})
-                ),
-                tool(
-                    "just-send",
-                    "SendMessage",
-                    json!({"to":"example-agent", "message":"Progress"})
-                ),
-            ]
-        )
-    )
-    .unwrap();
-    for record in [
-        reply(
-            12,
-            "other-resume",
-            json!({"success":true, "resumedAgentId":"other-agent"}),
-        ),
-        reply(
-            12,
-            "just-send",
-            json!({"success":true, "pin":{"id":"example-agent"}}),
-        ),
-        notification(13, "other-resume"),
-        notification(14, "just-send"),
-    ] {
-        writeln!(append, "{record}").unwrap();
-    }
-    assert_child(&mut query, "working");
-    writeln!(append, "{}", notification(15, "resume")).unwrap();
-    assert_child(&mut query, "ended");
-
-    for (minute, call) in [(16, "first-resume"), (18, "second-resume")] {
-        writeln!(
-            append,
-            "{}",
-            assistant(
-                "parent",
-                ts(1, minute),
-                vec![tool(
-                    call,
-                    "SendMessage",
-                    json!({"to":"example-agent", "message":"Continue"})
-                ),]
-            )
-        )
-        .unwrap();
-        writeln!(
-            append,
-            "{}",
-            reply(
-                minute,
-                call,
-                json!({"success":true, "resumedAgentId":"example-agent"})
-            )
-        )
-        .unwrap();
-    }
-    let child = home
-        .options
-        .claude_home
-        .join("projects/-work-proj/parent/subagents/agent-example-agent.jsonl");
-    let mut child = fs::OpenOptions::new().append(true).open(child).unwrap();
-    for minute in [17, 19] {
-        writeln!(
-            child,
-            "{}",
-            json!({"type":"user","sessionId":"parent","timestamp":ts(1, minute),
-            "origin":{"kind":"coordinator"},"message":{"role":"user","content":"Continue"}})
-        )
-        .unwrap();
-    }
-    writeln!(append, "{}", notification(20, "first-resume")).unwrap();
-    let listed = call(&mut query, "list_sessions", json!({"parent":"parent"}));
-    assert_eq!(listed["sessions"][0]["state"], "working");
-    writeln!(append, "{}", notification(21, "second-resume")).unwrap();
-    let listed = call(&mut query, "list_sessions", json!({"parent":"parent"}));
-    assert_eq!(listed["sessions"][0]["state"], "ended");
 }
 
 #[test]
@@ -3349,6 +3093,11 @@ fn assert_contract_reference(
     project_activity(&mut actual);
     let mut expected = rows[0]["response"].clone();
     lifecycle_contract(&mut expected);
+    if tool == "stalls"
+        && let Some(ok) = expected.get_mut("ok")
+    {
+        ok["rule"] = json!(STALL_RULE);
+    }
     assert_eq!(
         actual, expected,
         "{scope}: {scenario}, multiple={multiple}, {tool} {args}"
