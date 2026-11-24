@@ -59,6 +59,11 @@ completion and close attached Viewer transports before draining sources.
 Hosted list/search/stalls use shared native Catalog reads; no hosted tool restores
 tenant archives. Healthy observer transfer preserves custody fences and the
 admitted source set owns subsequent retirement.
+
+`stalls` returns one of four `stall_reason` values per row: `waiting-question`,
+`no-output`, `subagent-unconfirmed` or `process-gone`. An otherwise `no-output`
+row with `kind: subagent` gets `subagent-unconfirmed`. This label leaves subagent
+completion unknown and preserves which sessions appear in the response.
 The paired Hub consumer admits native sources directly; the preceding
 `from_native_core` constructor and its exclusive Viewer preparation path are
 removed. Query owns only native sources. Substituting local scan-window
@@ -401,8 +406,9 @@ the same generation and refusal rules. The design contract and all fields live i
 [session activity analytics](../../../../docs/design/session-activity-analytics.md).
 `activity-golden.json` owns sanitized expectations for the new summary/page
 contract. Historical `contract-reference.json` remains byte-for-byte frozen;
-the legacy comparator projects away only `activity_analytics`, which dedicated
-tests assert separately.
+dedicated tests assert `activity_analytics` separately. The legacy comparator
+also checks stall responses against the captured rows with the current rule text
+and subagent reason label.
 
 ## Focused Query metadata and search
 

@@ -60,6 +60,11 @@ pub(super) fn stall_response(
                     _ => return None,
                 }
             };
+            let reason = if reason == StallReason::NoOutput && row["kind"] == "subagent" {
+                StallReason::SubagentUnconfirmed
+            } else {
+                reason
+            };
             row["stall_reason"] = json!(reason.name());
             row["idle_ms"] = json!(now.saturating_sub(last));
             Some(row)

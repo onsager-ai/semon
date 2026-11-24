@@ -1847,7 +1847,7 @@ fn stalls_give_one_closed_reason_per_session() {
             "rule": STALL_RULE,
             "stalls": [
                 row("lead", "no-output", at(1, 3)),
-                row("scan", "no-output", at(1, 4)),
+                row("scan", "subagent-unconfirmed", at(1, 4)),
                 row("asker", "waiting-question", at(2, 1)),
                 row("crashed", "process-gone", at(3, 1)),
             ],
@@ -3138,6 +3138,12 @@ fn assert_contract_reference(
         && let Some(ok) = expected.get_mut("ok")
     {
         ok["rule"] = json!(STALL_RULE);
+        // Keep the captured set, order and other fields as the independent oracle.
+        for row in ok["stalls"].as_array_mut().unwrap() {
+            if row["kind"] == "subagent" && row["stall_reason"] == "no-output" {
+                row["stall_reason"] = json!("subagent-unconfirmed");
+            }
+        }
     }
     assert_eq!(
         actual, expected,
