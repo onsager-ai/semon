@@ -1,4 +1,4 @@
-// Real source-scoped causal runs retain bounded fan-out and native transcript destinations.
+// Trace keeps native sender calls visible without linking to their targets.
 import assert from 'node:assert/strict';
 import { served, data, goto, closePage, overflow } from '../lib.mjs';
 
@@ -15,50 +15,34 @@ export default async function runView(browser) {
         viewport: { width, height: 860 },
       });
       const retired = [],
-        reads = [];
+        previews = [];
       try {
         page.on('request', (request) => {
           const url = new URL(request.url());
           if (/^\/api\/(model|tx|events)(?:\/|$)/.test(url.pathname)) retired.push(url.pathname);
-          if (url.pathname === '/api/session-trace') reads.push(url);
+          if (url.pathname === '/api/session-home') previews.push(url);
+        });
+        await page.route('**/api/session-trace?**', async (route) => {
+          const response = await route.fetch();
+          if (!response.ok()) return route.fulfill({ response });
+          const trace = await response.json();
+          for (const edge of trace.handoffs) {
+            if (edge.kind !== 'spawn') continue;
+            delete edge.reason;
+            edge.to = 'swarm-worker-1';
+          }
+          await route.fulfill({ response, json: trace });
         });
         await goto(page, { v: 'trace', sid: root.sid, turn: root.id }, D);
-        await page.locator('.agents-panel .agent-row').first().waitFor();
-        assert.equal(await page.locator('.agent-more').count(), 1);
-        const collapsed = await page.locator('.agent-row[data-agent-id]').count();
-        await page.locator('.agent-more').click();
-        assert.equal(await page.locator('.agent-row[data-agent-id]').count(), 13);
-        assert.ok(collapsed < 13, 'large fan-out is folded before explicit expansion');
-        assert.equal(
-          await page.evaluate(() =>
-            [...document.querySelectorAll('.agent-segment')].some(
-              (node) => node.getBoundingClientRect().width < 0,
-            ),
-          ),
-          false,
-        );
-        assert.equal(
-          await page.locator('.agent-row[data-critical="true"]').count(),
-          0,
-          'a spawn without a recorded target wait cannot imply a critical wait',
-        );
-        if (width === 390)
-          assert.equal(
-            await page
-              .locator('.agent-row')
-              .evaluateAll((rows) =>
-                rows.every((node) => node.getBoundingClientRect().height >= 44),
-              ),
-            true,
-          );
-        const child = page.locator('.agent-row[data-agent-id="swarm-worker-1"]');
-        await child.click();
-        await page.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
-        assert.equal(new URL(page.url()).pathname.endsWith('/swarm-worker-1'), true);
-        assert.equal(
-          decodeURIComponent(new URL(page.url()).pathname.split('/')[2]),
-          reads[0].searchParams.get('machine'),
-        );
+        const outgoing = page.locator('.hop.child.k-spawn');
+        await outgoing.first().waitFor();
+        for (const text of await outgoing.allTextContents()) {
+          assert.match(text, /not linked yet/);
+          assert.doesNotMatch(text, /swarm-worker-1|Worker 1/);
+        }
+        assert.equal(await outgoing.locator('a, button').count(), 0);
+        assert.equal(await page.locator('.agent-row[data-agent-id="swarm-worker-1"]').count(), 0);
+        assert.ok(previews.every((url) => url.searchParams.get('sid') === root.sid));
         assert.equal(await overflow(page), 0);
         assert.deepEqual(retired, []);
         assert.deepEqual(page.errors, []);
@@ -66,6 +50,6 @@ export default async function runView(browser) {
         await closePage(page);
       }
     }
-  console.log('Native causal fan-out, recorded waits and source navigation passed');
+  console.log('Native Trace sender actions stayed visible without target navigation');
   return true;
 }

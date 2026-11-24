@@ -10,6 +10,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "catalog_warehouse/sender_actions.rs"]
+mod sender_actions;
+
 #[path = "catalog_warehouse/parents.rs"]
 mod parents;
 

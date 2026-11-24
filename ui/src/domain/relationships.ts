@@ -40,6 +40,19 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     status = text(row.status);
   if (!['work', 'wait', 'idle', 'done', 'err', 'new', 'off'].includes(status))
     throw Error('Invalid recorded handoff state');
+  const reason = row.reason == null ? undefined : text(row.reason);
+  if (
+    (reason !== undefined &&
+      (reason !== 'not linked yet' ||
+        (kind !== 'relay' && kind !== 'spawn') ||
+        row.to != null ||
+        row.target_turn != null ||
+        row.target_evidence != null ||
+        row.brief_session != null ||
+        row.result_session != null)) ||
+    row.target_label != null
+  )
+    throw Error('Invalid sender relationship target');
   const base = {
     id: text(row.id),
     from: text(row.from),
@@ -50,6 +63,7 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     brief: '',
     result: row.result == null ? undefined : text(row.result),
     declined: boolean(row.declined),
+    reason: reason === 'not linked yet' ? ('not linked yet' as const) : undefined,
   };
   let edge: Handoff;
   if (kind === 'toyou') {
@@ -65,6 +79,21 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     resultOwner: row.result_session == null ? undefined : text(row.result_session),
     targetTurn: row.target_turn == null ? undefined : text(row.target_turn),
     sourceTurn: row.source_turn == null ? undefined : text(row.source_turn),
+  };
+}
+export function senderRelationshipPresentation(edge: Handoff) {
+  if (edge.kind !== 'relay' && edge.kind !== 'spawn') return undefined;
+  return {
+    parts: [
+      { className: 'verb', text: edge.kind === 'spawn' ? 'Spawn requested' : 'Relay requested' },
+    ],
+    reason: 'not linked yet',
+    status:
+      edge.status === 'done'
+        ? 'Sender recorded success'
+        : edge.status === 'err'
+          ? 'Sender recorded failure'
+          : 'Sender outcome unavailable',
   };
 }
 export function parseNativeRelationships(value: unknown, ids: readonly string[]) {

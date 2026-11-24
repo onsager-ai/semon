@@ -2,13 +2,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 const { outputFiles } = await build({
-  entryPoints: [new URL('../src/app/catalogTranscriptView.ts', import.meta.url).pathname],
+  stdin: {
+    contents: `
+      export { catalogTranscriptBlocks, recordedRelationshipViews } from './src/app/catalogTranscriptView.ts';
+      export { parseCausalTrace, reachableTraceSummary } from './src/app/tracePresentation.ts';
+      export { senderRelationshipPresentation } from './src/domain/relationships.ts';
+    `,
+    resolveDir: new URL('..', import.meta.url).pathname,
+  },
   bundle: true,
   write: false,
   format: 'esm',
   platform: 'node',
 });
-const { catalogTranscriptBlocks, recordedRelationshipViews } = await import(
+const {
+  catalogTranscriptBlocks,
+  recordedRelationshipViews,
+  parseCausalTrace,
+  reachableTraceSummary,
+  senderRelationshipPresentation,
+} = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
 );
 test('recorded child cards retain kind, duration, steps and cost without claiming historical activity', () => {
@@ -445,5 +458,101 @@ test('clipped tool notices stay with tool details while message loading actions 
   assert.equal(
     shown.filter((row) => row.kind === 'label' && row.className === 'signal-marker').length,
     1,
+  );
+});
+
+test('sender relay and spawn cards preserve the recorded outcome and never link their target', () => {
+  const edges = [
+    { id: 'relay', kind: 'relay', status: 'err' },
+    { id: 'spawn', kind: 'spawn', status: 'done' },
+  ].map((edge) => ({
+    ...edge,
+    from: 'owner',
+    to: null,
+    at: 1,
+    declined: false,
+    reason: 'not linked yet',
+  }));
+  const payload = {
+    api: 1,
+    projection: 7,
+    source_key: 'local',
+    catalog_key: 'owner',
+    root: 'turn',
+    generation: '0'.repeat(64),
+    previews: {},
+    participants: {},
+    evidence: [],
+    frontier: [],
+    incomplete: false,
+    previews_incomplete: false,
+    sessions: {
+      owner: {
+        name: 'Sender',
+        harness: 'claude',
+        state: 'off',
+        model: '',
+        start: 0,
+        last: 2,
+        cost: { usd: null },
+        tokens: [0, 0, 0],
+        busy: [],
+        wait_edges: [],
+        wait_edges_truncated: false,
+      },
+    },
+    turns: [
+      {
+        id: 'turn',
+        sid: 'owner',
+        at: 1,
+        start: null,
+        u: true,
+        end: { st: 'off', why: 'unavailable' },
+        sent: ['relay', 'spawn'],
+        last: true,
+      },
+    ],
+    handoffs: edges,
+  };
+  const trace = parseCausalTrace(payload, 'local', 'owner', 'turn');
+  assert.match(reachableTraceSummary(trace.root, trace.starts), /^1 session · 2 handoffs$/);
+  for (const [id, text, outcome] of [
+    ['relay', 'Relay requested', 'Sender recorded failure'],
+    ['spawn', 'Spawn requested', 'Sender recorded success'],
+  ]) {
+    const edge = trace.handoffs.get(id);
+    assert.equal(edge.reason, 'not linked yet');
+    assert.equal(edge.to, '');
+    assert.equal(trace.starts.has(id), false);
+    const traceCard = senderRelationshipPresentation(edge);
+    assert.equal(traceCard.reason, 'not linked yet');
+    assert.equal(traceCard.parts[0].text, text);
+    assert.equal(traceCard.parts[0].action, undefined);
+    const reasonless = senderRelationshipPresentation({ ...edge, reason: undefined, to: 'peer' });
+    assert.deepEqual(reasonless, traceCard);
+    const [card] = recordedRelationshipViews(
+      entry(1, 'turn', { k: 'h', id }),
+      { edge },
+      'owner',
+      {},
+      {},
+    );
+    assert.equal(card.kind, 'event');
+    assert.equal(card.parts[0].text, text);
+    assert.equal(card.parts[0].action, undefined);
+    assert.equal(card.href, undefined);
+    assert.equal(card.result, 'not linked yet');
+    assert.equal(card.stateLabel, outcome);
+  }
+  assert.throws(
+    () =>
+      parseCausalTrace(
+        { ...payload, handoffs: [{ ...edges[0], to: 'peer' }, edges[1]] },
+        'local',
+        'owner',
+        'turn',
+      ),
+    /Invalid sender relationship target/,
   );
 });

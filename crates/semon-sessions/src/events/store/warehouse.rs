@@ -5,9 +5,10 @@ pub(super) mod identity;
 #[path = "warehouse_maintenance.rs"]
 mod maintenance;
 
+#[cfg(test)]
+pub(crate) use identity::{ObservedMember, ObservedPeer};
 pub(crate) use identity::{
-    ObservedMember, ObservedPeer, RetainedIdentity, RetainedIdentityError, RetainedPeerError,
-    retained_identity, retained_peer,
+    RetainedIdentity, RetainedIdentityError, RetainedPeerError, retained_identity, retained_peer,
 };
 
 use std::sync::OnceLock;

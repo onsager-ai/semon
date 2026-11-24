@@ -55,7 +55,13 @@ function mergeRelationshipContext(
       handoffs.set(relationship.edge.id, relationship);
     Object.assign(sessions, page.relationship_context.sessions);
     Object.assign(previews, page.relationship_context.previews);
-    for (const turn of page.relationship_context.turns) turns.set(turn.id, turn);
+    for (const turn of page.relationship_context.turns) {
+      const previous = turns.get(turn.id);
+      turns.set(
+        turn.id,
+        previous ? { ...turn, sent: [...new Set([...previous.sent, ...turn.sent])] } : turn,
+      );
+    }
   }
   return {
     state: pages.some((page) => page.relationship_context.state === 'incomplete')

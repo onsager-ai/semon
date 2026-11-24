@@ -114,6 +114,18 @@ well as selecting metadata from committed facts.
   facts and selected parent/child overrides. PID reuse or stale observations
   cannot make a row live. Runtime churn must not restart unrelated history reads.
 
+### Sender-side cards
+
+The native transcript and Trace show outgoing relay and spawn calls from the
+viewed session’s own committed records. The sender’s result determines success,
+failure, or an unavailable outcome. Success describes the recorded operation and makes no claim
+about another session’s activity or completion.
+
+Cards carry `reason: "not linked yet"` and `to: null`. They expose no target
+identity, address, preview reference, or link. A retained read uses the viewed
+session’s certified prefix. The cards use the selected reader and do not write
+body text into analytics or the Hub.
+
 ## Pagination and committed transcript prefixes
 
 - Keep the focused list order `last DESC, catalog_key ASC` and strict keyset
@@ -402,18 +414,10 @@ Schema 57 indexes incoming Claude relay positions. The selected fixture
 adapter carries relay boundaries across pages and places qualified native
 launches at the child's first prompt, or at the first native record when its
 selected prefix has no prompt. Marker launch evidence must be inside the
-selected prefix. For a Claude subagent sending to its parent, the selected
-result reader uses the shared native body-first and bounded-time matcher. Both
-endpoints use the same request's local proof reader or independently authorized
-provider. The selected request pins provider generations and shares its byte
-and source budgets across relay evidence and selected records. Explicit progress
-receipts start an incoming turn in the parent. For untyped legacy receipts,
-selected detail uses matched receipts as incoming relay turns and the latest
-unmatched receipt as completion evidence when explicit terminal evidence is
-absent. Pairing is request-local and uses the selected committed prefixes.
-Trace uses the native Claude run reducer for explicit hand-backs, notifications
-and resumed runs. It includes a bounded return preview and the exact rendered
-entry when available. Otherwise its return evidence carries a refusal reason.
+selected prefix. Explicit native progress receipts start an incoming turn in
+the parent. Incoming relay details in Home show `not linked yet`, while Catalog
+lineage supplies parent names for launch details. Trace shows the selected
+session’s own turn and sender-recorded operations.
 
 Schema 59 records the signal revision alongside each certified retained member's
 prefix. Signal cleanup preserves versions covered by a certified member after

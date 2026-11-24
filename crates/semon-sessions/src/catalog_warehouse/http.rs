@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{OverviewSource, session_route::NativeEntryAddress, viewer::ViewerReply};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 fn error(status: u16, code: &str, message: &str, retryable: bool) -> ViewerReply {
     crate::catalog::error(status, code, message, retryable)
@@ -862,7 +863,7 @@ pub(crate) fn home_with_mode(
             200,
             json!({
                 "api":1,"identity":component.identity,"generation":selection.expected,
-                "session":{"detail":detail.map(|detail| &detail.text),"detail_from":detail.and_then(|detail| detail.from.as_deref()),"detail_from_name":detail.and_then(|detail| detail.from_name.as_deref()),"activity":component.home_activity},
+                "session":{"detail":detail.map(|detail| &detail.text),"detail_from":detail.and_then(|detail| detail.from.as_deref()),"detail_from_name":detail.and_then(|detail| detail.from_name.as_deref()),"detail_from_reason":detail.and_then(|detail| detail.from_reason),"activity":component.home_activity},
                 "events":events,"turns":turns,"incomplete":incomplete,
             }),
         ))
@@ -954,9 +955,7 @@ pub(crate) fn trace(
     let read = || -> Result<ViewerReply, ViewerReply> {
         let (query, address, peer) = addressed_query(query)?;
         let (request, turn) = turn_request(configured, &query)?;
-        if peer.is_some()
-            && (address.is_none() || request.scope != CatalogReadScope::RetainedHistory)
-        {
+        if peer.is_some() {
             return Err(invalid());
         }
         let key = request.sid.as_deref().ok_or_else(invalid)?;
@@ -981,10 +980,6 @@ pub(crate) fn trace(
             &turn,
             retained_provider,
             address.as_ref(),
-            peer.as_ref().map(|peer| selected::PeerBinding {
-                trace: &peer.trace,
-                witness: &peer.witness,
-            }),
         )
         .map_err(read_error)?
         .ok_or_else(not_found)?;
@@ -1272,21 +1267,20 @@ fn read_transcript(
     let Some(component) = component else {
         return Err(not_found());
     };
-    let entries =
+    let mut entries =
         selected::render::entries(&component, &configured.key, key, crate::model::now_ms());
-    if let Some(address) = &address
-        && !entries
+    if let (Some(address), Some(part)) = (&address, part) {
+        if !entries
             .iter()
             .any(|entry| entry["address"] == json!(address))
-    {
-        return Err(error(
-            404,
-            "entry_not_found",
-            "This native transcript entry is unavailable.",
-            false,
-        ));
-    }
-    if let (Some(address), Some(part)) = (&address, part) {
+        {
+            return Err(error(
+                404,
+                "entry_not_found",
+                "This native transcript entry is unavailable.",
+                false,
+            ));
+        }
         return match selected::render::expand(&component, &configured.key, key, address, part) {
             Some(Expansion::Json(entry)) => Ok(crate::catalog::reply(
                 200,
@@ -1316,8 +1310,27 @@ fn read_transcript(
             )),
         };
     }
-    let context = relationship_context(&view, &source, &component, key, &entries, peer.is_none())
-        .map_err(read_error)?;
+    let context = relationship_context(
+        &view,
+        &source,
+        &component,
+        key,
+        &mut entries,
+        peer.is_none(),
+    )
+    .map_err(read_error)?;
+    if let Some(address) = &address
+        && !entries
+            .iter()
+            .any(|entry| entry["address"] == json!(address))
+    {
+        return Err(error(
+            404,
+            "entry_not_found",
+            "This native transcript entry is unavailable.",
+            false,
+        ));
+    }
     let earlier = component
         .next
         .as_ref()
@@ -1355,12 +1368,12 @@ fn relationship_context(
     source: &Source<'_>,
     component: &selected::Component,
     key: &str,
-    entries: &[Value],
+    entries: &mut Vec<Value>,
     preview: bool,
 ) -> Result<Value, ReadError> {
     let turn_ids = entries
         .iter()
-        .filter_map(|entry| entry["turn"].as_str())
+        .filter_map(|entry| entry["turn"].as_str().map(str::to_owned))
         .collect::<std::collections::BTreeSet<_>>();
     let actions = entries
         .iter()
@@ -1391,7 +1404,7 @@ fn relationship_context(
             });
         }
     }
-    let handoffs = component
+    let mut handoffs = component
         .records
         .iter()
         .filter_map(|record| {
@@ -1406,14 +1419,60 @@ fn relationship_context(
         })
         .take(200)
         .collect::<Vec<_>>();
+    let missing = actions.len() != handoffs.len();
     let previews = if preview && !handoffs.is_empty() {
         json!({(key):&component.identity.generation})
     } else {
         json!({})
     };
+    let mut cards = std::collections::BTreeMap::<_, Vec<_>>::new();
+    let mut limited = false;
+    for action in super::sender_actions::recorded(component, key) {
+        let Some(turn) = turns.get_mut(action.turn) else {
+            continue;
+        };
+        if handoffs.len() == 200 {
+            limited = true;
+            break;
+        }
+        turn["sent"]
+            .as_array_mut()
+            .expect("sender action list")
+            .push(json!(action.id));
+        handoffs.push(action.edge(key));
+        cards
+            .entry((
+                action.address.path.as_str(),
+                action.address.offset,
+                action.address.occurrence,
+                action.block,
+            ))
+            .or_default()
+            .push(action.id);
+    }
+    *entries = std::mem::take(entries).into_iter().flat_map(|entry| {
+        let mut rows = Vec::new();
+        if entry["k"] == "tool"
+            && let (Some(path), Some(offset), Some(occurrence), Some(block)) = (
+                entry["address"]["record"]["path"].as_str(), entry["address"]["record"]["offset"].as_u64(),
+                entry["address"]["record"]["occurrence"].as_i64(), entry["address"]["block"].as_u64().and_then(|block| u32::try_from(block).ok()),
+            ) && let Some(ids) = cards.get(&(path, offset, occurrence, block)) {
+            for id in ids {
+                let tool_id = entry["entry_id"].as_str().expect("rendered entry id");
+                let entry_id = format!("{:x}", Sha256::digest(format!("sender-card:{tool_id}:{id}")));
+                let mut address = entry["address"].clone();
+                address["entry_id"] = json!(entry_id);
+                rows.push(json!({"k":"h","id":id,"turn":entry["turn"],"entry_id":entry_id,"address":address,
+                    "provenance":entry["provenance"],"observed_at":entry["observed_at"],"freshness":entry["freshness"]}));
+            }
+        }
+        rows.push(entry);
+        rows
+    }).collect();
     Ok(json!({
-        "state":if actions.len() == handoffs.len() { "complete" } else { "incomplete" },
-        "turn_ids":turn_ids,"turns":turns.into_values().collect::<Vec<_>>(),"handoffs":handoffs,"sessions":{},"previews":previews,
+        "state":if missing || limited {"incomplete"} else {"complete"},
+        "turn_ids":turn_ids,"turns":turns.into_values().collect::<Vec<_>>(),"handoffs":handoffs,
+        "sessions":{},"previews":previews,
     }))
 }
 

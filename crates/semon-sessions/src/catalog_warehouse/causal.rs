@@ -64,7 +64,6 @@ pub(super) fn turns(
     component: i64,
     view: i64,
     targets: impl Iterator<Item = Position>,
-    legacy: &str,
 ) -> Result<BTreeMap<Position, Option<TurnStart>>, ReadError> {
     let mut search = TurnSearch::new(db, targets)?;
     if search.winners.is_empty() {
@@ -158,7 +157,6 @@ pub(super) fn turns(
                     native_id: &native_id,
                     path,
                 },
-                legacy,
             )?;
         }
         if count < MEMBER_PAGE {
@@ -211,7 +209,6 @@ impl<'a> TurnSearch<'a> {
         key: &str,
         harness: &str,
         member: BoundaryMember<'_>,
-        legacy: &str,
     ) -> Result<(), ReadError> {
         let BoundaryMember {
             id,
@@ -227,7 +224,7 @@ impl<'a> TurnSearch<'a> {
                 .query_row(
                     named_params! {
                         ":source": id, ":end": end, ":predecessors": predecessors,
-                        ":time": time, ":pos": pos, ":head": launch_at == Some(None), ":progress": crate::events::AGM_PROGRESS, ":legacy": legacy,
+                        ":time": time, ":pos": pos, ":head": launch_at == Some(None), ":progress": crate::events::AGM_PROGRESS,
                     },
                     |row| {
                         Ok((
@@ -241,13 +238,12 @@ impl<'a> TurnSearch<'a> {
                             row.get::<_, Option<String>>(4)?,
                             row.get(5)?,
                             row.get::<_, Option<String>>(6)?,
-                            row.get::<_, Option<String>>(7)?,
                         ))
                     },
                 )
                 .optional()
                 .map_err(index)?;
-            let Some((position, kind, occurrence, correlation, legacy_id)) = matched else {
+            let Some((position, kind, occurrence, correlation)) = matched else {
                 continue;
             };
             if winner
@@ -263,8 +259,6 @@ impl<'a> TurnSearch<'a> {
                 let relay = kind == "relay";
                 let id = if launch {
                     crate::model::spawn_turn_id(harness, key)
-                } else if let Some(legacy_id) = legacy_id {
-                    legacy_id
                 } else if relay {
                     crate::model::incoming_relay_turn_id(correlation.as_deref(), native_id, offset)
                 } else {

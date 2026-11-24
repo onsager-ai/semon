@@ -1080,31 +1080,24 @@ export function createCatalogViewer(
     overview.markResults(accepted.source, results);
     accepted.readResults = new Set(results);
     const route = navigation.route;
-    renderCausalTrace(
-      root,
-      accepted,
-      Date.now(),
-      causalExpanded,
-      {
-        session(key, turn) {
-          const evidence = causalEvidence(accepted, key, turn);
-          if (evidence && 'reason' in evidence) {
-            accepted.observation = evidence.reason;
-            drawCausal();
-            return;
-          }
-          const url =
-            sessionPath(accepted.source, key) +
-            '?' +
-            sessionControls(route.readScope, evidence?.address, evidence?.peer) +
-            (turn && !evidence ? '#' + encodeURIComponent(turn) : '');
-          history.pushState(evidence ? { traceEvidence: true } : null, '', url);
-          fromLocation();
-        },
-        fold: drawCausal,
+    renderCausalTrace(root, accepted, Date.now(), causalExpanded, {
+      session(key, turn) {
+        const evidence = causalEvidence(accepted, key, turn);
+        if (evidence && 'reason' in evidence) {
+          accepted.observation = evidence.reason;
+          drawCausal();
+          return;
+        }
+        const url =
+          sessionPath(accepted.source, key) +
+          '?' +
+          sessionControls(route.readScope, evidence?.address) +
+          (turn && !evidence ? '#' + encodeURIComponent(turn) : '');
+        history.pushState(evidence ? { traceEvidence: true } : null, '', url);
+        fromLocation();
       },
-      route.readScope,
-    );
+      fold: drawCausal,
+    });
     chrome();
   }
   async function loadCausal() {
@@ -1119,7 +1112,6 @@ export function createCatalogViewer(
       p.set('sid', route.sid);
       p.set('turn', route.turn);
       if (route.address) p.set('address', JSON.stringify(route.address));
-      if (route.peer) p.set('peer', JSON.stringify(route.peer));
       const next = parseCausalTrace(
         await api('/api/session-trace?' + p),
         source,
@@ -1183,9 +1175,8 @@ export function createCatalogViewer(
         events: string[];
         turns: string[];
         address?: NativeEntryAddress;
-        peer?: RetainedPeerAddress;
       }[] = [];
-      for (const sid of new Set([...Object.keys(next.previews), ...Object.keys(next.sessions)])) {
+      for (const sid of [next.key]) {
         if (next.previewReady.has(sid)) continue;
         if (next.evidence) {
           for (const turn of next.turns[sid] ?? []) {
@@ -1200,7 +1191,7 @@ export function createCatalogViewer(
               next.previewsIncomplete = true;
               continue;
             }
-            jobs.push({ sid, events, turns, address: evidence.address, peer: evidence.peer });
+            jobs.push({ sid, events, turns, address: evidence.address });
           }
           continue;
         }
@@ -1258,7 +1249,6 @@ export function createCatalogViewer(
                 query.set('address', JSON.stringify(job.address));
                 query.set('session_fields', '[]');
               }
-              if (job.peer) query.set('peer', JSON.stringify(job.peer));
               const detail = object(await api('/api/session-home?' + query));
               if (
                 disposed ||

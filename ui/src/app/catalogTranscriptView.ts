@@ -10,7 +10,7 @@ import {
   recordedThoughtLabel,
   visibleMaskedThoughts,
 } from '../domain/thinking';
-import type { RecordedRelationship } from '../domain/relationships';
+import { senderRelationshipPresentation, type RecordedRelationship } from '../domain/relationships';
 import type {
   CatalogTranscriptPage,
   RecordedSessionPresentation,
@@ -472,6 +472,26 @@ export function recordedRelationshipViews(
     activity?: readonly [string, string];
   },
 ): EntryView[] {
+  const sender = relationship.edge.reason && senderRelationshipPresentation(relationship.edge);
+  if (sender) {
+    return [
+      {
+        kind: 'event',
+        key: item.entry_id,
+        entryKey: item.entry_id,
+        handoff: relationship.edge.id,
+        className: 'event',
+        icon: I.out,
+        parts: sender.parts,
+        time: clock(relationship.edge.at, Date.now()),
+        brief: '',
+        result: sender.reason,
+        resultLabel: 'Target',
+        waiting: false,
+        stateLabel: sender.status,
+      },
+    ];
+  }
   const edge = relationship.edge,
     target = participants[edge.to],
     source = participants[edge.from];
