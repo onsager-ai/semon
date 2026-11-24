@@ -11,6 +11,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 tiny_http.workspace = true
 getrandom.workspace = true
 libc.workspace = true
+percent-encoding = "2"
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 hex.workspace = true
 httpdate = "1.0"

@@ -129,7 +129,7 @@ fn optional_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Text>, D::Err
 impl<'de> Deserialize<'de> for Text {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let value = String::deserialize(d)?;
-        if value.is_empty() || looks_secret(&value) {
+        if value.is_empty() {
             return Err(de::Error::custom("invalid snapshot text"));
         }
         Ok(Self(value))
@@ -246,6 +246,31 @@ fn looks_secret(text: &str) -> bool {
         })
 }
 
+fn contains_secret(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            let mut current = text.clone();
+            for _ in 0..4 {
+                if looks_secret(&current) {
+                    return true;
+                }
+                let plus_decoded = current.replace('+', " ");
+                let decoded = percent_encoding::percent_decode_str(&plus_decoded)
+                    .decode_utf8_lossy()
+                    .into_owned();
+                if decoded == current {
+                    return false;
+                }
+                current = decoded;
+            }
+            looks_secret(&current)
+        }
+        Value::Array(items) => items.iter().any(contains_secret),
+        Value::Object(fields) => fields.values().any(contains_secret),
+        _ => false,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Invalid;
 
@@ -279,7 +304,7 @@ pub(crate) fn validate(body: &[u8], now: DateTime<Utc>) -> Result<(DateTime<Utc>
             _ => true,
         }
     }
-    if !value.is_object() || !object_shapes(&value) {
+    if !value.is_object() || !object_shapes(&value) || contains_secret(&value) {
         return Err(Invalid);
     }
     let generation = snapshot.generated_at.0;
@@ -317,7 +342,6 @@ pub(crate) fn validate(body: &[u8], now: DateTime<Utc>) -> Result<(DateTime<Utc>
             || url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
-            || link.0.contains('%')
             || authority
                 .split(['/', '?', '#'])
                 .next()

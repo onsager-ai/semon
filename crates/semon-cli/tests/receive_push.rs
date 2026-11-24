@@ -1246,6 +1246,25 @@ fn management_snapshot_write_scope_validation_and_append_order() {
             "{pointer}"
         );
     }
+    for pointer in [
+        "/decisions_today/0/link",
+        "/lanes/0/status/Links",
+        "/lanes/0/status/State-of-work",
+        "/decisions_waiting/0/question",
+    ] {
+        for credential in [
+            "https://example.com/?%70assword=fixture",
+            "https://example.com/?password+:+fixture",
+            "https://example.com/?%2570assword%253Dfixture",
+        ] {
+            let mut snapshot = newest.clone();
+            *snapshot.pointer_mut(pointer).unwrap() = json!(credential);
+            assert!(
+                post(&snapshot.to_string()).starts_with("HTTP/1.1 400"),
+                "{pointer}: {credential}"
+            );
+        }
+    }
     for payload in [
         json!([
             1,
@@ -1294,6 +1313,7 @@ fn management_snapshot_write_scope_validation_and_append_order() {
     assert_eq!(read()["snapshot"], newest);
     let mut tied = newest;
     tied["hosts"][0]["temperature_c"] = json!(88);
+    tied["decisions_today"][0]["link"] = json!("https://example.com/benign%20link");
     assert!(post(&tied.to_string()).starts_with("HTTP/1.1 204"));
     assert_eq!(read()["snapshot"], tied);
     assert_eq!(fs::read_dir(store).unwrap().count(), 3);

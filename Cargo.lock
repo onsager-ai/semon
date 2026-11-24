@@ -1931,6 +1931,7 @@ dependencies = [
  "hex",
  "httpdate",
  "libc",
+ "percent-encoding",
  "reqwest",
  "semon-sessions",
  "serde",
