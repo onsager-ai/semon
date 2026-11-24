@@ -376,7 +376,7 @@ impl<M> Plan<M> {
                     in_child: false,
                     at: receipt.address.at,
                     failed: false,
-                    resume: None,
+                    resumed: false,
                     preview: body.map(|text| crate::model::cap(&text, crate::model::MSG_MAX)),
                 });
             }
@@ -538,7 +538,7 @@ fn collect_run<M: Clone>(
                 let status: Option<String> = row.get(4).map_err(index)?;
                 Step::Notification {
                     completed: matches!(status.as_deref(), Some("completed" | "success" | "done")),
-                    resumed: false,
+                    resume: None,
                 }
             }
             "agm" if parent_aliases.is_some() => Step::Final,

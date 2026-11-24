@@ -480,7 +480,7 @@ fn peer(sid: &str, time: String, msg_id: &str, name: &str, pid: u64, body: &str)
 
 fn notification(sid: &str, time: String, id: &str, status: &str, body: &str) -> Value {
     json!({"type":"user","timestamp":time,"sessionId":sid,"origin":{"kind":"task-notification"},
-        "message":{"role":"user","content":format!("<task-notification><task-id>x</task-id><tool-use-id>{id}</tool-use-id><status>{status}</status><result>{body}</result></task-notification>")}})
+        "message":{"role":"user","content":format!("<task-notification><tool-use-id>{id}</tool-use-id><status>{status}</status><result>{body}</result></task-notification>")}})
 }
 
 fn codex_line(time: String, kind: &str, payload: Value) -> Value {
@@ -8058,13 +8058,11 @@ fn a_message_before_the_only_hand_back_is_inline_and_the_hand_back_ends_the_run(
 fn a_killed_resumed_run_does_not_show_as_working() {
     let mut receipts = vec![hand_back("lead", ts(20, 3), "aw", "first done")];
     receipts.extend(send_to_agent("again", 4, "aw", "try again", resumed("aw")));
-    receipts.push(notification(
-        "lead",
-        ts(20, 8),
-        "tw",
-        "killed",
-        "stopped by you",
-    ));
+    let mut stopped = notification("lead", ts(20, 8), "again", "killed", "stopped by you");
+    stopped["message"]["content"] = json!(
+        "<task-notification><task-id>aw</task-id><tool-use-id>again</tool-use-id><status>killed</status><result>stopped by you</result></task-notification>"
+    );
+    receipts.push(stopped);
     let home = background_home(
         vec![(
             "aw",

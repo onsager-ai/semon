@@ -105,7 +105,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v43: Claude task notifications retain the task ID, and assistant text
 /// retains the native end-turn marker.
 /// v44: retain qualified Claude task headers and explicit SendMessage resumes.
-pub(crate) const CACHE_VERSION: u32 = 44;
+/// v45: remove assistant end-turn as subagent lifecycle evidence.
+pub(crate) const CACHE_VERSION: u32 = 45;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -4175,8 +4176,6 @@ pub(crate) const AGM_UP: u8 = 16;
 /// resumed subagent (`origin.kind == "coordinator"`), or a Codex parent's
 /// message to its child.
 pub(crate) const AGM_DOWN: u8 = 32;
-/// Claude assistant text whose API response stopped at the end of a turn.
-pub(crate) const ASSISTANT_END_TURN: u8 = 1;
 /// A Codex agent message between agents where neither is the other's ancestor.
 pub(crate) const AGM_SIDE: u8 = 64;
 /// The agent's final report for its run (`origin.handback == true`).
@@ -6681,12 +6680,6 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                         o: offset,
                                         b: block,
                                         t: time,
-                                        script: if field(message, "stop_reason") == Some("end_turn")
-                                        {
-                                            ASSISTANT_END_TURN
-                                        } else {
-                                            0
-                                        },
                                         ..Event::default()
                                     },
                                 );

@@ -267,7 +267,6 @@ fn static_state(value: &str) -> io::Result<&'static str> {
         "done" => Ok("done"),
         "err" => Ok("err"),
         "off" => Ok("off"),
-        "unknown" => Ok("unknown"),
         _ => Err(io::Error::other("unsupported staged native state")),
     }
 }

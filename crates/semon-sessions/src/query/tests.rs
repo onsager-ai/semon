@@ -1282,7 +1282,7 @@ fn fixture() -> Home {
     // Its pid file says busy, but no process 32 runs.
     home.write(
         "claude/sessions/32.json",
-        &json!({"pid": 32, "sessionId": "crashed", "procStart": 555, "status": "busy", "updatedAt": at(3, 1)}).to_string(),
+        &json!({"pid": 32, "sessionId": "crashed", "procStart": 555, "status": "busy", "updatedAt": at(3, 7)}).to_string(),
     );
     home.top(
         "done",
@@ -1681,16 +1681,19 @@ fn stalls_require_process_evidence_for_the_current_claude_session() {
     assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
 
     // An unidentifiable process is unknown, even with a current busy record.
-    pid_record["updatedAt"] = json!(at(2, 2));
+    pid_record["updatedAt"] = json!(at(2, 6));
     home.write("claude/sessions/42.json", &pid_record.to_string());
     let stat = home.write("proc/42/stat", "invalid stat\n");
-    assert_observation(&mut query, Value::Null, Value::Null, Value::Null);
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
 
     // A checked start time qualifies the process. A different start then
     // proves that process is gone even though its numeric PID is in use.
     home.process(42, 123);
     assert_observation(&mut query, json!(42), json!(true), json!("no-output"));
     home.process(42, 456);
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    pid_record["updatedAt"] = json!(at(2, 7));
+    home.write("claude/sessions/42.json", &pid_record.to_string());
     assert_observation(&mut query, json!(42), json!(false), json!("process-gone"));
 
     // Absence is distinct from unreadable and survives a recorded Facts read.
@@ -1786,7 +1789,6 @@ fn resumed_claude_subagent_ends_when_its_parent_receives_the_result() {
                 "spawn",
                 json!({"status":"async_launched", "agentId":"example-agent"}),
             ),
-            notification(5, "spawn"),
             assistant(
                 "parent",
                 ts(1, 6),
@@ -1803,14 +1805,12 @@ fn resumed_claude_subagent_ends_when_its_parent_receives_the_result() {
             ),
         ],
     );
-    let mut final_reply = assistant("parent", ts(1, 8), vec![text("Second example result")]);
-    final_reply["message"]["stop_reason"] = json!("end_turn");
     home.agent("parent", "example-agent", "spawn", &[
         user("parent", ts(1, 2), "Review the example"),
         assistant("parent", ts(1, 4), vec![text("First example result")]),
         json!({"type":"user", "sessionId":"parent", "timestamp":ts(1, 6), "origin":{"kind":"coordinator"},
             "message":{"role":"user","content":"Check another case"}}),
-        final_reply,
+        assistant("parent", ts(1, 8), vec![text("Second example result")]),
     ]);
     let mut query = home.query();
     let assert_child = |query: &mut Query, state| {
@@ -1821,23 +1821,34 @@ fn resumed_claude_subagent_ends_when_its_parent_receives_the_result() {
         assert_eq!(child["state"], state);
         assert_eq!(child["last_activity"], at(1, 8));
         let stalls = call(query, "stalls", json!({"idle_minutes": 60}));
-        assert_eq!(stalls["stalls"].as_array().unwrap().len(), 1);
-        assert_eq!(stalls["stalls"][0]["id"], "parent");
-        assert_eq!(stalls["stalls"][0]["stall_reason"], "no-output");
+        let rows = stalls["stalls"].as_array().unwrap();
+        let child_stall = rows.iter().find(|row| row["id"] == "example-agent");
+        if state == "working" {
+            assert_eq!(child_stall.unwrap()["stall_reason"], "no-output");
+        } else {
+            assert!(child_stall.is_none());
+        }
+        assert!(
+            rows.iter()
+                .any(|row| row["id"] == "parent" && row["stall_reason"] == "no-output")
+        );
     };
-    assert_child(&mut query, "unknown");
+    assert_child(&mut query, "working");
     let mut append = fs::OpenOptions::new().append(true).open(&parent).unwrap();
-    let mut fake = notification(9, "resume");
+    writeln!(append, "{}", notification(9, "spawn")).unwrap();
+    assert_child(&mut query, "working");
+
+    let mut fake = notification(10, "resume");
     fake.as_object_mut().unwrap().remove("origin");
     writeln!(append, "{fake}").unwrap();
-    assert_child(&mut query, "unknown");
+    assert_child(&mut query, "working");
 
-    let mut quoted = notification(10, "resume");
+    let mut quoted = notification(11, "resume");
     quoted["message"]["content"] = json!(
         "<task-notification><task-id>example-agent</task-id><result><tool-use-id>resume</tool-use-id><status>completed</status></result></task-notification>"
     );
     writeln!(append, "{quoted}").unwrap();
-    assert_child(&mut query, "unknown");
+    assert_child(&mut query, "working");
 
     writeln!(
         append,
@@ -1876,7 +1887,7 @@ fn resumed_claude_subagent_ends_when_its_parent_receives_the_result() {
     ] {
         writeln!(append, "{record}").unwrap();
     }
-    assert_child(&mut query, "unknown");
+    assert_child(&mut query, "working");
     writeln!(append, "{}", notification(15, "resume")).unwrap();
     assert_child(&mut query, "ended");
 

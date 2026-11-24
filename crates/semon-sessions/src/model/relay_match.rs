@@ -267,25 +267,17 @@ pub(crate) fn group_claude_runs<A: Copy + Ord>(
                 runs[target].fin = Some(at);
             }
             Step::Handback => runs[last].handback = Some(at),
-            // A completed notification after a resume ends the run that
-            // handed back before it, when that one has none. A failed or
-            // killed one is about the run still open: the one before had
-            // handed back, so it didn't fail.
-            Step::Notification { completed, resume } => {
-                let target = if let Some(call) = resume {
-                    let Some(&target) = by_resume_call.get(&call) else {
-                        continue;
-                    };
-                    target
-                } else if last > 0
-                    && completed
-                    && !runs[last].ended()
-                    && runs[last - 1].handed_back()
-                    && runs[last - 1].tn.is_none()
-                {
-                    last - 1
-                } else {
-                    last
+            // The caller already qualified the notification against either
+            // the spawn or one exact resume call in the parent.
+            Step::Notification { resume, .. } => {
+                let target = match resume {
+                    None => 0,
+                    Some(call) => {
+                        let Some(&target) = by_resume_call.get(&call) else {
+                            continue;
+                        };
+                        target
+                    }
                 };
                 if runs[target].tn.is_none() {
                     runs[target].tn = Some(at);

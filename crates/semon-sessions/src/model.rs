@@ -47,9 +47,8 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use crate::{
     Marker, Options, events,
     events::{
-        ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASSISTANT_END_TURN,
-        ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED,
-        TASK_NOTIFICATION_ORIGIN, UNKNOWN,
+        ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASYNC, DENIED, Event,
+        EventCache, FileIndex, Kind, PIN, SEND_FAILED, TASK_NOTIFICATION_ORIGIN, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
     field, file_list, handoff,
@@ -2272,31 +2271,33 @@ impl<'a> Builder<'a> {
                         } else {
                             // A dead process's record cannot describe an unobserved
                             // continuation whose transcript outlasts that record.
+                            const PID_CLOCK_SKEW_MS: i64 = 5 * 60_000;
                             let mut candidates = session.pid_files.iter().filter(|pid| {
-                                pid.updated.is_some_and(|updated| {
-                                    session.last.is_none_or(|last| last <= updated)
-                                })
+                                pid.updated
+                                    .zip(session.last)
+                                    .is_some_and(|(updated, last)| {
+                                        updated.saturating_sub(last) > PID_CLOCK_SKEW_MS
+                                    })
                             });
-                            let unconfirmed_busy = session
-                                .pid_files
-                                .iter()
-                                .any(|pid| pid.gone && pid.busy())
-                                .then(|| "busy".to_owned());
-                            match candidates.next() {
-                                Some(pid) if pid.gone => match candidates.next() {
-                                    None => (
-                                        "session",
-                                        Some(pid.pid),
-                                        Some(false),
-                                        pid.status.clone(),
-                                        None,
-                                    ),
-                                    Some(other) if other.gone && candidates.all(|pid| pid.gone) => {
-                                        ("session", None, Some(false), None, None)
-                                    }
-                                    Some(_) => ("session", None, None, unconfirmed_busy, None),
-                                },
-                                _ => ("session", None, None, unconfirmed_busy, None),
+                            match (candidates.next(), candidates.next()) {
+                                (Some(pid), None) if pid.gone => (
+                                    "session",
+                                    Some(pid.pid),
+                                    Some(false),
+                                    pid.status.clone(),
+                                    None,
+                                ),
+                                _ => (
+                                    "session",
+                                    None,
+                                    None,
+                                    session
+                                        .pid_files
+                                        .iter()
+                                        .any(PidFile::busy)
+                                        .then(|| "busy".to_owned()),
+                                    None,
+                                ),
                             }
                         }
                     }
@@ -3357,13 +3358,21 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .partition(|at| event(self.files, *at).script & AGM_FINAL != 0);
             let paired = self.pair_sends(child, &key, &received);
-            let original_ends = tool_use_id
-                .as_deref()
+            let original_ends = call
+                .map(|at| event(self.files, at))
+                .filter(|call| matches!(call.n.as_deref(), Some("Agent" | "Task")))
+                .and_then(|call| call.id.as_deref())
                 .and_then(|id| notifications.get(id))
                 .into_iter()
                 .flatten()
                 .copied()
-                .filter(|at| self.of_file[at.0] == spawner)
+                .filter(|at| {
+                    self.of_file[at.0] == spawner
+                        && event(self.files, *at)
+                            .task_id
+                            .as_deref()
+                            .is_none_or(|id| id == native_id)
+                })
                 .map(|at| (at, None));
             let resume_calls = resumes
                 .get(&(spawner, native_id))
@@ -3376,7 +3385,6 @@ impl<'a> Builder<'a> {
                 .collect();
             // The native task ID and SendMessage reply must identify the same
             // child. The specific call closes only the run it resumed.
-            let mut ambiguous_notice = false;
             let resumed_ends = task_notifications
                 .get(native_id)
                 .into_iter()
@@ -3393,7 +3401,6 @@ impl<'a> Builder<'a> {
                         .find_in(spawner, id)
                         .and_then(|call| resume_ids.get(&call))
                         .copied();
-                    ambiguous_notice |= resume.is_none() && notice.t >= self.sessions[child].last;
                     resume.map(|resume| (at, Some(resume)))
                 });
             let ends = original_ends.chain(resumed_ends).collect::<Vec<_>>();
@@ -3490,15 +3497,7 @@ impl<'a> Builder<'a> {
             // A resumed run not ended yet works while its tree runs; the
             // spawn's result stays the previous run's.
             let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
-            // An API end-turn by itself does not prove the parent got a result.
-            let unconfirmed_end = child_events.last().is_some_and(|at| {
-                let event = event(self.files, *at);
-                event.k == Kind::A && event.script & ASSISTANT_END_TURN != 0
-            });
             let (status, state) = match &result {
-                _ if (resumed || result.is_none()) && (unconfirmed_end || ambiguous_notice) => {
-                    (if result.is_some() { "done" } else { "new" }, "unknown")
-                }
                 _ if resumed && running => ("work", "work"),
                 _ if resumed => ("done", "done"),
                 Some((_, _, true)) => ("err", "err"),
