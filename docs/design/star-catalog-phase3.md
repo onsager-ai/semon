@@ -129,7 +129,8 @@ Relationship action entries use `k: "h"` and the handoff `id`, with an entry
 address and provenance in the source transcript. A recorded outgoing call
 can be outside the page while its handoff is named by a visible source turn.
 An unqualified link carries `status: "off"` and `reason`, with no receipt turn
-or preview authority. A resume delivered as a relay uses the relay shape.
+or preview authority. A resume delivered as a relay uses the relay shape. A Claude coordinator
+resume that names a recipient without a correlated receipt remains unavailable.
 
 For linked participants, the Viewer reads `name`, `harness` and `model` from
 `sessions`, with optional `kind`, `state`, `start`, `last`, `calls`, `usd`,

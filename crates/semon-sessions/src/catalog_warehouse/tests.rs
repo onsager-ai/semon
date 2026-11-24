@@ -2332,6 +2332,29 @@ fn warehouse_transcript_records_spawn_relay_handback_resume_and_unavailable_send
         json!({"to":"missing-peer","message":"No receipt"}),
     );
     result(&root, 14, "missing", "unavailable");
+    call(
+        &root,
+        15,
+        "untyped-resume",
+        "SendMessage",
+        json!({"to":"worker-label","message":"Continue"}),
+    );
+    append_native(
+        &root,
+        json!({
+            "type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:16Z",
+            "toolUseResult":{"success":true,"resumedAgentId":"worker"},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"untyped-resume","content":"resumed"}]},
+        }),
+    );
+    append_native(
+        &child,
+        json!({
+            "type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:17Z",
+            "origin":{"kind":"coordinator"},
+            "message":{"role":"user","content":"The coordinator sent a message while you were working:\nContinue"},
+        }),
+    );
     crate::model::observe_catalog(
         &fixture.options,
         &mut fixture.cache,
@@ -2400,6 +2423,24 @@ fn warehouse_transcript_records_spawn_relay_handback_resume_and_unavailable_send
     assert_eq!(unavailable["status"], "off");
     assert!(unavailable["reason"].is_string());
     assert!(unavailable["target_turn"].is_null());
+    let untyped = edges
+        .iter()
+        .find(|edge| edge["to"] == "worker" && edge["status"] == "off" && edge["kind"] == "relay")
+        .unwrap_or_else(|| panic!("Missing unavailable coordinator resume: {root_page}"));
+    assert_eq!(
+        untyped["reason"],
+        "The recorded delivery names a subagent but has no correlated receipt."
+    );
+    assert!(untyped["target_turn"].is_null());
+    assert!(untyped["target_evidence"].is_null());
+    assert!(untyped["brief_session"].is_null());
+    assert!(
+        context["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|turn| turn["sent"].as_array().unwrap().contains(&untyped["id"]))
+    );
     assert!(context["sessions"].get("missing-peer").is_none());
     assert_eq!(context["sessions"]["worker"]["harness"], "claude");
     assert_eq!(

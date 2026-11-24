@@ -987,6 +987,7 @@ struct Send {
     block: u32,
     recipient: String,
     at: i64,
+    untyped_delivery: bool,
 }
 
 fn relay_sends(
@@ -1011,7 +1012,12 @@ fn relay_sends(
            CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?3
            WHERE ?1 IS NULL AND w.path=?2
          )
-         SELECT s.pos,r.occurrence,s.block,s.target,s.ts FROM member m
+         SELECT s.pos,r.occurrence,s.block,s.target,s.ts,(
+           SELECT min(t.target) FROM fact_tool_result t
+           WHERE t.source=s.source AND t.call_id=s.call_id AND t.call_pos=s.pos AND t.call_block=s.block
+             AND t.pos<?5 AND NOT t.failed AND t.flags & ?9<>0 AND t.correlation IS NULL
+           HAVING count(DISTINCT t.target)=1
+         ) FROM member m
          CROSS JOIN fact_relay_send s ON s.source=m.source AND s.pos>=?4 AND s.pos<?5
          CROSS JOIN fact_record r ON r.source=s.source AND r.pos=s.pos AND r.block=0 AND NOT r.gap
          WHERE s.ts>=?6 AND (NOT ?7 OR (r.pos=?4 AND r.occurrence=?8)) ORDER BY s.pos,s.block,s.occurrence LIMIT 17",
@@ -1045,10 +1051,12 @@ fn relay_sends(
                 i64::try_from(reference.offset).map_err(super::index)?,
                 since,
                 exact,
-                root.address.occurrence
+                root.address.occurrence,
+                crate::events::PIN
             ])
             .map_err(super::index)?;
         while let Some(row) = rows.next().map_err(super::index)? {
+            let untyped = row.get::<_, Option<String>>(5).map_err(super::index)?;
             sends.push(Send {
                 address: selected::Address {
                     path: reference.path.clone(),
@@ -1058,7 +1066,8 @@ fn relay_sends(
                     occurrence: row.get(1).map_err(super::index)?,
                 },
                 block: row.get(2).map_err(super::index)?,
-                recipient: row.get(3).map_err(super::index)?,
+                untyped_delivery: untyped.is_some(),
+                recipient: untyped.unwrap_or(row.get(3).map_err(super::index)?),
                 at: row.get(4).map_err(super::index)?,
             });
         }
@@ -1105,6 +1114,7 @@ pub(super) fn retained_relays(
         block,
         recipient,
         at: sent_at,
+        untyped_delivery,
     } in sends
     {
         if !exact {
@@ -1139,6 +1149,10 @@ pub(super) fn retained_relays(
             {
                 continue;
             }
+        }
+        if untyped_delivery {
+            refusals.push(untyped_refusal(send, block, recipient, sent_at));
+            continue;
         }
         let parent = component
             .retained_metadata
@@ -1281,6 +1295,7 @@ pub(super) fn current_relays(
         block,
         at: sent_at,
         recipient,
+        untyped_delivery,
     } in sends
     {
         if !exact {
@@ -1294,6 +1309,10 @@ pub(super) fn current_relays(
             {
                 continue;
             }
+        }
+        if untyped_delivery {
+            refusals.push(untyped_refusal(call, block, recipient, sent_at));
+            continue;
         }
         let send = (call.clone(), block);
         call.block = i64::from(block);
@@ -1428,6 +1447,22 @@ pub(super) fn current_relays(
         }
     }
     Ok((out, limited))
+}
+
+fn untyped_refusal(
+    address: selected::Address,
+    block: u32,
+    target: String,
+    at: i64,
+) -> RelayRefusal {
+    RelayRefusal {
+        id: refused_relay_id(&address, block),
+        send: (address, block),
+        target,
+        at,
+        reason: "The recorded delivery names a subagent but has no correlated receipt.".into(),
+        qualified: false,
+    }
 }
 
 fn refused_relay_id(address: &selected::Address, block: u32) -> String {
