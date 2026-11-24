@@ -1041,6 +1041,7 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
+    fn recover_catalog_version(&mut self) -> Result<bool, StoreError>;
     fn backfill_state(&self) -> Result<Option<String>, StoreError>;
     fn discover_catalog_sources(
         &mut self,
@@ -1171,6 +1172,7 @@ pub(crate) trait IndexStore: Send {
     fn advance_tree_repair(
         &mut self,
         _options: &crate::Options,
+        _namespace: &crate::storage::Namespace,
     ) -> io::Result<(bool, Option<String>)> {
         Ok((false, None))
     }
@@ -1684,6 +1686,14 @@ impl EventCache {
             )),
             Err(error) => Err(io::Error::other(error.to_string())),
         }
+    }
+
+    pub(crate) fn recover_catalog_version(&mut self) -> io::Result<bool> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .recover_catalog_version()
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn backfill_state(&self) -> io::Result<Option<String>> {
@@ -2571,11 +2581,15 @@ impl EventCache {
         self.files.keys().map(String::as_str)
     }
 
-    pub(crate) fn advance_tree_repair(&mut self, options: &crate::Options) -> io::Result<bool> {
+    pub(crate) fn advance_tree_repair(
+        &mut self,
+        options: &crate::Options,
+        namespace: &crate::storage::Namespace,
+    ) -> io::Result<bool> {
         let Some(store) = self.store.as_mut() else {
             return Ok(false);
         };
-        let (pending, changed) = store.advance_tree_repair(options)?;
+        let (pending, changed) = store.advance_tree_repair(options, namespace)?;
         if let Some(path) = changed {
             self.files.remove(&path);
         }

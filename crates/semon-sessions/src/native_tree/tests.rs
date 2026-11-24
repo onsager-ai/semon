@@ -359,7 +359,9 @@ fn native_usage_facts_preserve_duplicate_conflict_unknown_model_and_incarnation_
 #[test]
 fn current_claude_missing_projection_repairs_in_bounded_slices() {
     let home = Home::new();
-    let mut text = String::new();
+    let mut text = line(
+        json!({"type":"user","sessionId":"parent","uuid":"prompt","message":{"role":"user","content":"fixture"}}),
+    );
     for n in 0..8192 {
         text += &line(
             json!({"type":"assistant","uuid":format!("u-{n}"),"message":{"id":format!("m-{n}"),"model":"claude-sonnet-4-5","usage":{"input_tokens":3},"content":[{"type":"tool_use","id":format!("t-{n}"),"name":"Read"}]}}),
@@ -386,10 +388,20 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
         .unwrap();
     let error = events::scan_file(&path, "claude", &mut home.cache(), &mut false).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    db.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_version',?1)",
+        [(crate::model::summary::CATALOG_VERSION - 1).to_string()],
+    )
+    .unwrap();
+    assert!(home.cache().recover_catalog_version().unwrap());
+    assert!(!crate::catalog::sqlite_page_ready(&home.options).unwrap());
     let mut steps = 0;
     let mut previous = 0;
     loop {
-        let pending = home.cache().advance_tree_repair(&home.options).unwrap();
+        let pending = home
+            .cache()
+            .advance_tree_repair(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
         steps += 1;
         let cursor: i64 = db
             .query_row("SELECT cursor FROM native_tree_repairs", [], |r| r.get(0))
@@ -411,6 +423,25 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
         assert!(steps < 128);
     }
     assert!(steps > 16);
+    let evidence =
+        crate::native_evidence::NativeEvidence::for_source_key("local", home.options.clone());
+    let mut work = crate::native_evidence::Work::default();
+    assert!((0..128).any(|_| {
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+    }));
+    assert!(crate::catalog::sqlite_page_ready(&home.options).unwrap());
+    drop(work);
+    let core = crate::ViewerCore::new(home.options.clone());
+    let reply = core.respond("GET", "/api/sessions", "machine=local", None);
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    core.close();
     let nodes = collect(&home.options, "").unwrap();
     assert_eq!(nodes[0].tokens.input, 8192 * 3 + 6);
     assert!(nodes[0].open_tools.is_empty());
