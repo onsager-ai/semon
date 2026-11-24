@@ -1041,6 +1041,7 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError>;
+    fn recover_catalog_version(&mut self) -> Result<bool, StoreError>;
     fn backfill_state(&self) -> Result<Option<String>, StoreError>;
     fn discover_catalog_sources(
         &mut self,
@@ -1684,6 +1685,14 @@ impl EventCache {
             )),
             Err(error) => Err(io::Error::other(error.to_string())),
         }
+    }
+
+    pub(crate) fn recover_catalog_version(&mut self) -> io::Result<bool> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .recover_catalog_version()
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn backfill_state(&self) -> io::Result<Option<String>> {

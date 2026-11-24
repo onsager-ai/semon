@@ -46,8 +46,10 @@ Scope:
   database's namespace through its own connection; readers and writers refuse a
   database bound to another namespace.
 - Version stamp: one `storage_stamp` metadata row per database, written in
-  the initialization transaction (format, backend, schema, parser, projector).
-  `SCHEMA_VERSION` moves to 35, so main's existing obsolete-store path rebuilds
+  the initialization transaction (format, backend, schema, parser, projector
+  at creation). SQLite uses the format, backend, schema and parser to qualify
+  the Index. The published Catalog's own version qualifies the projector.
+  This phase moved `SCHEMA_VERSION` to 35, so the obsolete-store path rebuilds
   pre-stamp stores from Raw and focused readers refuse them.
 - Projection tag: a Catalog unit's published sources carry the Raw identity
   (device, inode) and the consumed-prefix digest (offset, prefix and tail

@@ -933,7 +933,10 @@ impl NativeEvidence {
             }
             pending
         };
-        if !inputs.is_empty() || cache.session_catalog_generation().is_none() {
+        if !inputs.is_empty()
+            || cache.session_catalog_generation().is_none()
+            || cache.recover_catalog_version()?
+        {
             let snapshot = discovery
                 .snapshot
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]));
@@ -1641,11 +1644,11 @@ impl NativeEvidence {
         // Hosted Raw writers journal exact intents durably. The persisted
         // qualification is independent of this process's in-memory snapshot.
         self.prepare_events(work, now)?;
-        work.tree_repair_pending = work
-            .events
-            .as_mut()
-            .expect("event cache initialized")
-            .advance_tree_repair(&self.options)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        if cache.is_scoped() {
+            cache.recover_catalog_version()?;
+        }
+        work.tree_repair_pending = cache.advance_tree_repair(&self.options)?;
         if self.advance_semantic_stage(work, now, &mut before_build)? {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {

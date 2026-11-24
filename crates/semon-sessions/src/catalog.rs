@@ -858,11 +858,18 @@ pub(crate) fn relative_status(
 /// while the producer continues. Missing or blank stores return `false`; invalid, unsupported and
 /// I/O failures propagate. This check does not admit or start an observer.
 pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
-    sqlite_readiness(options, |_| Ok(true))
+    sqlite_readiness(options, |transaction| {
+        crate::events::store::catalog_version_blocked(transaction)
+            .map(|blocked| !blocked)
+            .map_err(io::Error::other)
+    })
 }
 
 pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
     sqlite_readiness(options, |transaction| {
+        if crate::events::store::catalog_version_blocked(transaction).map_err(io::Error::other)? {
+            return Ok(false);
+        }
         let (version, generation): (Option<String>, Option<String>) = transaction.query_row(
             "SELECT (SELECT value FROM meta WHERE key='catalog_version'), (SELECT value FROM meta WHERE key='catalog_generation')",
             [], |row| Ok((row.get(0)?, row.get(1)?)),

@@ -367,6 +367,14 @@ projections. The origin warehouse commits Claude, Codex and Copilot metadata
 observations, source membership and the maintenance cursor with that source's
 Index advancement. See [cohort-bound index evidence](retained-native-projections.md#cohort-bound-index-evidence).
 
+A SQLite Catalog projector change keeps the current Index placement and its
+incarnation. The storage stamp records the projector at Index creation, while
+`catalog_version` qualifies the published Catalog. The producer rediscovers and
+republishes the derived Catalog through its bounded backfill, with the existing
+ledger and source authority checks. An in-progress version backfill is durable
+and keeps Catalog reads fenced until the backfill completes. The receiver
+resumes this work automatically on Catalog demand.
+
 Writable and focused Index opens refuse unsupported storage before mutation.
 When the source-owning host encounters a refused Index, it inventories its
 configured Claude, Codex and Copilot roots, verified standalone archive manifests,
@@ -395,8 +403,10 @@ admission. On the receiver, watch clients resend after the pause.
 `push --watch` uses the local custody-aware Index opener in its facts worker and
 continues shipping native files while recovery runs. After all inventoried source
 boundaries are committed and rechecked,
-it checkpoints and publishes `sessions-index.rebuilt-52-42.sqlite3` atomically
-(`52` is the storage schema and `42` is the parser version). The original
+it checkpoints and publishes `sessions-index.rebuilt-<schema>-<parser>.sqlite3`
+atomically. A regular file at the current rebuilt placement is selected first.
+Recovery rechecks the active placement under its reservation and reuses it
+when it qualifies. Publication refuses to replace an occupied path. The original
 `sessions-index.sqlite3` remains at its original path with its `-wal` and `-shm`.
 Temporary stages abandoned by a crash are never selected. Until publication the
 host returns HTTP 503 `history_rebuilding` with progress and `Retry-After`.

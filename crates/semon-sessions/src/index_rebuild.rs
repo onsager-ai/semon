@@ -907,6 +907,105 @@ mod tests {
     }
 
     #[test]
+    fn receiver_republishes_catalog_on_a_current_rebuilt_index() {
+        use crate::native_evidence::{NativeEvidence, Work};
+
+        for with_source in [true, false] {
+            let (stage, mut options) = fixture();
+            let facts = stage.0.join("facts.json");
+            crate::write_facts(
+                &facts,
+                &crate::Facts {
+                    version: crate::facts::FACTS_VERSION,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            options.facts = Some(facts);
+            options.index_recovery = crate::IndexRecovery::Received {
+                root: stage.0.clone(),
+                custody: Default::default(),
+            };
+            options.annotations = stage.0.join("annotations");
+            let native = with_source.then(|| source(&options, "live"));
+            if let Some((path, _)) = &native {
+                write_generation(&stage.0, path);
+            }
+            let original = refused(&options, store::SCHEMA_VERSION - 1);
+            let original_bytes = fs::read(&original).unwrap();
+            let namespace = Namespace::new("machine").unwrap();
+            let refresh = || {
+                let evidence = NativeEvidence::for_source(namespace.clone(), options.clone());
+                let mut work = Work::default();
+                assert!((0..24).any(|_| {
+                    evidence
+                        .refresh_catalog(&mut work, crate::model::now_ms())
+                        .unwrap()
+                }));
+            };
+            refresh();
+            let rebuilt = rebuilt_path(&options.cache);
+            assert_eq!(active_path(&options.cache), rebuilt);
+            let read_state = |db: &rusqlite::Connection| {
+                db.query_row(
+                    "SELECT (SELECT value FROM meta WHERE key='incarnation'),(SELECT value FROM meta WHERE key='catalog_generation')",
+                    [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                ).unwrap()
+            };
+            let db = rusqlite::Connection::open(&rebuilt).unwrap();
+            let (index_before, catalog_before) = read_state(&db);
+            let stamp = sqlite::stamp();
+            let (index_stamp, projector) = stamp.rsplit_once('=').unwrap();
+            let previous = (projector.parse::<u32>().unwrap() - 1).to_string();
+            db.execute(
+                "UPDATE meta SET value=?1 WHERE key='storage_stamp'",
+                [format!("{index_stamp}={previous}")],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE meta SET value=?1 WHERE key='catalog_version'",
+                [&previous],
+            )
+            .unwrap();
+            drop(db);
+
+            assert!(!crate::catalog::sqlite_page_ready(&options).unwrap());
+            assert!(store::catalog_work_pending(&options).unwrap());
+            assert!(!needed(&options).unwrap());
+            // A recovery request that lost a publication race must accept
+            // this occupied placement as the valid active Index.
+            recover(&options, &namespace, true).unwrap();
+            assert_eq!(status(&options.cache), None);
+            refresh();
+            assert!(crate::catalog::sqlite_page_ready(&options).unwrap());
+
+            let db = rusqlite::Connection::open(&rebuilt).unwrap();
+            let (index_after, catalog_after) = read_state(&db);
+            assert_eq!(index_after, index_before);
+            assert_ne!(catalog_after, catalog_before);
+            assert_eq!(active_path(&options.cache), rebuilt);
+            assert_eq!(fs::read(&original).unwrap(), original_bytes);
+            if let Some((path, bytes)) = native {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            let core = crate::ViewerCore::with_machines(vec![("machine".into(), options)]);
+            let reply = core.respond("GET", "/api/sessions", "machine=machine", None);
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(
+                body["items"].as_array().unwrap().len(),
+                usize::from(with_source)
+            );
+            core.close();
+        }
+    }
+
+    #[test]
     fn missing_custody_chain_or_archive_journal_leaves_no_active_rebuild() {
         for missing_journal in [false, true] {
             let (_stage, options) = fixture();

@@ -18,16 +18,28 @@ use crate::{
     model::summary::{CATALOG_VERSION, CatalogLifecycle, CatalogRow},
 };
 
-/// The one version stamp of a database this binary writes and reads. It
-/// replaces nothing older: a database without it is refused by readers and
-/// rebuilt from Raw by the producer's obsolete-schema path.
-pub(crate) fn stamp() -> String {
+/// The Index stamp records the projector at creation. Publication freshness
+/// belongs to `catalog_version`, which advances independently of the Index.
+fn index_stamp_prefix() -> String {
     format!(
-        "semon-session-store/1 backend=sqlite schema={} parser={} projector={}",
+        "semon-session-store/1 backend=sqlite schema={} parser={} projector=",
         crate::events::store::SCHEMA_VERSION,
         crate::events::CACHE_VERSION,
-        CATALOG_VERSION
     )
+}
+
+pub(crate) fn stamp() -> String {
+    format!("{}{CATALOG_VERSION}", index_stamp_prefix())
+}
+
+pub(crate) fn index_stamp_current(stamp: Option<&str>) -> bool {
+    stamp
+        .and_then(|stamp| stamp.strip_prefix(&index_stamp_prefix()))
+        .is_some_and(|projector| {
+            projector
+                .parse::<u32>()
+                .is_ok_and(|version| projector == version.to_string())
+        })
 }
 
 /// The database's stamp and namespace binding, read in the caller's snapshot.
@@ -49,7 +61,7 @@ fn backend(error: impl std::fmt::Display) -> StorageError {
 /// unbound or bound to the requested namespace.
 pub(crate) fn qualify(connection: &Connection, namespace: &Namespace) -> Result<(), StorageError> {
     let (found, bound) = binding(connection).map_err(backend)?;
-    if found.as_deref() != Some(stamp().as_str()) {
+    if !index_stamp_current(found.as_deref()) {
         return Err(StorageError::Unsupported(
             "unsupported session store: version stamp".into(),
         ));
