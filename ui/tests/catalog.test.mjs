@@ -8,7 +8,7 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { parseCatalogPage } = await import(
+const { parseCatalogPage, parseTranscriptObservation } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
 );
 const session = () => ({
@@ -265,4 +265,15 @@ test('producer annotations retain declared metadata and reject malformed values'
     invalid.items[0].annotation[field] = [];
     assert.throws(() => parseCatalogPage(invalid));
   }
+});
+
+test('selected transcript observation accepts only two generations and an entry count', () => {
+  const projection = { generation: 'a'.repeat(64), errors_generation: 'b'.repeat(64), total: 41 };
+  assert.deepEqual(parseTranscriptObservation(projection), {
+    generation: projection.generation,
+    errorsGeneration: projection.errors_generation,
+    total: 41,
+  });
+  assert.throws(() => parseTranscriptObservation({ ...projection, body: 'private' }));
+  assert.throws(() => parseTranscriptObservation({ ...projection, total: -1 }));
 });

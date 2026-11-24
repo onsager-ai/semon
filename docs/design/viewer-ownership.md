@@ -130,9 +130,12 @@ roots and five Source views are retained. Each selected transcript keeps at most
 five recently used ranges and 300 unique entries; revisiting a range updates its
 retention order. Discarding a range also releases its presentation and field state.
 
-The selected-session cadence observes body-free Catalog projection and error
-membership generations and the entry count. Unchanged observations do not reread
-native content. A changed projection revalidates accepted ranges through the
+The current native selected-session cadence uses the source-qualified
+`/api/sessions?sid=…&scope=current&observe=transcript` Catalog read. The response
+identifies the selection and exposes only the committed projection generation,
+error membership generation, and indexed entry count. The count uses committed
+record positions before rendering and excludes continuation copies. Unchanged
+observations do not reread native content. A changed projection revalidates accepted ranges through the
 selected reader. Error membership uses the same qualified live/unfinished rule
 as transcript rendering; ending a process or moving a session to retained custody
 invalidates error paging even when no source line changed.
