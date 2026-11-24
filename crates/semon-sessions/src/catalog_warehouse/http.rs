@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{OverviewSource, session_route::NativeEntryAddress, viewer::ViewerReply};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 fn error(status: u16, code: &str, message: &str, retryable: bool) -> ViewerReply {
     crate::catalog::error(status, code, message, retryable)
@@ -1457,7 +1458,8 @@ fn relationship_context(
                 entry["address"]["record"]["occurrence"].as_i64(), entry["address"]["block"].as_u64().and_then(|block| u32::try_from(block).ok()),
             ) && let Some(ids) = cards.get(&(path, offset, occurrence, block)) {
             for id in ids {
-                let entry_id = format!("{}:{id}", entry["entry_id"].as_str().expect("rendered entry id"));
+                let tool_id = entry["entry_id"].as_str().expect("rendered entry id");
+                let entry_id = format!("{:x}", Sha256::digest(format!("sender-card:{tool_id}:{id}")));
                 let mut address = entry["address"].clone();
                 address["entry_id"] = json!(entry_id);
                 rows.push(json!({"k":"h","id":id,"turn":entry["turn"],"entry_id":entry_id,"address":address,

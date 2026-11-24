@@ -2181,6 +2181,20 @@ fn warehouse_transcript_sender_cards_have_recorded_outcomes_and_no_targets() {
     assert_eq!(response.status, 200, "{page}");
     let context = &page["relationship_context"];
     let handoffs = context["handoffs"].as_array().unwrap();
+    let entries = page["entries"].as_array().unwrap();
+    let mut entry_ids = std::collections::BTreeSet::new();
+    for entry in entries {
+        let id = entry["entry_id"].as_str().unwrap();
+        assert_eq!(id.len(), 64, "{entry}");
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{entry}"
+        );
+        assert_eq!(entry["address"]["entry_id"], id);
+        assert_eq!(entry["address"]["binding"], page["binding"]);
+        assert!(entry_ids.insert(id), "{entry}");
+    }
     for (kind, outcome) in [("relay", "err"), ("spawn", "done")] {
         let edge = handoffs
             .iter()
