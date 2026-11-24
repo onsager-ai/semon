@@ -380,7 +380,9 @@ jobs:
           url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*' "$RUNNER_TEMP/receive.log")
           token=$(target/debug/semon token --dir "$RUNNER_TEMP/recv")
           export SEMON_BASE="$url" SEMON_TOKEN="$token"
+          export SEMON_MANAGE_TOKEN="$(target/debug/semon token --dir "$RUNNER_TEMP/recv" --snapshot)"
           cd tests/ui
+          node manage-dashboard.mjs
           node pushed-parity.mjs --native-pages
           node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
           node receive-viewer.mjs

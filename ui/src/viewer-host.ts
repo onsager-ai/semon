@@ -24,6 +24,8 @@ export interface ViewerHost {
   /** false for authenticated hosts without a current workspace; no workspace chrome reads. */
   workspaceMetadata?: boolean;
   machinesPath: string;
+  /** Receiver host retains standalone pairing and chrome metadata discovery. */
+  receiver?: boolean;
   /** Shared destination policy; no host data or routing owner lives in chrome. */
   navigation?: ShellNavigation;
   /** Narrow host destination notifications; no model observation is implied. */

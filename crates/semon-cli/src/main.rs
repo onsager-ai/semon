@@ -1527,29 +1527,44 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
 }
 
 fn run_token(args: &[String]) -> Result<(), String> {
-    let (mut dir, mut list, mut revoke) = (None, false, None);
+    let (mut dir, mut list, mut revoke, mut snapshot) = (None, false, None, false);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dir" => dir = Some(PathBuf::from(args.next().ok_or("--dir requires DIR")?)),
             "--list" => list = true,
+            "--snapshot" => snapshot = true,
             "--revoke" => revoke = Some(args.next().ok_or("--revoke requires ID")?.as_str()),
-            _ => return Err("Usage: semon token --dir DIR [--list | --revoke ID]".into()),
+            _ => {
+                return Err(
+                    "Usage: semon token --dir DIR [--snapshot | --list | --revoke ID]".into(),
+                );
+            }
         }
     }
     let dir = dir.ok_or("token requires --dir DIR")?;
-    if list && revoke.is_some() {
-        return Err("choose --list or --revoke".into());
+    if u8::from(list) + u8::from(snapshot) + u8::from(revoke.is_some()) > 1 {
+        return Err("choose --snapshot, --list or --revoke".into());
     }
     if list {
-        println!("ID\tCREATED (UNIX)\tREVOKED");
-        for (id, time, revoked) in semon_push::read_token::list(&dir).map_err(|e| e.to_string())? {
-            println!("{id}\t{time}\t{revoked}");
+        println!("ID\tCREATED (UNIX)\tREVOKED\tSCOPE");
+        for (id, time, revoked, scope) in
+            semon_push::read_token::list(&dir).map_err(|e| e.to_string())?
+        {
+            let scope = match scope {
+                semon_push::read_token::Scope::Read => "read",
+                semon_push::read_token::Scope::Snapshot => "snapshot",
+            };
+            println!("{id}\t{time}\t{revoked}\t{scope}");
         }
     } else if let Some(id) = revoke {
         semon_push::read_token::revoke(&dir, id, semon_push::simple_pair::now()?)
             .map_err(|e| e.to_string())?;
         println!("Revoked {id}.");
+    } else if snapshot {
+        let secret = semon_push::read_token::create_snapshot(&dir, semon_push::simple_pair::now()?)
+            .map_err(|e| e.to_string())?;
+        println!("{}", secret.expose());
     } else {
         let (secret, url) = semon_push::read_token::create(&dir, semon_push::simple_pair::now()?)
             .map_err(|e| e.to_string())?;
@@ -2481,7 +2496,7 @@ fn usage() -> String {
          Usage: semon pair --dir DIR\n\
          Usage: semon pair URL CODE\n\
          Usage: semon unpair [MACHINE_ID --dir DIR]\n\
-         Usage: semon token --dir DIR [--list | --revoke ID]\n\
+         Usage: semon token --dir DIR [--snapshot | --list | --revoke ID]\n\
          Pair with one receiver and start background sync as a user service.\n\
          HTTPS proxies may forward to a plain HTTP receiver. Tokens work until revoked.\n\
          \n\

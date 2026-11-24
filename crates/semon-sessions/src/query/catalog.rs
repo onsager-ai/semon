@@ -419,7 +419,25 @@ impl Query {
         now: i64,
     ) -> Result<Value, QueryError> {
         validate_query_call(tool, args)?;
-        self.execute_catalog_at(tool, args, provider, mode, now)
+        self.execute_catalog_at(tool, args, provider, mode, now, true)
+    }
+
+    /// The stalled-session rule over Catalog metadata, without question body hydration.
+    pub(crate) fn catalog_stalls_metadata(
+        &mut self,
+        idle_minutes: u32,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        let args = json!({"idle_minutes": idle_minutes});
+        validate_query_call("stalls", &args)?;
+        self.execute_catalog_at(
+            "stalls",
+            &args,
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            now,
+            false,
+        )
     }
 
     fn execute_catalog_at(
@@ -429,6 +447,7 @@ impl Query {
         provider: Option<&CatalogReaderFactory>,
         mode: crate::SessionSourceReadMode,
         now: i64,
+        hydrate_questions: bool,
     ) -> Result<Value, QueryError> {
         #[cfg(test)]
         WORK.with(|work| work.set(Work::default()));
@@ -566,7 +585,12 @@ impl Query {
         } else {
             "stalls"
         };
-        for row in result[returned].as_array_mut().expect("native answer") {
+        for row in result[returned]
+            .as_array_mut()
+            .expect("native answer")
+            .iter_mut()
+            .filter(|_| hydrate_questions)
+        {
             let Some(question) = row["open_question"]["handoff"].as_str().map(str::to_owned) else {
                 continue;
             };
