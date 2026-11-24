@@ -58,13 +58,12 @@ export default async function orderCheck(browser) {
       });
       const source = (await (await fixture.request('/api/session-capabilities')).json()).source_key;
       const catalog =
-        '/api/sessions?' +
-        new URLSearchParams({ machine: source, scope: 'retained_history', limit: '60' });
+        '/api/sessions?' + new URLSearchParams({ machine: source, scope: 'current', limit: '60' });
       let revision = 0;
       const published = async (key) => {
         for (let attempt = 0; attempt < 200; attempt++) {
           const value = await (await fixture.request(catalog)).json();
-          if (value.items?.[0]?.key === key) return;
+          if (value.completeness?.state === 'complete' && value.items?.[0]?.key === key) return;
           await page.waitForTimeout(50);
         }
         assert.fail('Native publication did not admit ' + key);

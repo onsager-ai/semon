@@ -127,8 +127,8 @@ export default async function liveCatalog(browser) {
             reads.every(
               (url) =>
                 url.searchParams.get('machine') === source &&
-                url.searchParams.get('scope') === 'retained_history' &&
-                Number(url.searchParams.get('limit') ?? 60) <= 100,
+                url.searchParams.get('scope') === 'current' &&
+                Number(url.searchParams.get('limit') ?? 32) <= 32,
             ),
           );
           assert.ok(
@@ -138,8 +138,8 @@ export default async function liveCatalog(browser) {
                 reads.map((url) => ({
                   sid: url.searchParams.get('sid'),
                   scope: url.searchParams.get('scope'),
-                  after: url.searchParams.get('after'),
-                  generation: url.searchParams.get('generation'),
+                  earlier: url.searchParams.has('cursor'),
+                  addressed: url.searchParams.has('address'),
                 })),
               ),
           );

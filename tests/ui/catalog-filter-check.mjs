@@ -38,7 +38,7 @@ export async function catalogFilterCheck(browser, name) {
         const response = await page.request.get(
           ENV.base +
             '/api/sessions?' +
-            new URLSearchParams({ machine: source, scope: 'retained_history', limit: '60' }),
+            new URLSearchParams({ machine: source, scope: 'current', limit: '60' }),
         );
         assert.equal(response.status(), 200);
         const all = await response.json(),
@@ -164,7 +164,7 @@ export async function catalogFilterCheck(browser, name) {
           requests.every(
             (url) =>
               url.searchParams.get('machine') === source &&
-              url.searchParams.get('scope') === 'retained_history' &&
+              url.searchParams.get('scope') === 'current' &&
               Number(url.searchParams.get('limit') ?? 60) <= 100,
           ),
         );

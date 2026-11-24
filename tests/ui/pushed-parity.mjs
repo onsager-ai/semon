@@ -37,7 +37,7 @@ const arg = (name) => {
 // The existing native-page fixture census also checks every transcript, recorded
 // turn/handoff body and supported field/output expansion on the exact served pair.
 if (process.argv.includes('--native-pages')) {
-  const { data } = await import('./lib.mjs');
+  const { data, fixtureRequest } = await import('./lib.mjs');
   // Entry identity intentionally includes the admitted source key (local versus
   // the received machine). Map only that proven carrier identity after validating
   // each side; native provenance, every content field and unknown fields compare
@@ -50,17 +50,21 @@ if (process.argv.includes('--native-pages')) {
       entry.slot < 0
     )
       throw Error('pushed-parity native entry has an invalid identity/address');
-    return { ...entry, entry_id: JSON.stringify([sid, entry.slot]) };
+    const { address, ...body } = entry;
+    if (address.entry_id !== entry.entry_id || !/^[0-9a-f]{64}$/.test(address.binding))
+      throw Error('pushed-parity native address does not prove the entry identity');
+    const identity = JSON.stringify([sid, entry.slot]);
+    return {
+      ...body,
+      entry_id: identity,
+      address: { ...address, entry_id: identity, binding: null },
+    };
   };
   const nativeCorpus = async (base, token) => {
     const fixture = await data({ base, token });
-    const landing = await fetch(base + '/?t=' + token, { redirect: 'manual' });
-    const cookie = landing.headers
-      .getSetCookie()
-      .map((value) => value.split(';')[0])
-      .join('; ');
+    const request = await fixtureRequest(base, token);
     const get = async (query, endpoint = '/api/session-entry') => {
-      const response = await fetch(base + endpoint + '?' + query, { headers: { cookie } });
+      const response = await request(endpoint + '?' + query);
       if (!response.ok) throw Error('pushed-parity native expansion: ' + response.status);
       return response.json();
     };
@@ -81,22 +85,20 @@ if (process.argv.includes('--native-pages')) {
         const query = new URLSearchParams({
           machine,
           sid: fixture.KEYS[sid],
-          scope: 'retained_history',
-          after: String(entry.slot),
-          limit: '1',
+          scope: 'current',
+          address: JSON.stringify(entry.address),
         });
         const selected = await get(query, '/api/session-transcript');
-        const saved = selected.entries[0];
+        const saved = selected.entries.find((row) => row.entry_id === entry.entry_id);
         if (
           selected.identity.source_key !== machine ||
           selected.identity.catalog_key !== fixture.KEYS[sid] ||
-          selected.range.first !== entry.slot ||
-          selected.entries.length !== 1 ||
-          saved.entry_id !== entry.entry_id ||
+          selected.position !== 'address' ||
+          selected.binding !== entry.address.binding ||
+          JSON.stringify(saved?.address) !== JSON.stringify(entry.address) ||
           JSON.stringify(saved.provenance) !== JSON.stringify(entry.provenance)
         )
           throw Error('pushed-parity native expansion changed its selected source');
-        query.set('generation', selected.projection.generation);
         const key = JSON.stringify([sid, entry.slot]);
         if (entry.field) {
           if (!Number.isSafeInteger(entry.field.chunks) || entry.field.chunks < 0)
@@ -142,23 +144,24 @@ if (process.argv.includes('--native-pages')) {
             expansions[key] = { field: entry.field.name, text: '' };
             continue;
           }
-          const anchor = entry.field.provenance ?? entry.provenance;
           let text = '';
           for (let chunk = 0; chunk < entry.field.chunks; chunk++) {
             query.set('field_chunk', String(chunk));
-            const field = await get(query);
+            const expanded = await get(query);
+            const field = expanded.entry;
             const complete = chunk + 1 === entry.field.chunks;
             if (
-              field.identity.source_key !== machine ||
-              field.identity.catalog_key !== fixture.KEYS[sid] ||
-              field.projection.generation !== selected.projection.generation ||
-              field.slot !== entry.slot ||
+              expanded.source_key !== machine ||
+              expanded.catalog_key !== fixture.KEYS[sid] ||
+              expanded.read_scope !== 'current' ||
+              expanded.binding !== selected.binding ||
+              field.entry_id !== entry.entry_id ||
+              JSON.stringify(field.address) !== JSON.stringify(entry.address) ||
               field.field.chunk !== chunk ||
               field.field.name !== entry.field.name ||
               field.field.complete !== complete ||
               field.field.next !== (complete ? null : chunk + 1) ||
-              typeof field.text !== 'string' ||
-              JSON.stringify(field.provenance) !== JSON.stringify(anchor)
+              typeof field.text !== 'string'
             )
               throw Error('pushed-parity native field generation/range changed');
             text += field.text;
@@ -168,30 +171,33 @@ if (process.argv.includes('--native-pages')) {
           query.set('part', 'output');
           const page = await get(query);
           if (
-            page.identity.source_key !== machine ||
-            page.identity.catalog_key !== fixture.KEYS[sid] ||
-            page.projection.generation !== selected.projection.generation ||
-            page.range.first !== entry.slot ||
-            page.entries.length !== 1 ||
-            page.entries[0].entry_id !== entry.entry_id ||
-            JSON.stringify(page.entries[0].provenance) !== JSON.stringify(entry.provenance)
+            page.source_key !== machine ||
+            page.catalog_key !== fixture.KEYS[sid] ||
+            page.read_scope !== 'current' ||
+            page.binding !== selected.binding ||
+            page.entry.entry_id !== entry.entry_id ||
+            JSON.stringify(page.entry.address) !== JSON.stringify(entry.address) ||
+            JSON.stringify(page.entry.provenance) !== JSON.stringify(entry.provenance)
           )
             throw Error('pushed-parity native output generation/range changed');
-          expansions[key] = addressedEntry(sid, page.entries[0]);
+          expansions[key] = addressedEntry(sid, { ...page.entry, slot: entry.slot });
         }
       }
     }
     return {
-      transcripts,
-      transcript_metadata: fixture.TXM,
-      handoffs: fixture.H,
-      turns: fixture.turns,
-      expansions,
+      home: fixture.overview,
+      corpus: {
+        transcripts,
+        transcript_metadata: fixture.TXM,
+        handoffs: fixture.H,
+        turns: fixture.turns,
+        expansions,
+      },
     };
   };
   const direct = await nativeCorpus(process.env.SEMON_REF_BASE, process.env.SEMON_REF_TOKEN);
   const copy = await nativeCorpus(process.env.SEMON_BASE, process.env.SEMON_TOKEN);
-  const changed = differences(direct, copy);
+  const changed = differences(direct.corpus, copy.corpus);
   if (changed.length) {
     const artifactRoot = path.resolve(process.env.SEMON_UI_OUT ?? 'out');
     fs.mkdirSync(artifactRoot, { recursive: true });

@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { launchOptions } from './launch-options.mjs';
+import { sample } from './fixture.mjs';
 
 export const ENV = {
   base: (process.env.SEMON_BASE ?? '').replace(/\/$/, ''),
@@ -409,11 +410,56 @@ export async function goto(page, route, D) {
 
 // Test expectations in the reference fixture's shapes, assembled exclusively
 // from source-qualified native publications and generation-fenced body reads.
+export async function fixtureRequest(base, token) {
+  const landing = await fetch(base + '/?t=' + token, { redirect: 'manual' });
+  const cookie = landing.headers
+    .getSetCookie()
+    .map((value) => value.split(';')[0])
+    .join('; ');
+  return (path) => fetch(base + path, { headers: cookie ? { cookie } : {} });
+}
+
+async function waitForFixtureRead(request, path, ready, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  let last;
+  do {
+    const response = await request(path);
+    const value = await response.json();
+    if (response.ok && ready(value)) return value;
+    last = { status: response.status, observations: value.observations, error: value.error };
+    if (!response.ok && ![404, 409, 503].includes(response.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  throw Error('Fixture publication witness missing: ' + path + ' ' + JSON.stringify(last));
+}
+
+export function waitForFixtureHome(request) {
+  return waitForFixtureRead(
+    request,
+    '/api/viewer/home',
+    (home) => home.observations?.length === 0 && home.recent?.length > 0,
+  );
+}
+
+export function waitForFixtureTranscript(request, machine, sid, witness, timeout) {
+  const query = new URLSearchParams({ machine, sid, scope: 'current' });
+  return waitForFixtureRead(
+    request,
+    '/api/session-transcript?' + query,
+    (page) =>
+      page.projection === 7 &&
+      page.source_key === machine &&
+      page.catalog_key === sid &&
+      page.read_scope === 'current' &&
+      page.session?.key === sid &&
+      page.entries.some((entry) => entry.address && witness(entry)),
+    timeout,
+  );
+}
+
 // Exhaustive fixture census is test work; production readers remain selected.
 export async function data(options = {}) {
-  // A fixture census spans several source-qualified publications. If refresh
-  // moves a preview generation, discard the entire census and reacquire it;
-  // never combine its old relationships with bytes from the new observation.
+  // Reacquire the entire census when its qualified observation changes.
   for (let attempt = 0; ; attempt++) {
     try {
       return await nativeFixtureData(options);
@@ -425,35 +471,16 @@ export async function data(options = {}) {
 async function nativeFixtureData({ extras = false, base: sourceBase, token: sourceToken } = {}) {
   const base = sourceBase ?? (extras ? ENV.extraBase : ENV.base),
     token = sourceToken ?? (extras ? ENV.extraToken : ENV.token);
-  const landing = await fetch(base + '/?t=' + token, { redirect: 'manual' });
-  const cookie = landing.headers
-    .getSetCookie()
-    .map((value) => value.split(';')[0])
-    .join('; ');
+  const request = await fixtureRequest(base, token);
+  const overview = await waitForFixtureHome(request);
   const get = async (path) => {
-    const deadline = Date.now() + 5000;
-    for (;;) {
-      const response = await fetch(base + path, { headers: cookie ? { cookie } : {} });
-      if (response.ok) {
-        const result = await response.json();
-        if (!path.startsWith('/api/sessions?') || result.completeness.state === 'complete')
-          return result;
-      } else if (response.status !== 503 || !path.startsWith('/api/sessions?')) {
-        const body = await response.json().catch(() => null);
-        throw Error('Native fixture ' + path + ': ' + response.status, {
-          cause: {
-            nativeObservationChanged:
-              response.status === 409 &&
-              path.startsWith('/api/session-home?') &&
-              body?.error?.code === 'home_details_unavailable' &&
-              body.error.retryable === true,
-          },
-        });
-      }
-      if (Date.now() >= deadline)
-        throw Error('Native fixture Catalog publication deadline: ' + path);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    const response = await request(path);
+    const value = await response.json();
+    if (!response.ok)
+      throw Error('Native fixture ' + path + ': ' + response.status + ' ' + JSON.stringify(value), {
+        cause: { nativeObservationChanged: response.status === 409 && value.error?.retryable },
+      });
+    return value;
   };
   const inventory = [];
   let cursor = null;
@@ -482,11 +509,15 @@ async function nativeFixtureData({ extras = false, base: sourceBase, token: sour
     do {
       const query = new URLSearchParams({
         machine: source.source_key,
-        scope: 'retained_history',
+        scope: 'current',
         limit: '100',
       });
       if (cursor) query.set('cursor', cursor);
-      const page = await get('/api/sessions?' + query);
+      const page = await waitForFixtureRead(
+        request,
+        '/api/sessions?' + query,
+        (value) => value.completeness?.state === 'complete',
+      );
       if (page.machine !== source.source_key) throw Error('Native fixture Catalog source changed');
       for (const item of page.items) {
         nativeKeys.add(item.key);
@@ -495,7 +526,10 @@ async function nativeFixtureData({ extras = false, base: sourceBase, token: sour
       cursor = page.next_cursor;
     } while (cursor);
   }
-  const overview = await get('/api/viewer/home');
+  const expected = Object.keys(sample().SESS);
+  if (extras) expected.push('attach', 'backlog', 'bgcmd', 'archive');
+  const missing = expected.filter((key) => !nativeKeys.has(key));
+  if (missing.length) throw Error('Current fixture Catalog missing keys: ' + missing.join(', '));
   records.sort(
     (a, b) =>
       a.item.key.localeCompare(b.item.key) ||
@@ -523,55 +557,73 @@ async function nativeFixtureData({ extras = false, base: sourceBase, token: sour
   for (const { source, item } of records) {
     const sid = qualify(source.source_key, item.key),
       entries = [];
-    let after = 0,
-      generation = null,
-      page;
+    const windows = [],
+      cursors = new Set(),
+      entryIds = new Set();
+    let cursor = null,
+      latest;
     do {
       const query = new URLSearchParams({
         machine: source.source_key,
-        scope: 'retained_history',
+        scope: 'current',
         sid: item.key,
-        limit: '100',
-        after: String(after),
       });
-      if (generation) query.set('generation', generation);
-      page = await get('/api/session-transcript?' + query);
-      generation ??= page.projection.generation;
+      if (cursor !== null) query.set('cursor', cursor);
+      const page = await get('/api/session-transcript?' + query);
+      latest ??= page;
       if (
+        page.projection !== 7 ||
         page.identity.source_key !== source.source_key ||
         page.identity.catalog_key !== item.key ||
-        page.projection.generation !== generation ||
-        page.range.first !== after ||
-        page.range.end !== after + page.entries.length ||
-        (page.range.end <= after && page.projection.total > after)
+        page.identity.read_scope !== 'current' ||
+        page.identity.generation !== latest.identity.generation ||
+        page.binding !== latest.binding ||
+        page.position !== (cursor === null ? 'latest' : 'earlier') ||
+        (page.earlier_cursor !== null &&
+          (typeof page.earlier_cursor !== 'string' || cursors.has(page.earlier_cursor)))
       )
-        throw Error('Native fixture transcript identity, generation or range changed: ' + sid);
+        throw Error('Native fixture transcript identity, generation or cursor changed: ' + sid);
+      for (const entry of page.entries) {
+        if (
+          !/^[a-f0-9]{64}$/.test(entry.entry_id) ||
+          entry.address?.entry_id !== entry.entry_id ||
+          entry.address.binding !== page.binding ||
+          entryIds.has(entry.entry_id)
+        )
+          throw Error('Native fixture transcript entry address missing or repeated: ' + sid);
+        entryIds.add(entry.entry_id);
+      }
+      windows.push(page);
+      cursor = page.earlier_cursor;
+      if (cursor !== null) cursors.add(cursor);
+    } while (cursor !== null);
+    for (const page of windows.reverse()) {
       const context = page.relationship_context;
       for (const [key, header] of Object.entries(context.sessions))
         headers.set(JSON.stringify([source.source_key, key]), header);
       for (const [key, version] of Object.entries(context.previews))
         previews.set(JSON.stringify([source.source_key, key]), version);
-      for (const turn of context.turns)
-        turns.set(JSON.stringify([source.source_key, turn.id]), {
-          ...copyPresent(turn),
-          sid: qualify(source.source_key, turn.sid),
-        });
+      for (const turn of context.turns) {
+        const key = JSON.stringify([source.source_key, turn.id]);
+        // Earlier windows carry the recorded boundary. Later continuations may
+        // carry only an incomplete turn header.
+        if (!turns.has(key) || turn.at != null)
+          turns.set(key, { ...copyPresent(turn), sid: qualify(source.source_key, turn.sid) });
+      }
       for (const edge of context.handoffs)
         handoffs.set(JSON.stringify([source.source_key, edge.id]), {
           ...copyPresent(edge),
           from: qualify(source.source_key, edge.from),
           to: qualify(source.source_key, edge.to),
         });
-      entries.push(
-        ...page.entries.map((entry) =>
-          entry.ret
-            ? { ...entry, ret: { ...entry.ret, to: qualify(source.source_key, entry.ret.to) } }
-            : entry,
-        ),
-      );
-      after = page.range.end;
-    } while (after < page.projection.total);
-    const details = page.session.details;
+      for (const entry of page.entries)
+        entries.push({
+          ...entry,
+          slot: entries.length,
+          ...(entry.ret && { ret: { ...entry.ret, to: qualify(source.source_key, entry.ret.to) } }),
+        });
+    }
+    const details = latest.session?.details;
     const header = headers.get(JSON.stringify([source.source_key, item.key]));
     if (!details) throw Error('Native fixture selected metadata unavailable: ' + sid);
     SESS[sid] = {
@@ -583,11 +635,11 @@ async function nativeFixtureData({ extras = false, base: sourceBase, token: sour
       parent: item.parent == null ? undefined : qualify(source.source_key, item.parent),
       kind: item.presentation_kind ?? undefined,
     };
-    previews.set(JSON.stringify([source.source_key, item.key]), details.content_generation);
+    previews.set(JSON.stringify([source.source_key, item.key]), latest.identity.generation);
     // The reference census uses the supported default 24-hour observation
     // window. Native retained evidence itself remains complete.
     const cutoff = overview.now - 24 * 60 * 60 * 1000;
-    SESS[sid].busy = details.busy
+    SESS[sid].busy = (details.busy ?? [])
       .filter(([, end]) => end >= cutoff)
       .map(([start, end]) => [Math.max(start, cutoff), end]);
     TX[sid] = entries;
@@ -619,7 +671,7 @@ async function nativeFixtureData({ extras = false, base: sourceBase, token: sour
       const group = selections.slice(start, start + 8);
       const query = new URLSearchParams({
         machine: source.source_key,
-        scope: 'retained_history',
+        scope: 'current',
         sid: item.key,
         generation,
         events: JSON.stringify(group.flatMap((value) => (value.event ? [value.event] : []))),
@@ -629,6 +681,7 @@ async function nativeFixtureData({ extras = false, base: sourceBase, token: sour
       if (
         detail.identity.source_key !== source.source_key ||
         detail.identity.catalog_key !== item.key ||
+        detail.identity.read_scope !== 'current' ||
         detail.generation !== generation ||
         detail.incomplete
       )
@@ -695,6 +748,7 @@ async function nativeFixtureData({ extras = false, base: sourceBase, token: sour
   };
   return {
     model,
+    overview,
     SESS,
     H,
     TX,

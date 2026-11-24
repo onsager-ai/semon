@@ -28,7 +28,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { context, ENV, launch, settled } from '../lib.mjs';
+import {
+  context,
+  ENV,
+  fixtureRequest,
+  launch,
+  settled,
+  waitForFixtureTranscript,
+} from '../lib.mjs';
 import { writeLong } from '../long.mjs';
 import { installRefreshTracing, armRefreshPaint, readRefreshTrace } from './perf-refresh.mjs';
 
@@ -747,36 +754,18 @@ async function runSize(browser, vp, warnings) {
     fixture = writeLong(fixtureDir);
     fixture.cwd = path.join(fixtureDir, 'work', 'aster');
     server = await serve(fixtureDir, fixture.now);
-    // The server's first read of the homes builds its index; that isn't what a screen is measured on.
-    const bootstrap = await fetch(`${server.base}/?t=${server.token}`);
-    if (!bootstrap.ok) throw Error('Native fixture bootstrap failed');
-    const headers = {
-      cookie: bootstrap.headers
-        .getSetCookie()
-        .map((value) => value.split(';')[0])
-        .join('; '),
-    };
-    // This prepares the warm fixture; none of this time enters screen budgets.
-    // Atomic native publication can exceed ten seconds on a loaded CI runner.
-    // Use the existing production stalled-worker boundary (viewer.rs), while
-    // retaining every measured foreground request/byte/main-thread threshold.
-    const preparing = Date.now(),
-      publicationDeadline = preparing + 60_000;
-    let complete = false;
-    while (Date.now() < publicationDeadline) {
-      const warm = await fetch(server.base + '/api/viewer/home', { headers });
-      if (warm.ok) {
-        const value = await warm.json();
-        if (value.recent?.length && value.observations?.length === 0) {
-          complete = true;
-          break;
-        }
-      }
-      await sleep(50);
-    }
-    if (!complete) throw Error(`Native publication did not settle: ${server.log().slice(-12000)}`);
+    // Warm the native index outside the measured browser contexts.
+    const preparing = Date.now();
+    const request = await fixtureRequest(server.base, server.token);
+    await waitForFixtureTranscript(
+      request,
+      'local',
+      'marathon',
+      (entry) => entry.text?.includes('PERF_MARATHON_LAST'),
+      60_000,
+    );
     console.log(
-      `Native warm fixture ${vp.width}: publication settled in ${Date.now() - preparing} ms`,
+      `Native warm fixture ${vp.width}: selected transcript ready in ${Date.now() - preparing} ms`,
     );
     for (const [name, run] of Object.entries(scenarios)) {
       try {

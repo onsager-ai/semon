@@ -1083,8 +1083,7 @@ export default async function (browser) {
           new URLSearchParams({
             sid: 'code-mode',
             machine: source,
-            scope: 'retained_history',
-            limit: '60',
+            scope: 'current',
           }),
       );
       const totals = await response.json();
@@ -1176,8 +1175,7 @@ export default async function (browser) {
           new URLSearchParams({
             sid: 'yielded-ui',
             machine: source,
-            scope: 'retained_history',
-            limit: '60',
+            scope: 'current',
           }),
       );
       const tx = await response.json(),
@@ -1536,12 +1534,11 @@ export default async function (browser) {
                   return (
                     url.origin === location.origin &&
                     args.get('part') === 'attachment' &&
-                    args.get('scope') === 'retained_history' &&
+                    args.get('scope') === 'current' &&
                     !!args.get('machine') &&
                     !!args.get('sid') &&
-                    /^\d+$/.test(args.get('after') ?? '') &&
-                    args.get('limit') === '1' &&
-                    /^[a-f0-9]{64}$/.test(args.get('generation') ?? '') &&
+                    /^[a-f0-9]{64}$/.test(JSON.parse(args.get('address'))?.binding ?? '') &&
+                    /^[a-f0-9]{64}$/.test(JSON.parse(args.get('address'))?.entry_id ?? '') &&
                     /^\d+$/.test(args.get('image') ?? '')
                   );
                 })() &&

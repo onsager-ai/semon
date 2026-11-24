@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ENV, launch, reporter, overflow } from '../lib.mjs';
+import { ENV, launch, reporter, overflow, waitForFixtureTranscript } from '../lib.mjs';
 import { write } from '../fixture.mjs';
 import { nativeFixture } from '../native-fixture.mjs';
 const appear = async (page, start, predicate, value, timeout) => {
@@ -222,33 +222,35 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     const query = new URLSearchParams({
       machine: capability.source_key,
       sid: 'faults',
-      scope: 'retained_history',
+      scope: 'current',
     });
-    const metadata = await (await srv.request('/api/sessions?' + query)).json();
-    const N = metadata.items[0].details.errors;
+    const range = await waitForFixtureTranscript(
+      srv.request,
+      capability.source_key,
+      'faults',
+      (entry) => entry.k === 'tool',
+    );
+    const N = range.session.details.errors;
     const annotations = await (
       await srv.request('/api/session-annotations?' + query + '&kind=errors')
     ).json();
-    const list = {
-      errors: annotations.total,
-      slots: annotations.entries.map((entry) => entry.slot),
-    };
-    const range = await (
-      await srv.request('/api/session-transcript?' + query + '&limit=60')
-    ).json();
-    const last = { from: range.range.first };
+    const addresses = annotations.entries.map((entry) => entry.address);
     R.n = N;
-    R.slots = list.slots;
-    R.loadedFrom = last.from;
+    R.addresses = addresses;
     r.expect(
-      N >= FAILED.length && list.errors === N && list.slots.length === N,
-      tag + 'the list and the model disagree: ' + JSON.stringify({ N, list }),
+      N >= FAILED.length &&
+        annotations.total === N &&
+        addresses.length === N &&
+        annotations.generation === range.errors_generation &&
+        addresses.every((address) => address?.binding === range.binding),
+      tag + 'the list and the selected transcript disagree: ' + JSON.stringify({ N, annotations }),
     );
+    const loaded = new Set(range.entries.map((entry) => entry.entry_id));
     r.expect(
-      list.slots[0] < last.from && list.slots[3] < last.from,
-      tag +
-        'the first failures should be on pages not loaded: ' +
-        JSON.stringify({ slots: list.slots, from: last.from }),
+      range.earlier_cursor !== null &&
+        !loaded.has(addresses[0]?.entry_id) &&
+        !loaded.has(addresses[3]?.entry_id),
+      tag + 'the first and fourth failures should be outside the latest window',
     );
     await sleep(2300); // past the opening pin to the end
     // Errors mode is entered from Find (its "Failed steps" chip), and leaving it returns to Find. Find redraws the transcript with
@@ -362,11 +364,11 @@ async function scheme(browser, srv, lane, name, opts, r, full) {
     R.steps.push(await stepTo('Shift+Enter', 2));
     R.steps.push(await stepTo('n', 3));
     // Error 4 is on a page still not loaded; it loads, and the step lands in the middle of the view.
-    const pages = page.txs.filter((u) => /[?&]after=/.test(u)).length;
+    const pages = page.txs.filter((u) => new URL(u).searchParams.has('address')).length;
     const fourth = await stepTo('n', 4);
     R.steps.push(fourth);
     r.expect(
-      page.txs.filter((u) => /[?&]after=/.test(u)).length > pages,
+      page.txs.filter((u) => new URL(u).searchParams.has('address')).length > pages,
       tag + 'stepping to the fourth failure loaded no page',
     );
     r.expect(
