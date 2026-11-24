@@ -1201,6 +1201,15 @@ fn management_snapshot_write_scope_validation_and_append_order() {
     for (pointer, value) in [
         ("/version", json!(2)),
         ("/generated_at", json!("2026-02-31T12:00:00Z")),
+        ("/generated_at", json!("2016-12-31T23:59:60Z")),
+        (
+            "/decisions_today/0/link",
+            json!("https://example.com/?%70assword=fixture"),
+        ),
+        (
+            "/hosts/0",
+            json!(["host", 42, "ok", "2026-01-01T00:00:00Z"]),
+        ),
         ("/generated_at", json!("2099-01-01T00:00:00Z")),
         ("/chief_pm_checked_at", json!("2026-01-01T12:00:00+00:00")),
         ("/hosts/0/gate", json!("warning")),
@@ -1230,6 +1239,17 @@ fn management_snapshot_write_scope_validation_and_append_order() {
         );
     }
     for payload in [
+        json!([
+            1,
+            newest["generated_at"],
+            newest["chief_pm_checked_at"],
+            newest["decisions_waiting"],
+            newest["decisions_today"],
+            newest["budgets"],
+            newest["lanes"],
+            newest["hosts"]
+        ])
+        .to_string(),
         "{}".to_owned(),
         format!(
             "{{\"version\":1,{}",

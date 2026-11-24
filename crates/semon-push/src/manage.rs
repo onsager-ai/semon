@@ -148,7 +148,10 @@ impl<'de> Deserialize<'de> for Amount {
 impl<'de> Deserialize<'de> for Time {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let value = String::deserialize(d)?;
-        if !value.ends_with('Z') || value.as_bytes().get(10) != Some(&b'T') {
+        if !value.ends_with('Z')
+            || value.as_bytes().get(10) != Some(&b'T')
+            || value.as_bytes().get(17..19) == Some(b"60")
+        {
             return Err(de::Error::custom("expected UTC timestamp"));
         }
         DateTime::parse_from_rfc3339(&value)
@@ -251,6 +254,34 @@ pub(crate) fn validate(body: &[u8], now: DateTime<Utc>) -> Result<(DateTime<Utc>
         return Err(Invalid);
     }
     let snapshot: Snapshot = serde_json::from_slice(body).map_err(|_| Invalid)?;
+    let value: Value = serde_json::from_slice(body).map_err(|_| Invalid)?;
+    fn object_shapes(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.iter().all(|(name, value)| match value {
+                Value::Array(items) => {
+                    matches!(
+                        name.as_str(),
+                        "decisions_waiting"
+                            | "decisions_today"
+                            | "budgets"
+                            | "breakdown"
+                            | "lanes"
+                            | "alerts"
+                            | "agents"
+                            | "hosts"
+                    ) && items
+                        .iter()
+                        .all(|item| !item.is_array() && object_shapes(item))
+                }
+                _ => object_shapes(value),
+            }),
+            Value::Array(_) => false,
+            _ => true,
+        }
+    }
+    if !value.is_object() || !object_shapes(&value) {
+        return Err(Invalid);
+    }
     let generation = snapshot.generated_at.0;
     if snapshot.version != 1
         || generation > now + chrono::TimeDelta::minutes(5)
@@ -286,6 +317,11 @@ pub(crate) fn validate(body: &[u8], now: DateTime<Utc>) -> Result<(DateTime<Utc>
             || url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
+            || url.query_pairs().any(|(name, value)| {
+                looks_secret(&format!("{name}={value}"))
+                    || looks_secret(&name)
+                    || looks_secret(&value)
+            })
             || authority
                 .split(['/', '?', '#'])
                 .next()
@@ -399,10 +435,7 @@ pub(crate) fn validate(body: &[u8], now: DateTime<Utc>) -> Result<(DateTime<Utc>
     }
     // The typed decoder has already rejected duplicate/unknown fields and all
     // invalid values. Keep the original UTC strings and optional field presence.
-    Ok((
-        generation,
-        serde_json::from_slice(body).map_err(|_| Invalid)?,
-    ))
+    Ok((generation, value))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -462,6 +495,8 @@ pub(crate) fn append(
     // Readers and writers share this lock so no reader sees an entry before its
     // rename and directory sync have committed. The lock outlives each operation.
     directory_file.lock()?;
+    // Another writer may have created the directory but not yet synced its parent.
+    File::open(root)?.sync_all()?;
     let mut previous = 0;
     for record in records(&dir)? {
         previous = previous.max(record?.0);

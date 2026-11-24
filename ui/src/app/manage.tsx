@@ -65,10 +65,12 @@ const stallReasons = {
 };
 
 function when(time: string | null) {
-  return time === null ? (
-    'Unknown'
+  if (time === null) return 'Unknown';
+  const parsed = Date.parse(time);
+  return Number.isFinite(parsed) ? (
+    <time dateTime={time}>{displayClock.format(parsed)}</time>
   ) : (
-    <time dateTime={time}>{displayClock.format(Date.parse(time))}</time>
+    time
   );
 }
 
@@ -140,21 +142,22 @@ function LaneRow({ lane, now }: { lane: Lane; now: number }) {
 
 export function ManageDashboard({ data }: { data: ManageData }) {
   const { now, snapshot, stalls } = data;
-  const age = snapshot
-    ? Math.floor(Math.max(0, now - Date.parse(snapshot.generated_at)) / minute)
-    : 0;
-  const color = age >= 180 ? 'red' : age >= 90 ? 'amber' : 'green';
+  const generated = snapshot ? Date.parse(snapshot.generated_at) : NaN;
+  const age = Number.isFinite(generated) ? Math.floor(Math.max(0, now - generated) / minute) : null;
+  const color = age === null || age >= 180 ? 'red' : age >= 90 ? 'amber' : 'green';
   const state = { green: 'Current', amber: 'Aging', red: 'Stale' }[color];
-  const decisions = snapshot?.decisions_today.filter(
-    (decision) => day.format(Date.parse(decision.decided_at)) === day.format(now),
-  );
+  const decisions = snapshot?.decisions_today.filter((decision) => {
+    const parsed = Date.parse(decision.decided_at);
+    return !Number.isFinite(parsed) || day.format(parsed) === day.format(now);
+  });
   return (
     <div class="manage-dashboard">
       <header>
         {snapshot ? (
           <>
             <p>
-              <Status color={color} label={state} /> · {age} min old
+              <Status color={color} label={state} /> ·{' '}
+              {age === null ? 'Age unknown' : `${age} min old`}
             </p>
             <p>Generated {when(snapshot.generated_at)}</p>
             <p>Chief PM checked {when(snapshot.chief_pm_checked_at)}</p>
@@ -305,6 +308,7 @@ export function ManageDashboard({ data }: { data: ManageData }) {
 
 export const receiverHost: ViewerHost = {
   machinesPath: '/machines',
+  receiver: true,
   navigation: {
     trailing: [
       {

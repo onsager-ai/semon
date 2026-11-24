@@ -4857,7 +4857,7 @@ export function createCatalogViewer(
     if (active?.meta?.details?.live_observation) updateSessionClock(active.root, Date.now(), {});
   }, 1000);
   const removeNavigation = viewerHost?.subscribeNavigation?.(chrome);
-  if (!viewerHost)
+  if (!viewerHost || viewerHost.receiver)
     void api('/api/viewer/pairing')
       .then((value) => {
         if (disposed) return;
@@ -4867,7 +4867,7 @@ export function createCatalogViewer(
         if (sourcesOpen) drawSources();
       })
       .catch(() => {});
-  if (!viewerHost)
+  if (!viewerHost || viewerHost.receiver)
     void api('/api/viewer/chrome')
       .then((value) => {
         if (disposed) return;

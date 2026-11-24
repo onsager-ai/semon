@@ -36,11 +36,13 @@ try {
   // Keep the actual authenticated response and its live Catalog result. Move
   // only receiver time to exercise exact status thresholds in one browser run.
   let age = 89;
+  let invalidDate = false;
   await page.route(ENV.base + api, async (route) => {
     const response = await route.fetch();
     assert.equal(response.status(), 200);
     const payload = await response.json();
     payload.now = Date.parse(fixture.generated_at) + age * 60_000;
+    if (invalidDate) payload.snapshot.hosts[0].observed_at = '2016-12-31T23:59:60Z';
     await route.fulfill({ response, json: payload });
   });
   for (const [minutes, label, color] of [
@@ -83,6 +85,9 @@ try {
       await page.screenshot({ path: `${ENV.out}/manage-${color}-360.png`, fullPage: true });
     }
   }
+  invalidDate = true;
+  await page.reload();
+  await page.getByText('2016-12-31T23:59:60Z', { exact: false }).waitFor();
   assert.deepEqual(errors, []);
 } finally {
   await ctx.close();
