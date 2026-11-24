@@ -53,6 +53,7 @@ pub(super) fn stall_response(
                 match row["state"].as_str() {
                     Some("waiting-question") => StallReason::WaitingQuestion,
                     Some("working") => StallReason::NoOutput,
+                    Some("ended") => return None,
                     _ if row["alive"].is_null() && recorded_status.as_deref() == Some("busy") => {
                         StallReason::NoOutput
                     }
@@ -524,6 +525,8 @@ impl Query {
             }
             for (id, saved) in &part.rows {
                 let mut saved = saved.clone();
+                let recorded_busy = saved["recorded_status"] == "busy";
+                qualify_summary_state(&mut saved["summary"], recorded_busy);
                 let served_id = served(id);
                 saved["summary"]["id"] = json!(served_id);
                 if let Some(parent) = saved["summary"]["parent"].as_str() {

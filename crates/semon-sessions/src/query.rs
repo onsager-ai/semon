@@ -42,7 +42,7 @@ enum State {
     Ended,
     /// The run failed, as its log records.
     Error,
-    /// Not in these logs: the far end of a handoff.
+    /// The evidence does not establish a state.
     Unknown,
     // Q3 adds `waiting-permission` once an exact signal for a pending
     // permission prompt exists (#14's open question). Until then such a
@@ -71,6 +71,14 @@ impl State {
     }
 }
 
+// The model calls a Claude lineage done when it sees no live process. A busy
+// PID record with unverified liveness leaves that apparent end uncertain.
+fn qualify_summary_state(row: &mut Value, recorded_busy: bool) {
+    if row["state"] == State::Ended.name() && row["alive"].is_null() && recorded_busy {
+        row["state"] = json!(State::Unknown.name());
+    }
+}
+
 /// Why `stalls` lists a session: a closed set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StallReason {
@@ -94,7 +102,7 @@ impl StallReason {
 const STALL_RULE: &str = "A session stalls when no log line has landed for at least idle_minutes and: \
      a single dated Claude pid file recorded it busy more than five minutes after the latest transcript activity, \
      and its process was observed gone (process-gone); or a question to you is open (waiting-question); or the session is \
-     working or a Claude PID file reports busy while current liveness is unknown \
+     working or has unknown liveness and a busy Claude PID record, with no confirmed end \
      (no-output). Working is a live Claude process whose status is busy, a subagent whose parent runs \
      and whose spawning call has no result, or a Codex run that holds its writer lock.";
 
@@ -701,6 +709,10 @@ impl View {
             // The live process's run ids (RUN_VARIABLES only), or null.
             "run": facts.and_then(|facts| facts.run.clone()),
         });
+        qualify_summary_state(
+            &mut row,
+            facts.is_some_and(|facts| facts.recorded_status.as_deref() == Some("busy")),
+        );
         row["activity_analytics"] = session
             .get("activity_analytics")
             .cloned()
