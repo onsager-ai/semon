@@ -5,7 +5,7 @@
 // "Faint" is not a text colour, and its ratio is about 2.6:1, so it fails here wherever it is used for words. Text that holds no
 // letter or digit (a separator such as "·" or "›") is a rule, not words, and isn't measured. Disabled controls and text that is
 // not drawn (hidden, closed drawer, under 2 px) are skipped.
-import { served, data, reporter, goto, settled, ENV } from '../lib.mjs';
+import { served, data, reporter, goto, ENV } from '../lib.mjs';
 import path from 'node:path';
 
 import { auditText as audit } from '../text-audit.mjs';
@@ -66,33 +66,8 @@ export default async function tokensCheck(browser) {
     Object.values(D.SESS).find(
       (s) => Object.values(D.SESS).filter((c) => c.parent === s.id).length >= 5,
     )?.id ?? harbor;
-  const originFor = (sid) =>
-    D.H.find(
-      (h) =>
-        (h.kind === 'spawn' || h.kind === 'relay') &&
-        h.to === sid &&
-        h.from !== sid &&
-        (h.kind === 'spawn' || D.SESS[sid]?.kind === 'Relayed' || !D.SESS[sid]?.lane),
-    );
-  const introHandoff = D.H.find(
-    (h) => h.kind === 'spawn' && h.to && h.brief && D.SESS[h.from] && D.SESS[h.to],
-  );
-  const headerSession = Object.keys(D.TX).find((sid) =>
-    D.TX[sid].some((entry) => {
-      const h = entry.k === 'h' ? D.H.find((item) => item.id === entry.id) : null;
-      return (
-        h &&
-        h.to === sid &&
-        (h.kind === 'spawn' || h.kind === 'relay') &&
-        h.id !== originFor(sid)?.id
-      );
-    }),
-  );
-  r.expect(
-    !!headerSession,
-    'the fixture needs a received turn header with a .turn-h .who-link control',
-  );
-  r.expect(!!introHandoff, 'the fixture needs a received spawn brief for the Show more card');
+  const sender = D.H.find((event) => event.reason === 'not linked yet' && D.SESS[event.from]);
+  if (!sender) throw new Error('The fixture needs a sender-only relationship card');
   const turn = D.turns.find((t) => t.sent.length);
   const screens = [
     ['home', { v: 'home' }],
@@ -101,8 +76,7 @@ export default async function tokensCheck(browser) {
     ['machines', { v: 'machines' }],
     ['session-' + harbor, { v: 'session', id: harbor }],
     ['session-' + parent, { v: 'session', id: parent }],
-    ...(headerSession ? [['inkaccent-header', { v: 'session', id: headerSession }]] : []),
-    ...(introHandoff ? [['inkaccent-brief', { v: 'session', id: introHandoff.to }]] : []),
+    ['sender-card', { v: 'session', id: sender.from }],
     ...(turn ? [['trace', { v: 'trace', sid: turn.sid, turn: turn.id }]] : []),
   ];
   for (const [size, dark] of [
@@ -116,22 +90,6 @@ export default async function tokensCheck(browser) {
     const tag = size + (dark ? '-dark' : '-light'),
       rec = (results[tag] = {}),
       page = await served(browser, { size, dark });
-    if (introHandoff) {
-      await page.route('**/api/session-home?**', async (route) => {
-        const response = await route.fetch();
-        if (response.status() !== 200) return route.fulfill({ response });
-        const detail = await response.json(),
-          event = detail.events?.[introHandoff.id];
-        if (event && typeof event.brief === 'string') {
-          const continuation =
-            'Keep the handoff scoped to this request, preserve its context, and report what changed before returning the result.';
-          event.brief = [event.brief, ...Array(8).fill(continuation)].filter(Boolean).join('\n\n');
-        }
-        return route.fulfill({ response, json: detail });
-      });
-      await page.reload({ waitUntil: 'load' });
-      await settled(page);
-    }
     const tokens = await tokenColors(page);
     r.expect(
       tokens.accent === tokens.ink,
@@ -183,13 +141,12 @@ export default async function tokensCheck(browser) {
           fullPage: true,
         });
       }
-      if (name === 'inkaccent-header') {
-        const from = await styledText(page, '.turn-h .who-link');
+      if (name === 'sender-card') {
+        const card = page.locator(`.event[data-h="${sender.id}"]`);
+        await card.getByText('not linked yet', { exact: true }).waitFor();
         r.expect(
-          !!from && from.color === tokens.ink && from.weight >= 500,
-          tag +
-            ': .turn-h .who-link is missing, not ink, or below weight 500: ' +
-            JSON.stringify(from),
+          (await card.locator('.who-link').count()) === 0,
+          tag + ': sender card has no target link',
         );
       }
       if (name === 'trace') {
@@ -202,22 +159,6 @@ export default async function tokensCheck(browser) {
         );
         await page.screenshot({
           path: path.join(ENV.out, 'inkaccent-' + width + '-' + scheme + '-trace.png'),
-          fullPage: true,
-        });
-      }
-      if (name === 'inkaccent-brief') {
-        const sender = await styledText(page, '.turn-h .who-link');
-        r.expect(
-          !!sender && sender.color === tokens.ink && sender.weight >= 500,
-          tag + ': brief sender is an ink name link',
-        );
-        r.expect(
-          (await page.locator('.bubble').count()) > 0,
-          tag + ': the received brief appears in its incoming bubble',
-        );
-        rec.briefSession = introHandoff.to;
-        await page.screenshot({
-          path: path.join(ENV.out, 'inkaccent-' + width + '-' + scheme + '-session.png'),
           fullPage: true,
         });
       }

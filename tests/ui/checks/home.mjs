@@ -48,13 +48,10 @@ export default async function homeCheck(browser) {
   const D = await data();
   const r = reporter('home');
   const qualified = (id) => JSON.stringify([D.SOURCES?.[D.SESS[id]?.machine] ?? 'local', id]);
-  const spawned = new Set(D.H.filter((h) => h.kind === 'spawn').map((h) => h.to));
   const roots = Object.values(D.SESS)
-    .filter((s) => s.lane && !spawned.has(s.id))
-    .sort((a, b) => b.last - a.last);
-  const parentOf = (sid) =>
-    D.SESS[sid]?.parent ??
-    D.H.find((h) => (h.kind === 'spawn' || h.kind === 'relay') && h.to === sid)?.from;
+    .filter((s) => !s.parent)
+    .sort((a, b) => b.last - a.last || a.id.localeCompare(b.id));
+  const parentOf = (sid) => D.SESS[sid]?.parent;
   const shownRoots = new Set(roots.slice(0, 8).map((s) => s.id));
   const treeRoot = (sid) => {
     const seen = new Set();
@@ -100,9 +97,10 @@ export default async function homeCheck(browser) {
   const expectedTreeRows = Object.values(D.SESS).filter(
     (s) => shownRoots.has(treeRoot(s.id)) && !folded.has(s.id),
   ).length;
-  const treePair = D.H.find(
-    (h) => h.kind === 'spawn' && roots.slice(0, 8).some((s) => s.id === h.from) && D.SESS[h.to],
-  );
+  const parent = roots.slice(0, 8).find((s) => kidsOf(s.id).length > 0);
+  const child = parent && kidsOf(parent.id).find((s) => !folded.has(s.id));
+  if (!parent || !child) throw new Error('The fixture needs a visible native parent and child');
+  const treePair = { from: parent.id, to: child.id };
   const out = {};
   const errs = [];
 

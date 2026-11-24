@@ -650,12 +650,11 @@ export default async function turnsCheck(browser) {
     });
     await anchorPage.route(/\/api\/session-transcript\?/, async (route) => {
       const query = new URL(route.request().url()).searchParams;
-      if (query.get('sid') !== sid || range) return route.continue();
+      if (query.get('sid') !== sid || !query.has('address') || range) return route.continue();
       range = {
         sid: query.get('sid'),
-        after: query.get('after'),
-        limit: query.get('limit'),
-        generation: query.get('generation'),
+        scope: query.get('scope'),
+        address: JSON.parse(query.get('address')),
       };
       try {
         const response = await route.fetch();
@@ -701,14 +700,8 @@ export default async function turnsCheck(browser) {
     if (fetchedRange.status !== 200)
       throw Error('anchored transcript range failed: ' + JSON.stringify(fetchedRange));
     releaseRange();
-    await anchorPage.waitForFunction(
-      (turn) =>
-        [...document.querySelectorAll('.turn')].some(
-          (node) => node.dataset.turn === turn && node.classList.contains('flash'),
-        ),
-      started.id,
-      { polling: 50 },
-    );
+    await anchorPage.locator(`.turn[data-turn="${started.id}"]`).waitFor({ state: 'attached' });
+    await anchorPage.evaluate(() => window.__anchorPinControl.flush());
     const before = await anchorPage.evaluate((turn) => {
       const target = [...document.querySelectorAll('.turn')].find(
         (node) => node.dataset.turn === turn,
@@ -739,11 +732,10 @@ export default async function turnsCheck(browser) {
     const tailWrites = flushed.writes.slice(before.writes);
     anchorPin.passed =
       range?.sid === sid &&
-      range.after !== null &&
-      Number.isSafeInteger(Number(range.after)) &&
-      Number(range.after) >= 0 &&
-      Number(range.limit) === 100 &&
-      /^[a-f0-9]{64}$/.test(range.generation ?? '') &&
+      range.scope === 'current' &&
+      Number.isSafeInteger(range.address?.record?.offset) &&
+      /^[a-f0-9]{64}$/.test(range.address?.binding ?? '') &&
+      /^[a-f0-9]{64}$/.test(range.address?.entry_id ?? '') &&
       before.found &&
       after.found &&
       after.inView &&
@@ -774,48 +766,30 @@ export default async function turnsCheck(browser) {
     'Native anchor pin page errors: ' + anchorPin.errors.join(' | '),
   );
 
-  // Handoff content stays on the page; only its names navigate.
+  // Sender-only handoffs cannot navigate to a cross-session target.
   out.handoffCards = {};
   for (const size of ['phone', 'desktop'])
     for (const dark of [false, true]) {
       const page = await served(browser, { size, dark });
-      const child = D0.H.find((h) => h.kind === 'spawn' && D0.SESS[h.to] && D0.SESS[h.from]);
-      const relay = D0.H.find((h) => h.kind === 'relay' && D0.SESS[h.from] && D0.SESS[h.to]);
-      r.expect(!!child && !!relay, 'fixture must exercise child and relay names');
-      for (const h of [child, relay].filter(Boolean)) {
+      for (const kind of ['spawn', 'relay']) {
+        const h = D0.H.find(
+          (event) =>
+            event.kind === kind && event.reason === 'not linked yet' && D0.SESS[event.from],
+        );
+        if (!h) throw new Error('The fixture must exercise an unlinked ' + kind);
         await goto(page, { v: 'session', id: h.from }, D0);
-        const sel = '[data-h="' + h.id + '"]',
-          card = page.locator(sel).first();
-        r.expect((await card.count()) === 1, size + ': handoff content is present');
-        const before = await page.evaluate(() => ({ v: history.state.v, id: history.state.id }));
-        // The compact child's top-left corner is now its navigation button.
-        // Click its noninteractive metadata to exercise content separately.
-        if (h.kind === 'spawn') await card.locator('.cc-meta').click();
-        else await card.click({ position: { x: 3, y: 3 } });
-        const after = await page.evaluate(() => ({ v: history.state.v, id: history.state.id }));
+        const card = page.locator(`.event[data-h="${h.id}"]`);
+        const target = card.getByText('not linked yet', { exact: true });
+        await target.waitFor();
+        const before = page.url();
+        await target.click();
+        r.expect(page.url() === before, size + ': clicking sender content keeps the route');
         r.expect(
-          JSON.stringify(before) === JSON.stringify(after),
-          size + ': clicking content must keep the route',
+          (await card.locator('a, .who-link, .ev-head button').count()) === 0,
+          size + ': the sender card exposes no target navigation',
         );
-        const name = card
-          .locator('button.who-link')
-          .filter({ hasText: D0.SESS[h.to].name })
-          .first();
-        r.expect((await name.count()) === 1, size + ': recipient name is a button');
-        await name.press('Enter');
-        await page.waitForFunction(
-          (id) => history.state?.v === 'session' && history.state?.id === id,
-          h.to,
-        );
-        const expectedTurn = D.starts.get(h.id)?.id;
-        if (expectedTurn)
-          r.expect(
-            await page.evaluate((turn) => history.state.turn === turn, expectedTurn),
-            'name navigation preserves the started turn',
-          );
       }
       r.expect(page.errors.length === 0, 'handoff page errors: ' + page.errors.join(' | '));
-      out.handoffCards[size + (dark ? '-dark' : '-light')] = { child: child?.id, relay: relay?.id };
       await page.context().close();
     }
 
@@ -940,15 +914,8 @@ export default async function turnsCheck(browser) {
         light.findFilter.stepsWhileFiltered,
     );
   // Tap targets: every group measured must have nothing under 36px; groups this fixture is expected to populate
-  // (Sessions/Machine rows, session Trace buttons, the one relay header, and trace child "open"
-  // links) must also have measured something, so a selector typo or a broken affordance fails loudly.
-  const expectPositiveTaps = new Set([
-    'sessions rows',
-    'machine rows',
-    '.turn-end .link',
-    '.turn-h .who-link',
-    '.hop .open',
-  ]);
+  // (Sessions and Machine rows, and session Trace buttons) must also measure something.
+  const expectPositiveTaps = new Set(['sessions rows', 'machine rows', '.turn-end .link']);
   for (const scheme of ['light', 'dark']) {
     const taps = out[scheme]?.taps ?? {};
     for (const [k, t] of Object.entries(taps)) {
