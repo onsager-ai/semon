@@ -102,7 +102,6 @@ import { EffectScope } from './effects';
 import {
   catalogTranscriptBlocks,
   recordedRelationshipViews,
-  retainedTranscriptTrace,
   recordedSignalLabel,
 } from './catalogTranscriptView';
 import { parseNativeRelationships } from '../domain/relationships';
@@ -1772,16 +1771,6 @@ export function createCatalogViewer(
   function displayEntries(view: SelectedView): CatalogDisplayedEntry[] {
     return view.nativeStore?.entries() ?? view.store.entries();
   }
-  function openTranscriptTrace(view: SelectedView, turn: string) {
-    const target = retainedTranscriptTrace(turn, relationshipContext(view), view.peer);
-    if (!target) return;
-    const url =
-      tracePath(view.sourceKey, view.key, turn) +
-      '?' +
-      sessionControls(view.readScope, target.address, target.peer);
-    history.pushState(null, '', url);
-    goCausal(view.key, turn, view.readScope, target.address, target.peer);
-  }
   function relationshipContext(view: SelectedView) {
     return view.nativeStore?.context() ?? view.store.context();
   }
@@ -2044,7 +2033,6 @@ export function createCatalogViewer(
         relationshipContext(view).turns.some(
           (row) =>
             row.id === turn &&
-            (!view.peer || row.address) &&
             row.sent.some((id) =>
               relationshipContext(view).handoffs.some(
                 ({ edge }) => edge.id === id && edge.kind !== 'move',
@@ -2102,7 +2090,14 @@ export function createCatalogViewer(
               });
           });
         } else if (key === 'trace' && turn && view) {
-          navigateFromPanel(panel, () => openTranscriptTrace(view, turn));
+          navigateFromPanel(panel, () => {
+            history.pushState(
+              null,
+              '',
+              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope),
+            );
+            goCausal(view.key, turn, view.readScope);
+          });
         }
       },
     });
@@ -2858,7 +2853,10 @@ export function createCatalogViewer(
         {
           committed() {},
           trace(turn) {
-            openTranscriptTrace(view, turn);
+            const url =
+              tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope);
+            history.pushState(null, '', url);
+            goCausal(view.key, turn, view.readScope);
           },
           session(key) {
             void goSession(key, undefined, true, undefined, view?.readScope);
@@ -3090,30 +3088,13 @@ export function createCatalogViewer(
       {
         committed() {},
         trace(turn) {
-          openTranscriptTrace(view, turn);
+          const url =
+            tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls(view.readScope);
+          history.pushState(null, '', url);
+          goCausal(view.key, turn, view.readScope);
         },
         session(key, turn) {
-          const evidence = turn
-            ? relationshipContext(view).handoffs.find(
-                (row) =>
-                  row.edge.to === key &&
-                  row.targetTurn === turn &&
-                  row.targetEvidence &&
-                  !row.reason,
-              )?.targetEvidence
-            : undefined;
-          if (evidence)
-            void goSession(
-              key,
-              undefined,
-              true,
-              turn,
-              'retained_history',
-              false,
-              evidence.address,
-              evidence.peer,
-            );
-          else void goSession(key, undefined, true, turn);
+          void goSession(key, undefined, true, turn, view.readScope);
         },
         machine() {},
         sender() {},
@@ -3699,30 +3680,12 @@ export function createCatalogViewer(
       expected = generation(),
       context = store.context();
     const cache = (view.contextText ??= new Map());
-    type ContextJob = {
-      sid: string;
-      ids: string[];
-      activity?: boolean;
-      evidence?: (typeof context.handoffs)[number]['targetEvidence'];
-    };
-    const owners = new Map<string, Set<string>>(),
-      certified: ContextJob[] = [];
+    const owners = new Map<string, Set<string>>();
     for (const relationship of context.handoffs)
-      for (const owner of [
-        relationship.briefOwner,
-        relationship.edge.result == null ? relationship.resultOwner : undefined,
-      ]) {
+      for (const owner of [relationship.briefOwner, relationship.resultOwner]) {
         if (!owner || !context.previews[owner]) continue;
         const key = JSON.stringify([owner, context.previews[owner], relationship.edge.id]);
         if (cache.has(key)) continue;
-        if (relationship.targetEvidence && owner === relationship.edge.to) {
-          certified.push({
-            sid: owner,
-            ids: [relationship.edge.id],
-            evidence: relationship.targetEvidence,
-          });
-          continue;
-        }
         if (!owners.has(owner)) owners.set(owner, new Set());
         owners.get(owner)!.add(relationship.edge.id);
       }
@@ -3742,12 +3705,11 @@ export function createCatalogViewer(
     }
     const jobs = [...owners].flatMap(([sid, ids]) => {
       const values = [...ids],
-        result: ContextJob[] = [];
+        result: { sid: string; ids: string[]; activity?: boolean }[] = [];
       for (let start = 0; start < values.length; start += 8)
         result.push({ sid, ids: values.slice(start, start + 8) });
       return result;
     });
-    jobs.push(...certified);
     for (const sid of activityOwners)
       if (!cache.has(JSON.stringify([sid, context.previews[sid], null])))
         jobs.push({ sid, ids: [], activity: true });
@@ -3773,10 +3735,6 @@ export function createCatalogViewer(
                 events: JSON.stringify(job.ids),
                 session_fields: JSON.stringify(job.activity ? ['activity'] : []),
               });
-              if (job.evidence) {
-                params.set('address', JSON.stringify(job.evidence.address));
-                if (job.evidence.peer) params.set('peer', JSON.stringify(job.evidence.peer));
-              }
               const data = object(await api('/api/session-home?' + params));
               if (!current()) return;
               const identity = object(data.identity);

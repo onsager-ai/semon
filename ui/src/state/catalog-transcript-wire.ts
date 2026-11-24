@@ -1,10 +1,5 @@
 import { array, boolean, dictionary, number, object, text } from '../domain/validate';
-import {
-  parseNativeEntryAddress,
-  parseRetainedPeerAddress,
-  type NativeEntryAddress,
-  type RetainedPeerAddress,
-} from '../lib/sessionRoute';
+import { parseNativeEntryAddress, type NativeEntryAddress } from '../lib/sessionRoute';
 import {
   parseRecordedRelationship,
   parseRecordedTurn,
@@ -71,10 +66,8 @@ export interface CatalogTranscriptPage {
   relationship_context: {
     state: 'incomplete' | 'complete';
     turn_ids: string[];
-    turns: (RecordedTurn & { address?: NativeEntryAddress })[];
-    handoffs: (RecordedRelationship & {
-      targetEvidence?: { address: NativeEntryAddress; peer?: RetainedPeerAddress };
-    })[];
+    turns: RecordedTurn[];
+    handoffs: RecordedRelationship[];
     sessions: Record<string, RecordedSessionPresentation>;
     previews: Record<string, string>;
   };
@@ -215,7 +208,6 @@ function parseRelationshipContext(
   context: Record<string, unknown>,
   identity: CatalogSessionIdentity,
   entries: readonly Pick<CatalogTranscriptEntry, 'entry'>[],
-  native = false,
 ): CatalogTranscriptPage['relationship_context'] {
   if (
     (context.state !== 'incomplete' && context.state !== 'complete') ||
@@ -223,35 +215,11 @@ function parseRelationshipContext(
     context.handoffs.length > 200
   )
     throw Error('Invalid ranged relationship context');
-  const relationships = array(context.handoffs, (value) => {
-    const reading = parseRecordedRelationship(value),
-      raw = object(value).target_evidence;
-    if (raw == null) return reading;
-    if (
-      !native ||
-      identity.read_scope !== 'retained_history' ||
-      reading.edge.from !== identity.catalog_key ||
-      !reading.targetTurn ||
-      reading.reason
-    )
-      throw Error('Invalid retained transcript relationship evidence');
-    const target = object(raw);
-    return {
-      ...reading,
-      targetEvidence: {
-        address: parseNativeEntryAddress(target.address),
-        peer: target.peer == null ? undefined : parseRetainedPeerAddress(target.peer),
-      },
-    };
-  });
+  const relationships = array(context.handoffs, parseRecordedRelationship);
   const turns = array(context.turns ?? [], (value) => {
       const row = object(value);
       if (row.sid !== identity.catalog_key) throw Error('Invalid ranged turn owner');
-      const turn = parseRecordedTurn(row);
-      if (row.address == null) return turn;
-      if (!native || identity.read_scope !== 'retained_history')
-        throw Error('Invalid retained transcript turn address');
-      return { ...turn, address: parseNativeEntryAddress(row.address) };
+      return parseRecordedTurn(row);
     }),
     turnIds = new Set(entries.flatMap((item) => (item.entry.turn ? [item.entry.turn] : []))),
     starts = new Set(turns.flatMap((turn) => (turn.start ? [turn.start] : [])));
@@ -263,19 +231,11 @@ function parseRelationshipContext(
     throw Error('Invalid ranged turn scope');
   const named = new Set(relationships.map((row) => row.edge.id));
   const actions = new Set(entries.flatMap((item) => (item.entry.k === 'h' ? [item.entry.id] : [])));
-  const sent = new Map(turns.map((turn) => [turn.id, new Set(turn.sent)]));
   if (
     named.size !== relationships.length ||
     relationships.some(
       (row) =>
-        (!actions.has(row.edge.id) &&
-          !starts.has(row.edge.id) &&
-          !(
-            native &&
-            row.edge.from === identity.catalog_key &&
-            row.sourceTurn &&
-            sent.get(row.sourceTurn)?.has(row.edge.id)
-          )) ||
+        (!actions.has(row.edge.id) && !starts.has(row.edge.id)) ||
         (row.edge.from !== identity.catalog_key && row.edge.to !== identity.catalog_key),
     ) ||
     (context.state === 'complete' && [...actions].some((id) => !named.has(id))) ||
@@ -403,7 +363,6 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
       object(row.relationship_context),
       identity,
       entries,
-      true,
     ),
     session: row.session === null ? null : parseCatalogSession(row.session),
     position: row.position,

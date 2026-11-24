@@ -136,6 +136,8 @@ interface HandoffBase {
   done?: number;
   result?: string;
   target?: string;
+  reason?: 'not linked yet';
+  targetLabel?: string;
   declined?: boolean;
 }
 export type Handoff = HandoffBase &

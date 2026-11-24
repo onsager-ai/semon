@@ -1,19 +1,12 @@
 import { array, boolean, object, text, number } from './validate';
 import type { Handoff } from './types';
 
-export const unavailableRelationshipLabels = {
-  legacy_relay: 'Legacy relay, not linked',
-  delivery_unverified: 'Delivery could not be verified',
-  ambiguous_delivery: 'Ambiguous delivery',
-  spawn_unverified: 'Spawn not linked',
-} as const;
 export interface RecordedRelationship {
   edge: Handoff;
   briefOwner?: string;
   resultOwner?: string;
   targetTurn?: string;
   sourceTurn?: string;
-  reason?: keyof typeof unavailableRelationshipLabels;
 }
 export interface RecordedTurn {
   id: string;
@@ -47,6 +40,20 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     status = text(row.status);
   if (!['work', 'wait', 'idle', 'done', 'err', 'new', 'off'].includes(status))
     throw Error('Invalid recorded handoff state');
+  const reason = row.reason == null ? undefined : text(row.reason);
+  const targetLabel = row.target_label == null ? undefined : text(row.target_label);
+  if (
+    (reason !== undefined &&
+      (reason !== 'not linked yet' ||
+        (kind !== 'relay' && kind !== 'spawn') ||
+        row.to != null ||
+        row.target_turn != null ||
+        row.target_evidence != null ||
+        row.brief_session != null ||
+        row.result_session != null)) ||
+    (targetLabel !== undefined && (reason === undefined || targetLabel.length > 192))
+  )
+    throw Error('Invalid sender relationship target');
   const base = {
     id: text(row.id),
     from: text(row.from),
@@ -57,6 +64,8 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     brief: '',
     result: row.result == null ? undefined : text(row.result),
     declined: boolean(row.declined),
+    reason: reason === 'not linked yet' ? ('not linked yet' as const) : undefined,
+    targetLabel,
   };
   let edge: Handoff;
   if (kind === 'toyou') {
@@ -66,20 +75,27 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
   } else if (kind === 'move') edge = { ...base, kind, fromMachine: '', toMachine: '' };
   else if (kind === 'ask' || kind === 'spawn' || kind === 'relay') edge = { ...base, kind };
   else throw Error('Invalid recorded handoff');
-  const reason =
-    row.reason == null ? undefined : (text(row.reason) as RecordedRelationship['reason']);
-  if (
-    reason !== undefined &&
-    (!Object.hasOwn(unavailableRelationshipLabels, reason) || status !== 'off')
-  )
-    throw Error('Invalid unavailable relationship');
   return {
     edge,
-    reason,
     briefOwner: row.brief_session == null ? undefined : text(row.brief_session),
     resultOwner: row.result_session == null ? undefined : text(row.result_session),
     targetTurn: row.target_turn == null ? undefined : text(row.target_turn),
     sourceTurn: row.source_turn == null ? undefined : text(row.source_turn),
+  };
+}
+export function senderRelationshipPresentation(edge: Handoff) {
+  if (!edge.reason || (edge.kind !== 'relay' && edge.kind !== 'spawn')) return undefined;
+  const label =
+    edge.targetLabel ?? (edge.kind === 'spawn' ? 'an unnamed agent' : 'an unnamed recipient');
+  return {
+    parts: [{ className: 'verb', text: (edge.kind === 'spawn' ? 'Spawned ' : 'Sent to ') + label }],
+    reason: edge.reason,
+    status:
+      edge.status === 'done'
+        ? 'Sender recorded success'
+        : edge.status === 'err'
+          ? 'Sender recorded failure'
+          : 'Sender outcome unavailable',
   };
 }
 export function parseNativeRelationships(value: unknown, ids: readonly string[]) {

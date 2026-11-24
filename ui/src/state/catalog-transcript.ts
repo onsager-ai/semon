@@ -59,12 +59,7 @@ function mergeRelationshipContext(
       const previous = turns.get(turn.id);
       turns.set(
         turn.id,
-        previous
-          ? {
-              ...(turn.at == null && previous.at != null ? previous : turn),
-              sent: [...new Set([...previous.sent, ...turn.sent])],
-            }
-          : turn,
+        previous ? { ...turn, sent: [...new Set([...previous.sent, ...turn.sent])] } : turn,
       );
     }
   }
@@ -399,10 +394,7 @@ export class CatalogNativeTranscriptStore {
             turns = new Set(entries.flatMap(({ entry }) => (entry.turn ? [entry.turn] : []))),
             actions = new Set(entries.flatMap(({ entry }) => (entry.k === 'h' ? [entry.id] : []))),
             retainedTurns = context.turns.filter((turn) => turns.has(turn.id));
-          for (const turn of retainedTurns) {
-            if (turn.start) actions.add(turn.start);
-            for (const id of turn.sent) actions.add(id);
-          }
+          for (const turn of retainedTurns) if (turn.start) actions.add(turn.start);
           this.pages.push({
             ...previous,
             entries,

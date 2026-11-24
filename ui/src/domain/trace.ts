@@ -133,6 +133,7 @@ export function createTraceCalculations(
       handoffs.push(...sent);
       const children: AgentNode[] = [];
       for (const h of sent) {
+        if (h.reason) continue;
         if (h.kind === 'spawn') {
           spawns.push(h);
           const childTurn = STARTS.get(h.id);

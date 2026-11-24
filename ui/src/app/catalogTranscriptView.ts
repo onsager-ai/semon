@@ -10,7 +10,7 @@ import {
   recordedThoughtLabel,
   visibleMaskedThoughts,
 } from '../domain/thinking';
-import { unavailableRelationshipLabels, type RecordedRelationship } from '../domain/relationships';
+import { senderRelationshipPresentation, type RecordedRelationship } from '../domain/relationships';
 import type {
   CatalogTranscriptPage,
   RecordedSessionPresentation,
@@ -421,8 +421,7 @@ export function catalogTranscriptBlocks(
     if (start && start.kind !== 'ask' && !descriptor.u) {
       const sender = context?.sessions[start.from],
         harness = sender && HARNESSES[sender.harness],
-        linked =
-          !relationship?.reason && sender && start.from !== sessionKey && start.from !== 'you';
+        linked = sender && start.from !== sessionKey && start.from !== 'you';
       block.turn.header = {
         mark: harness
           ? {
@@ -460,16 +459,6 @@ export function catalogTranscriptBlocks(
   );
 }
 
-export function retainedTranscriptTrace(
-  turn: string,
-  context: CatalogTranscriptPage['relationship_context'],
-  peer?: import('../lib/sessionRoute').RetainedPeerAddress,
-) {
-  if (!peer) return {};
-  const address = context.turns.find((row) => row.id === turn)?.address;
-  return address ? { address, peer } : null;
-}
-
 export function recordedRelationshipViews(
   item: CatalogDisplayedEntry,
   relationship: RecordedRelationship,
@@ -483,12 +472,30 @@ export function recordedRelationshipViews(
     activity?: readonly [string, string];
   },
 ): EntryView[] {
+  const sender = senderRelationshipPresentation(relationship.edge);
+  if (sender) {
+    return [
+      {
+        kind: 'event',
+        key: item.entry_id,
+        entryKey: item.entry_id,
+        handoff: relationship.edge.id,
+        className: 'event',
+        icon: I.out,
+        parts: sender.parts,
+        time: clock(relationship.edge.at, Date.now()),
+        result: sender.reason,
+        resultLabel: 'Target',
+        stateLabel: sender.status,
+      },
+    ];
+  }
   const edge = relationship.edge,
     target = participants[edge.to],
     source = participants[edge.from];
   const name = (id: string) =>
     id === 'you' ? 'You' : (participants[id]?.name ?? 'Recorded session');
-  if (edge.kind === 'spawn' && edge.from === selected && target && !relationship.reason) {
+  if (edge.kind === 'spawn' && edge.from === selected && target) {
     const mark = HARNESSES[target.harness],
       status =
         target.state === 'work' || target.state === 'wait'
@@ -532,7 +539,7 @@ export function recordedRelationshipViews(
         stateLabel: STATE[status] ?? 'Recorded history',
         meta,
         brief: preview(native.brief ?? ''),
-        result: native.result ?? edge.result,
+        result: native.result,
         activity:
           target.live_observation && status === 'work' && !native.result && native.activity
             ? [runningToolLabel(native.activity[0]), native.activity[1]]
@@ -572,9 +579,8 @@ export function recordedRelationshipViews(
           ]
         : []),
     ];
-  const sourceLinked =
-      !relationship.reason && source && edge.from !== selected && edge.from !== 'you',
-    targetLinked = !relationship.reason && target && edge.to !== selected && edge.to !== 'you',
+  const sourceLinked = source && edge.from !== selected && edge.from !== 'you',
+    targetLinked = target && edge.to !== selected && edge.to !== 'you',
     parts = [
       {
         className: 'who who-link',
@@ -595,13 +601,11 @@ export function recordedRelationshipViews(
               : ' asked '
             : edge.kind === 'relay'
               ? ' relayed to '
-              : edge.kind === 'spawn'
-                ? ' launched '
-                : ' asked ',
+              : ' asked ',
       },
       {
         className: 'who who-link',
-        text: relationship.reason && edge.to ? edge.to : name(edge.to),
+        text: name(edge.to),
         action: targetLinked
           ? { kind: 'session' as const, id: edge.to, turn: relationship.targetTurn }
           : undefined,
@@ -642,10 +646,8 @@ export function recordedRelationshipViews(
       parts,
       time: clock(edge.at, Date.now()),
       brief: preview(native.brief ?? item.native_action_text ?? ''),
-      result: relationship.reason
-        ? unavailableRelationshipLabels[relationship.reason]
-        : (native.result ?? edge.result),
-      resultLabel: relationship.reason ? 'Evidence' : 'Result',
+      result: native.result,
+      resultLabel: 'Result',
       answers:
         native.answer == null
           ? undefined
@@ -653,7 +655,7 @@ export function recordedRelationshipViews(
             ? native.answer
             : [native.answer],
       waiting: edge.status === 'wait',
-      stateLabel: relationship.reason ? 'Unavailable' : STATE[edge.status],
+      stateLabel: STATE[edge.status],
     },
   ];
 }

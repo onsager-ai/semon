@@ -114,41 +114,18 @@ well as selecting metadata from committed facts.
   facts and selected parent/child overrides. PID reuse or stale observations
   cannot make a row live. Runtime churn must not restart unrelated history reads.
 
-### Selected transcript relationship response
+### Sender-side cards
 
-The transcript's `relationship_context` contains `state` (`complete` or
-`incomplete`), `turn_ids`, `turns`, `handoffs`, `sessions` and `previews`.
-Each turn supplies `id`, `sid`, `start`, `u`, `at`, `end` (`st`, `why`, and
-optional `at`), `sent` and `last`. The Viewer resolves `start` and each `sent`
-ID against `handoffs`. It uses `sent` to offer the Trace action on the turn.
+The native transcript and Trace show outgoing relay and spawn calls from the
+viewed session’s own committed records. The call’s arguments supply a bounded
+plain-text label. The sender’s result determines success, failure, or an
+unavailable outcome. Success describes the recorded operation and makes no claim
+about another session’s activity or completion.
 
-Each handoff supplies `id`, `kind`, `from`, `to`, `at`, `status`, `declined`,
-and, when known, `done`, `source_turn`, `target_turn`, `brief_session` and
-`result_session`. Questions and results sent to the user also use `ask`.
-Relationship action entries use `k: "h"` and the handoff `id`, with an entry
-address and provenance in the source transcript. A recorded outgoing call
-can be outside the page while its handoff is named by a visible source turn.
-An unqualified link carries `status: "off"` and `reason`, with no receipt turn
-or preview authority. A resume delivered as a relay uses the relay shape. A Claude coordinator
-resume that names a recipient without a correlated receipt remains unavailable. A
-correlation must have one physical send owner and the receipt must belong to the
-intended recipient. A Codex spawn needs one child and one call in the selected
-prefixes. The transcript carries the certified source turn address when it
-opens on a peer, so either Trace action can preserve that peer’s witness.
-
-Unavailable `reason` codes are `legacy_relay` for an untyped delivery,
-`delivery_unverified` when typed delivery ownership or receipt cannot be proven,
-`ambiguous_delivery` when several receipts match, and `spawn_unverified` when
-launch placement cannot be proven. The Viewer renders these codes as short text.
-
-For linked participants, the Viewer reads `name`, `harness` and `model` from
-`sessions`, with optional `kind`, `state`, `start`, `last`, `calls`, `usd`,
-`live_observation` and `activity` (`tool`, `since`) for child cards. `previews`
-keys are Catalog keys and their values are 64-character generation hashes.
-Preview owners use those hashes when requesting body text through the selected
-reader. Retained relationship targets and Trace evidence carry their certified address
-and, for a peer, the original Trace witness. Plain session links keep opening
-the current owner.
+Cards carry `reason: "not linked yet"` and `to: null`. They expose no target
+identity, address, preview reference, or link. A retained read uses the viewed
+session’s certified prefix. The cards use the selected reader and do not write
+body text into analytics or the Hub.
 
 ## Pagination and committed transcript prefixes
 

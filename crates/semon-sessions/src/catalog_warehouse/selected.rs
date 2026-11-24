@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cell::OnceCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io,
     path::Path,
     sync::{Arc, Mutex},
@@ -23,16 +23,13 @@ use std::{
 pub(super) mod causal;
 #[path = "parent_relay.rs"]
 mod parent_relay;
-pub(super) use parent_relay::TraceCompletion;
 #[path = "render.rs"]
 pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_annotations,
-    retained_launch_between, retained_member_bounds, retained_peer_launch_in_view,
-    retained_peer_trace_window, retained_preview_turns, retained_relay_in_view,
-    retained_spawn_return, retained_spawn_return_between, retained_spawn_window, retained_turn,
+    retained_member_bounds, retained_peer_trace_window, retained_preview_turns, retained_turn,
 };
 #[cfg(test)]
 pub(super) use retained::{
@@ -271,8 +268,8 @@ const EXACT_RELAY_RECEIPTS: &str =
     WHERE r.correlation=?2 ORDER BY r.source,r.pos,r.block,r.occurrence";
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct RelayReceipt {
-    pub(super) typed: bool,
     pub(super) path: String,
     pub(super) offset: u64,
     pub(super) block: i64,
@@ -339,6 +336,7 @@ pub(super) struct Record {
     pub(super) entry_anchor: Option<String>,
     pub(super) operation: Option<causal::Operation>,
     pub(super) causal: causal::Context,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) relay_receipts: Vec<RelayReceipt>,
     pub(super) address: Address,
     pub(super) reference: SessionSourceRef,
@@ -399,33 +397,6 @@ fn relay_receipts(
     let Some(correlation) = correlation.flatten() else {
         return Ok(Vec::new());
     };
-    // A delivery id is evidence only when its exact physical send has one owner
-    // in this source namespace at the selected revision.
-    let owned: bool = db.query_row(
-        "WITH owners AS MATERIALIZED (
-           SELECT DISTINCT r.source,c.pos,c.block,c.call_id FROM fact_relay_result r INDEXED BY relay_result_correlation
-           CROSS JOIN warehouse_source w ON w.source=r.source AND w.origin=?1
-           CROSS JOIN warehouse_current active ON active.source=r.source
-           CROSS JOIN fact_relay_send c ON c.source=r.source AND c.call_id=r.call_id
-             AND c.pos<r.pos AND ((r.call_pos=c.pos AND r.call_block=c.block) OR
-               (r.call_pos IS NULL AND (SELECT count(*) FROM fact_tool_call t
-                WHERE t.source=r.source AND t.call_id=r.call_id AND t.pos<r.pos)=1))
-           WHERE r.correlation=?2 AND NOT r.failed AND r.pos<(
-             SELECT json_extract(p.ledger,'$.offset') FROM warehouse_prefix p
-             WHERE p.source=r.source AND p.revision<=?3 ORDER BY p.revision DESC LIMIT 1
-           ) LIMIT 2
-         ) SELECT (SELECT count(*) FROM owners)=1 AND EXISTS (
-             SELECT 1 FROM owners o CROSS JOIN fact_relay_result r ON r.source=o.source
-               AND r.call_id=o.call_id AND r.call_pos=o.pos AND r.call_block=o.block AND r.pos>o.pos
-             WHERE r.source=?4 AND r.pos=?5 AND r.block=?6 AND r.occurrence=?7
-               AND r.correlation=?2 AND NOT r.failed
-         )",
-        params![source.namespace.binding(), correlation, view, result.source,
-            result.offset, result.block, result.occurrence], |row| row.get(0),
-    ).map_err(index)?;
-    if !owned {
-        return Ok(Vec::new());
-    }
     let mut receipts = db.prepare_cached(EXACT_RELAY_RECEIPTS).map_err(index)?;
     let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
     let mut rows = receipts
@@ -457,7 +428,6 @@ fn relay_receipts(
         let receipt = decode(&receipt)?;
         if offset < receipt.offset {
             qualified.push(RelayReceipt {
-                typed: true,
                 path,
                 offset,
                 block: row.get(4).map_err(index)?,
@@ -531,7 +501,6 @@ pub(super) struct Component {
     pub(super) latest_turn: Option<causal::TurnStart>,
     pub(super) runtime_status: Option<&'static str>,
     pub(super) legacy_completion: Option<RelayReceipt>,
-    pub(super) trace_completion: Option<TraceCompletion>,
     pub(super) records: Vec<Record>,
     pub(super) reply_records: BTreeMap<(String, u64), serde_json::Value>,
     pub(super) fields: Fields,
@@ -1511,7 +1480,7 @@ pub(super) fn trace_turn(
     retained: &dyn SessionSourceReader,
 ) -> Result<Option<Component>, ReadError> {
     let turns = [turn];
-    let target = Target::Turns(&turns, None);
+    let target = Target::SenderAnchor(&turns);
     match scope {
         CatalogReadScope::Current => {
             read_current(view, source.options, source, scope, key, target, None)
@@ -1522,56 +1491,37 @@ pub(super) fn trace_turn(
     }
 }
 
-// Skip native proof reads for launches whose indexed turn lies outside the
-// selected window. The caller still verifies the actual record and turn.
-pub(super) fn current_launch_turn(
+pub(super) fn sender_window(
     view: &ReadView<'_>,
     source: &Source<'_>,
     component: &Component,
-    address: &Address,
-    visible: &BTreeSet<&str>,
-) -> Result<bool, ReadError> {
-    let Some(harness) = crate::InputRoot::parse(&component.harness) else {
-        return Ok(false);
-    };
-    let carrier = harness.home(source.options).join(&address.path);
-    let db = view.lock()?;
-    let candidate = db.query_row(
-        "SELECT w.source,m.component,coalesce(r.ts,-9223372036854775808),
-                (SELECT max(revision) FROM warehouse_prefix)
-         FROM warehouse_current w CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?1
-         CROSS JOIN lineage_member m ON m.source=w.source
-         CROSS JOIN fact_record r ON r.source=w.source AND r.pos=?3 AND r.block=0 AND r.occurrence=?4 AND NOT r.gap
-         WHERE w.path=?2",
-        params![source.namespace.binding(), carrier.to_str(), i64::try_from(address.offset).map_err(index)?, address.occurrence],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).optional().map_err(index)?;
-    let Some((source_id, group, time, revision)) = candidate else {
-        return Ok(false);
-    };
-    let pos = Position {
-        source: source_id,
-        time,
-        offset: i64::try_from(address.offset).map_err(index)?,
-        block: 0,
-        occurrence: address.occurrence,
-    };
-    let turn = causal::turns(
-        &db,
-        source,
-        &component.identity.catalog_key,
-        &component.harness,
-        group,
-        revision,
-        std::iter::once(pos),
-        "{}",
-    )?
-    .remove(&pos)
-    .flatten();
-    // Untyped inbound Claude receipts can split an indexed user turn.
-    // A selected legacy relay boundary still requires the native reducer.
-    Ok(turn.is_some_and(|turn| visible.contains(turn.id.as_str()))
-        || (component.harness == "claude" && visible.iter().any(|id| id.starts_with('r'))))
+    turn: &causal::TurnStart,
+    provider: Option<&dyn SessionSourceReader>,
+    peer: Option<PeerBinding<'_>>,
+) -> Result<Option<Component>, ReadError> {
+    let key = &component.identity.catalog_key;
+    let target = Target::SenderWindow(turn.position);
+    match component.identity.read_scope {
+        CatalogReadScope::Current => read_current(
+            view,
+            source.options,
+            source,
+            CatalogReadScope::Current,
+            key,
+            target,
+            None,
+        ),
+        CatalogReadScope::RetainedHistory => retained::read_frozen(
+            view,
+            source,
+            key,
+            target,
+            None,
+            provider.unwrap_or(&view.archive),
+            peer.map(|binding| (binding, provider.is_none())),
+        )
+        .map(Some),
+    }
 }
 
 pub(super) fn trace_record(
@@ -1587,23 +1537,6 @@ pub(super) fn trace_record(
         CatalogReadScope::Current,
         key,
         Target::Address(address, None, None),
-        None,
-    )
-}
-
-pub(super) fn trace_results(
-    view: &ReadView<'_>,
-    source: &Source<'_>,
-    key: &str,
-    call: &Address,
-) -> Result<Option<Component>, ReadError> {
-    read_current(
-        view,
-        source.options,
-        source,
-        CatalogReadScope::Current,
-        key,
-        Target::ToolResults(call),
         None,
     )
 }
@@ -2057,9 +1990,12 @@ enum Target<'a> {
     #[cfg(test)]
     Evidence(Evidence<'a>),
     Turns(&'a [&'a str], Option<HomeFields<'a>>),
+    SenderAnchor(&'a [&'a str]),
+    SenderWindow(Position),
     Annotations(AnnotationRequest<'a>),
     PendingBoundary,
     Activity(&'a crate::transcript_range::StepAnchor),
+    #[cfg_attr(not(test), allow(dead_code))]
     ToolResults(&'a Address),
 }
 
@@ -2079,7 +2015,7 @@ impl Target<'_> {
             Self::Address(..) | Self::Activity(_) => Ok(1),
             #[cfg(test)]
             Self::Evidence(_) => Ok(1),
-            Self::Turns(..) => Ok(33),
+            Self::Turns(..) | Self::SenderAnchor(_) | Self::SenderWindow(_) => Ok(33),
             Self::Annotations(_) | Self::PendingBoundary => Ok(0),
             Self::ToolResults(_) => Ok(101),
         }
@@ -2375,7 +2311,7 @@ fn read_current(
                     }
                 };
                 let (start, end, entry_block, entry_occurrence) = match target {
-                    Target::Page(..) => (0, committed.offset, None, None),
+                    Target::Page(..) | Target::SenderWindow(_) => (0, committed.offset, None, None),
                     Target::Address(wanted, ..)
                         if member.reference.path == wanted.path
                             && wanted.offset < committed.offset =>
@@ -2401,7 +2337,7 @@ fn read_current(
                             .insert(id, (member.reference.clone(), view, predecessors));
                         continue;
                     }
-                    Target::Turns(turns, _) => {
+                    Target::Turns(turns, _) | Target::SenderAnchor(turns) => {
                         if include_home_detail
                             || include_home_activity
                             || (matches!(target, Target::Turns(_, Some(_)))
@@ -2501,7 +2437,13 @@ fn read_current(
                     };
                     frontier
                 } else {
-                    direction.frontier(cursor.map(|cursor| cursor.after), id)
+                    direction.frontier(
+                        match target {
+                            Target::SenderWindow(after) => Some(after),
+                            _ => cursor.map(|cursor| cursor.after),
+                        },
+                        id,
+                    )
                 };
                 let predecessors =
                     continuation_bounds(&mut continuations, &mut prefix, id, component, view)?;
@@ -2612,7 +2554,7 @@ fn read_current(
         && let Some((position, _)) = candidates.first_key_value()
         && relay_context.values().all(Vec::is_empty)
     {
-        parent_relay::Plan::collect(db, source, position.source, Some(call), view, false)?
+        parent_relay::Plan::collect(db, source, position.source, Some(call), view)?
             .map(|plan| (plan, position.source))
     } else {
         None
@@ -2625,11 +2567,11 @@ fn read_current(
     let mut legacy_plans = Vec::new();
     let need_latest_turn =
         need_pending_turn || !causal.is_empty() || include_home_detail || home_activity.is_some();
-    if harness == "claude" && need_latest_turn {
-        let trace_spawn = matches!(target, Target::Turns([turn], _)
-            if *turn == crate::model::spawn_turn_id(&harness, key));
-        if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view, trace_spawn)?
-        {
+    if harness == "claude"
+        && need_latest_turn
+        && !matches!(target, Target::SenderAnchor(_) | Target::SenderWindow(_))
+    {
+        if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view)? {
             legacy_plans.push((owner, plan));
         }
         let mut children = db
@@ -2652,7 +2594,7 @@ fn read_current(
             if count > 128 {
                 return Err(index("Selected legacy relay child budget exhausted"));
             }
-            if let Some(plan) = parent_relay::Plan::collect(db, source, child, None, view, false)? {
+            if let Some(plan) = parent_relay::Plan::collect(db, source, child, None, view)? {
                 legacy_plans.push((child, plan));
             }
         }
@@ -2743,14 +2685,12 @@ fn read_current(
         first.into_mut().push(receipt);
     }
     let mut legacy_completion = None;
-    let mut trace_completion = None;
     let mut incoming = BTreeMap::new();
     let mut legacy_sender = BTreeMap::new();
     for (child, plan) in legacy_plans {
         let resolved = resolve(plan, child)?;
         if child == owner {
             legacy_completion = resolved.completion;
-            trace_completion = resolved.trace_completion;
         } else {
             if include_home_detail {
                 for turn in resolved.incoming.values() {
@@ -3113,7 +3053,6 @@ fn read_current(
         latest_turn,
         runtime_status,
         legacy_completion,
-        trace_completion,
         records,
         reply_records,
         fields,

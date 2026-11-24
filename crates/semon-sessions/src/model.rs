@@ -26,7 +26,6 @@ use serde::{Deserialize, Serialize};
 
 mod native_text;
 mod relay_match;
-pub(crate) use relay_match::{ClaudeRunStep, group_claude_runs};
 mod turns;
 pub(crate) use native_text::notification_result;
 pub(crate) use native_text::{

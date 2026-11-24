@@ -20,7 +20,7 @@ import {
 } from '../lib/sessionRoute';
 import { renderTraceScreen, type Hop } from '../lib/trace';
 import { HARNESSES, HARNESS, I, STATE } from './registry';
-import { parseRecordedRelationship } from '../domain/relationships';
+import { parseRecordedRelationship, senderRelationshipPresentation } from '../domain/relationships';
 import { parseRecordedStatus } from '../domain/sessionDetails';
 import type { CatalogSession } from '../state/catalog-wire';
 
@@ -422,7 +422,7 @@ export function reachableTraceSummary(root: Turn, starts: Map<string, Turn>, inc
     for (const edge of turn.sent) {
       if (edge.kind === 'move') continue;
       handoffs++;
-      if (edge.kind === 'toyou') continue;
+      if (edge.kind === 'toyou' || edge.reason) continue;
       sessions.add(edge.to);
       if (edge.kind === 'spawn' || edge.kind === 'relay') {
         const child = starts.get(edge.id);
@@ -813,8 +813,9 @@ export function renderCausalTrace(
     if (seen.has(turn.id)) return;
     seen.add(turn.id);
     for (const edge of turn.sent) {
-      const child = data.starts.get(edge.id),
-        unjoinedRelay = traceQualifiedUnjoinedRelay(data, edge, !!child),
+      const sender = senderRelationshipPresentation(edge),
+        child = sender ? undefined : data.starts.get(edge.id),
+        unjoinedRelay = sender ? undefined : traceQualifiedUnjoinedRelay(data, edge, !!child),
         isResult = edge.kind === 'toyou' && edge.ask === 'result',
         edgeOutcome = traceHandoffOutcome(edge, data.readResults);
       hops.push({
@@ -824,15 +825,17 @@ export function renderCausalTrace(
         icon: I[traceHandoffIconKey(edge)],
         handoff: edge.id,
         turn: child?.id,
-        parts: isResult
-          ? [{ className: 'verb', text: edgeOutcome.text ?? '' }]
-          : traceSentenceParts(
-              edge,
-              sessionPart,
-              data.starts,
-              turn.id,
-              data.sessions[edge.to]?.kind,
-            ),
+        parts:
+          sender?.parts ??
+          (isResult
+            ? [{ className: 'verb', text: edgeOutcome.text ?? '' }]
+            : traceSentenceParts(
+                edge,
+                sessionPart,
+                data.starts,
+                turn.id,
+                data.sessions[edge.to]?.kind,
+              )),
         time: clock(edge.at, now),
         brief: edge.kind === 'toyou' && edge.ask === 'result' ? undefined : edge.brief || undefined,
         answers: edge.kind === 'toyou' && Array.isArray(edge.answer) ? edge.answer : undefined,
@@ -847,11 +850,12 @@ export function renderCausalTrace(
                   : {
                       state: edgeOutcome.state,
                       stateLabel: STATE[edgeOutcome.state] ?? edgeOutcome.state,
-                      text: edgeOutcome.text ?? '',
+                      text: sender?.status ?? edgeOutcome.text ?? '',
                       note:
-                        (edge.kind === 'spawn' || edge.kind === 'relay') && !child
+                        sender?.reason ??
+                        ((edge.kind === 'spawn' || edge.kind === 'relay') && !child
                           ? "Its turn isn't in these logs"
-                          : undefined,
+                          : undefined),
                       ...(unjoinedRelay
                         ? {
                             ...sessionMeta(unjoinedRelay.session, undefined, edgeOutcome),

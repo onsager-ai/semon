@@ -20,7 +20,6 @@ fn certified_parent_relay(
     identity: &warehouse::RetainedIdentity,
     parents: &[(i64, SessionSourceRef)],
     call: Option<(&Address, u32)>,
-    trace: bool,
 ) -> Result<Option<parent_relay::Plan<SessionSourceRef>>, ReadError> {
     if identity.harness != "claude" {
         return Ok(None);
@@ -38,18 +37,6 @@ fn certified_parent_relay(
     };
     let receipt: crate::model::summary::CatalogSource =
         serde_json::from_str(&receipt).map_err(index)?;
-    certified_parent_relay_member(tx, source, identity.owner, &receipt, parents, call, trace)
-}
-
-fn certified_parent_relay_member(
-    tx: &rusqlite::Connection,
-    source: &Source<'_>,
-    child: i64,
-    receipt: &crate::model::summary::CatalogSource,
-    parents: &[(i64, SessionSourceRef)],
-    call: Option<(&Address, u32)>,
-    trace: bool,
-) -> Result<Option<parent_relay::Plan<SessionSourceRef>>, ReadError> {
     let Some(path) = receipt
         .path
         .to_str()
@@ -57,7 +44,7 @@ fn certified_parent_relay_member(
     else {
         return Ok(None);
     };
-    let Some(storage_parent) = claude_storage_parent(Path::new(path), &receipt.native_id) else {
+    let Some(storage_parent) = claude_storage_parent(Path::new(path), &identity.native_id) else {
         return Ok(None);
     };
     if !parents.iter().any(|(_, parent)| {
@@ -74,7 +61,7 @@ fn certified_parent_relay_member(
                 "SELECT EXISTS(SELECT 1 FROM fact_record WHERE source=?1 AND pos=?2
              AND block=0 AND occurrence=?3 AND NOT gap)",
                 params![
-                    child,
+                    identity.owner,
                     i64::try_from(address.offset).map_err(index)?,
                     address.occurrence
                 ],
@@ -85,15 +72,14 @@ fn certified_parent_relay_member(
             return Ok(None);
         }
     }
-    let reference = frozen_reference("claude", path, receipt);
+    let reference = frozen_reference(&identity.harness, path, &receipt);
     parent_relay::Plan::collect_certified(
         tx,
-        child,
+        identity.owner,
         reference,
         receipt.claude_agent_call(),
         call,
         parents,
-        trace,
     )
 }
 
@@ -155,33 +141,6 @@ pub(in super::super) fn retained_peer_window(
         cursor,
         provider.unwrap_or(&archive),
         Some((peer, provider.is_none())),
-    )
-}
-
-pub(in super::super) fn retained_spawn_window(
-    view: &ReadView<'_>,
-    source: &Source<'_>,
-    key: &str,
-    peer: PeerBinding<'_>,
-    provider: Option<&dyn SessionSourceReader>,
-) -> Result<Component, ReadError> {
-    let harness = {
-        let tx = view.lock()?;
-        let identity = warehouse::retained_identity(&tx, &source.namespace, peer.trace)
-            .map_err(super::super::retained_error)?;
-        retained_participant(&tx, source, &identity, peer, key)?
-            .0
-            .harness
-    };
-    let turn = crate::model::spawn_turn_id(&harness, key);
-    read_frozen(
-        view,
-        source,
-        key,
-        Target::Turns(&[&turn], None),
-        None,
-        provider.unwrap_or(&view.archive),
-        (key != peer.trace).then_some((peer, provider.is_none())),
     )
 }
 
@@ -428,9 +387,11 @@ pub(super) fn read_frozen(
 ) -> Result<Component, ReadError> {
     let (direction, address) = match target {
         Target::Page(_, direction) => (direction, None),
-        Target::Turns(..) | Target::Annotations(_) | Target::Activity(_) => {
-            (Direction::Forward, None)
-        }
+        Target::Turns(..)
+        | Target::SenderAnchor(_)
+        | Target::SenderWindow(_)
+        | Target::Annotations(_)
+        | Target::Activity(_) => (Direction::Forward, None),
         Target::Address(address, Some(binding), _) => {
             (Direction::Reverse, Some((address, binding)))
         }
@@ -506,7 +467,10 @@ pub(super) fn read_frozen(
         let (observed, current) =
             warehouse::retained_peer(&tx, &source.namespace, &identity, peer.witness, key)
                 .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
-        if observed.harness == "claude" && identity.harness == "claude" {
+        if observed.harness == "claude"
+            && identity.harness == "claude"
+            && !matches!(target, Target::SenderAnchor(_) | Target::SenderWindow(_))
+        {
             let parents = observed
                 .members
                 .iter()
@@ -523,9 +487,7 @@ pub(super) fn read_frozen(
                     ))
                 })
                 .collect::<Result<Vec<_>, ReadError>>()?;
-            if let Some(plan) =
-                certified_parent_relay(&tx, source, &identity, &parents, None, false)?
-            {
+            if let Some(plan) = certified_parent_relay(&tx, source, &identity, &parents, None)? {
                 legacy_plans.push((peer.trace.to_owned(), identity.owner, plan));
             }
         }
@@ -606,7 +568,6 @@ pub(super) fn read_frozen(
                     member.receipt.claude_agent_call(),
                     None,
                     &parents,
-                    false,
                 )? {
                     if current && !source.provider_only() {
                         let ledger: String = tx
@@ -766,7 +727,7 @@ pub(super) fn read_frozen(
                 annotation_members.insert(id, ((*reference).clone(), revision, predecessors));
                 continue;
             }
-            if let Target::Turns(turns, _) = target {
+            if let Target::Turns(turns, _) | Target::SenderAnchor(turns) = target {
                 member_turn_positions(
                     &tx,
                     &mut positions,
@@ -805,7 +766,13 @@ pub(super) fn read_frozen(
                     0,
                     receipt.offset,
                     None,
-                    direction.frontier(cursor.map(|cursor| cursor.after), id),
+                    direction.frontier(
+                        match target {
+                            Target::SenderWindow(after) => Some(after),
+                            _ => cursor.map(|cursor| cursor.after),
+                        },
+                        id,
+                    ),
                 )
             };
             member_positions(
@@ -1245,7 +1212,6 @@ pub(super) fn read_frozen(
         latest_turn,
         runtime_status: None,
         legacy_completion: None,
-        trace_completion: None,
         records,
         reply_records,
         fields,
@@ -1393,6 +1359,7 @@ pub(in super::super) fn retained_peer_relay_address(
     .map(|(address, _)| address)
 }
 
+#[cfg(test)]
 pub(in super::super) fn retained_relay_in_view(
     view: &ReadView<'_>,
     source: &Source<'_>,
@@ -1409,182 +1376,148 @@ pub(in super::super) fn retained_relay_in_view(
     )
     };
     let mut matched = None;
-    let record = read_retained_peer_in_view(
-        view,
-        source,
-        PeerBinding { trace, witness },
-        peer,
-        provider,
-        PAGE_BYTES,
-        |db, (identity, observed), _, _| {
-            let tx = db.lock().map_err(index)?;
-            let incarnation: String = tx
-                .query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
-                    r.get(0)
-                })
-                .map_err(index)?;
-            let origin = encode(&(
-                source.namespace.as_str(),
-                CatalogReadScope::RetainedHistory,
-                trace,
-                &incarnation,
-            ))?;
-            let sender_bounds =
-                retained_member_bounds(&tx, source, identity, binding, sender, Some(&send.path))?;
-            let bounds = encode(
-                &observed
-                    .members
-                    .iter()
-                    .map(|m| (m.source, m.receipt.offset))
-                    .collect::<BTreeMap<_, _>>(),
-            )?;
-            let mut participant_bounds = identity
-                .observed_peers()
-                .map_err(index)?
-                .into_values()
-                .flat_map(|peer| {
-                    peer.members
-                        .into_iter()
-                        .map(|member| (member.source, member.receipt.offset))
-                })
-                .collect::<BTreeMap<_, _>>();
-            participant_bounds.extend(
-                frozen_members(&tx, identity.binding)?
-                    .into_iter()
-                    .map(|member| (member.id, member.receipt.offset)),
-            );
-            let (sender_component, _) =
-                retained_participant(&tx, source, identity, binding, sender)?;
-            let recipient_ids = encode(
-                &std::iter::once(peer)
-                    .chain(std::iter::once(observed.native_id.as_str()))
-                    .chain(
-                        observed
-                            .members
-                            .iter()
-                            .map(|member| member.receipt.native_id.as_str()),
-                    )
-                    .collect::<BTreeSet<_>>(),
-            )?;
-            let storage_parent = sender_component.harness == "claude"
-                && observed.harness == "claude"
-                && sender_component.members.iter().any(|child| {
-                    claude_storage_parent(&child.receipt.path, &child.receipt.native_id)
-                        .is_some_and(|parent| {
-                            observed
-                                .members
-                                .iter()
-                                .any(|member| member.receipt.path.with_extension("") == parent)
-                        })
-                });
-            let mut query = tx
-                .prepare_cached(include_str!("retained_relay.sql"))
-                .map_err(index)?;
-            let mut rows = query
-                .query(params![
-                    sender_bounds,
-                    i64::try_from(send.offset).map_err(index)?,
-                    send.block,
-                    send.occurrence,
-                    block,
-                    bounds,
-                    encode(&participant_bounds)?,
-                    recipient_ids,
-                    storage_parent
-                ])
-                .map_err(index)?;
-            let Some(row) = rows.next().map_err(index)? else {
-                return Err(unavailable());
-            };
-            let (id, offset, occurrence, correlation, time) = (
-                row.get(0).map_err(index)?,
-                row.get(1).map_err(index)?,
-                row.get(2).map_err(index)?,
-                row.get::<_, String>(3).map_err(index)?,
-                row.get(4).map_err(index)?,
-            );
+    let record = read_retained_peer_in_view(view, source, PeerBinding { trace, witness }, peer, provider, PAGE_BYTES, |db, (identity, observed), parents, read| {
+        let tx = db.lock().map_err(index)?;
+        let incarnation: String = tx
+            .query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
+                r.get(0)
+            })
+            .map_err(index)?;
+        let origin = encode(&(
+            source.namespace.as_str(),
+            CatalogReadScope::RetainedHistory,
+            trace,
+            &incarnation,
+        ))?;
+        let sender_bounds = retained_member_bounds(&tx, source, identity, binding, sender, Some(&send.path))?;
+        let bounds = encode(
+            &observed
+                .members
+                .iter()
+                .map(|m| (m.source, m.receipt.offset))
+                .collect::<BTreeMap<_, _>>(),
+        )?;
+        let mut query = tx
+            .prepare_cached(include_str!("retained_relay.sql"))
+            .map_err(index)?;
+        let mut rows = query
+            .query(params![
+                sender_bounds,
+                i64::try_from(send.offset).map_err(index)?,
+                send.block,
+                send.occurrence,
+                block,
+                bounds
+            ])
+            .map_err(index)?;
+        let correlated = if let Some(row) = rows.next().map_err(index)? {
+            let hit = (row.get(0).map_err(index)?, row.get(1).map_err(index)?,
+                row.get(2).map_err(index)?, row.get::<_, String>(3).map_err(index)?,
+                row.get(4).map_err(index)?);
             if rows.next().map_err(index)?.is_some() {
                 return Err(unavailable());
             }
-            drop(rows);
-            drop(query);
-            let offset_u64 = u64::try_from(offset).map_err(index)?;
-            let position = Position {
-                source: id,
-                time,
-                offset,
-                block: 0,
-                occurrence,
-            };
-            let mut search = causal::TurnSearch::new(&tx, std::iter::once(position))?;
-            let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
-            let mut address = None;
-            for member in &observed.members {
-                let reference = &member.receipt;
-                let path = reference
-                    .path
-                    .to_str()
-                    .and_then(|path| relative(source.options, &observed.harness, path))
-                    .ok_or_else(unavailable)?;
-                let predecessors = predecessor_bounds(
-                    &mut copies,
-                    &observed.harness,
-                    &bounds,
-                    &reference.native_id,
-                    member.source,
-                )?;
-                search.consider(
-                    peer,
-                    &observed.harness,
-                    causal::BoundaryMember {
-                        id: member.source,
-                        end: i64::try_from(reference.offset).map_err(index)?,
-                        predecessors: &predecessors,
-                        launch_at: None,
-                        native_id: &reference.native_id,
-                        path,
+            Some(hit)
+        } else {
+            None
+        };
+        drop(rows);
+        drop(query);
+        let plan = if correlated.is_none() && sender == trace && peer != trace {
+            Some(certified_parent_relay(&tx, source, identity, parents, Some((send, block)))?
+                .ok_or_else(unavailable)?)
+        } else {
+            None
+        };
+        drop(tx);
+        let mut incoming = BTreeMap::new();
+        let (id, offset, occurrence, correlation, time, legacy_turn) = if let Some((id, offset, occurrence, correlation, time)) = correlated {
+            (id, offset, occurrence, Some(correlation), time, None)
+        } else {
+            let matched = plan.ok_or_else(unavailable)?.resolve(identity.owner, |_, reference, offset| read(reference, offset))?;
+            let receipt = matched.matched.ok_or_else(unavailable)?;
+            let (id, _) = parents.iter().find(|(_, parent)| parent.path == receipt.path).ok_or_else(unavailable)?;
+            let offset = i64::try_from(receipt.offset).map_err(index)?;
+            let tx = db.lock().map_err(index)?;
+            let occurrence = tx.query_row(
+                "SELECT occurrence FROM fact_record WHERE source=?1 AND pos=?2 AND block=0 AND NOT gap",
+                params![id, offset], |row| row.get(0),
+            ).optional().map_err(index)?.ok_or_else(unavailable)?;
+            incoming = matched.incoming;
+            (*id, offset, occurrence, None, receipt.at.unwrap_or(i64::MIN), matched.matched_legacy_turn)
+        };
+        let offset_u64 = u64::try_from(offset).map_err(index)?;
+        let position = Position {
+            source: id,
+            time,
+            offset,
+            block: 0,
+            occurrence,
+        };
+        let tx = db.lock().map_err(index)?;
+        let mut search = causal::TurnSearch::new(&tx, std::iter::once(position))?;
+        let legacy = encode(&incoming)?;
+        let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
+        let mut address = None;
+        for member in &observed.members {
+            let reference = &member.receipt;
+            let path = reference
+                .path
+                .to_str()
+                .and_then(|path| relative(source.options, &observed.harness, path))
+                .ok_or_else(unavailable)?;
+            let predecessors = predecessor_bounds(
+                &mut copies,
+                &observed.harness,
+                &bounds,
+                &reference.native_id,
+                member.source,
+            )?;
+            search.consider(
+                peer,
+                &observed.harness,
+                causal::BoundaryMember {
+                    id: member.source,
+                    end: i64::try_from(reference.offset).map_err(index)?,
+                    predecessors: &predecessors,
+                    launch_at: None,
+                    native_id: &reference.native_id,
+                    path,
+                },
+                &legacy,
+            )?;
+            if member.source == id {
+                address = Some((
+                    Address {
+                        path: path.into(),
+                        offset: offset_u64,
+                        block: 0,
+                        occurrence,
                     },
-                    "{}",
-                )?;
-                if member.source == id {
-                    address = Some((
-                        Address {
-                            path: path.into(),
-                            offset: offset_u64,
-                            block: 0,
-                            occurrence,
-                        },
-                        crate::model::incoming_relay_turn_id(
-                            Some(&correlation),
-                            &reference.native_id,
-                            offset_u64,
-                        ),
-                    ));
-                }
+                    legacy_turn.clone().unwrap_or_else(|| crate::model::incoming_relay_turn_id(
+                            correlation.as_deref(), &reference.native_id, offset_u64,
+                        )),
+                ));
             }
-            let (address, turn) = address.ok_or_else(unavailable)?;
-            if !search
-                .finish()
-                .remove(&position)
-                .flatten()
-                .is_some_and(|candidate| {
-                    candidate.handoff
-                        && !candidate.head
-                        && candidate.address == address
-                        && candidate.id == turn
-                })
-            {
-                return Err(unavailable());
-            }
-            let selection = if peer == trace {
-                origin
-            } else {
-                encode(&(origin, peer))?
-            };
-            matched = Some((component_binding(&selection, witness)?, turn));
-            Ok(Some(address))
-        },
-    )?
+        }
+        let (address, turn) = address.ok_or_else(unavailable)?;
+        if !search
+            .finish()
+            .remove(&position)
+            .flatten()
+            .is_some_and(|candidate| {
+                candidate.handoff
+                    && !candidate.head
+                    && candidate.address == address
+                    && candidate.id == turn
+            })
+        {
+            return Err(unavailable());
+        }
+        let selection = if peer == trace { origin } else { encode(&(origin, peer))? };
+        matched = Some((component_binding(&selection, witness)?, turn));
+        Ok(Some(address))
+    })?
     .ok_or_else(unavailable)?;
     let entry_id = crate::transcript_range::native_entry_id(
         source.namespace.as_str(),
@@ -1621,6 +1554,7 @@ pub(in super::super) fn retained_peer_launch_call(
     retained_peer_launch_in_view(&view, source, trace, witness, peer, provider)
 }
 
+#[cfg(test)]
 pub(in super::super) fn retained_peer_launch_in_view(
     view: &ReadView<'_>,
     source: &Source<'_>,
@@ -1629,101 +1563,47 @@ pub(in super::super) fn retained_peer_launch_in_view(
     peer: &str,
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<(Address, u32, crate::ToolCall), ReadError> {
-    let (address, block, tool, unique) = retained_launch_between(
-        view,
-        source,
-        PeerBinding { trace, witness },
-        trace,
-        peer,
-        provider,
-        None,
-    )?;
-    if !unique {
-        return Err(ReadError::PeerUnavailable(
-            "More than one certified child claims the launch.".into(),
-        ));
-    }
-    Ok((address, block, tool))
-}
-
-pub(in super::super) fn retained_launch_between(
-    view: &ReadView<'_>,
-    source: &Source<'_>,
-    binding: PeerBinding<'_>,
-    child_key: &str,
-    parent_key: &str,
-    provider: Option<&dyn SessionSourceReader>,
-    visible: Option<&BTreeSet<&str>>,
-) -> Result<(Address, u32, crate::ToolCall, bool), ReadError> {
     let unavailable = || {
         ReadError::PeerUnavailable(
             "No exact launch call could be proven in the certified prefixes.".into(),
         )
     };
-    if child_key == parent_key {
+    if trace == peer {
         return Err(unavailable());
     }
     let mut matched_call = None;
-    let mut unique_child = true;
     let record = read_retained_peer_in_view(
         view,
         source,
-        binding,
-        parent_key,
+        PeerBinding { trace, witness },
+        peer,
         provider,
         crate::handoff::MAX_INPUT_BYTES,
         |db, (identity, observed), parents, read| {
             let tx = db.lock().map_err(index)?;
-            let (child, _) = retained_participant(&tx, source, identity, binding, child_key)?;
-            let member = child.members.iter().find(|member| member.source == child.owner)
+            let child_members = frozen_members(&tx, identity.binding)?;
+            let child = child_members
+                .iter()
+                .find(|member| member.id == identity.owner)
                 .ok_or_else(unavailable)?;
-            let child_carrier = member.receipt.path.to_str().ok_or_else(unavailable)?;
-            let child_path = relative(source.options, &child.harness, child_carrier)
+            let child_carrier = child.receipt.path.to_str().ok_or_else(unavailable)?;
+            let child_path = relative(source.options, &identity.harness, child_carrier)
                 .ok_or_else(unavailable)?;
-            let child_reference = frozen_reference(&child.harness, child_path, &member.receipt);
-            let claude_parent = (child.harness == "claude" && observed.harness == "claude")
-                .then(|| claude_storage_parent(Path::new(child_path), &child.native_id))
+            let child_reference = frozen_reference(&identity.harness, child_path, &child.receipt);
+            let claude_parent = (identity.harness == "claude" && observed.harness == "claude")
+                .then(|| claude_storage_parent(Path::new(child_path), &identity.native_id))
                 .flatten()
                 .filter(|storage_parent| parents.iter().any(|(_, parent)| {
                     *storage_parent == Path::new(&parent.path).with_extension("")
                 }));
-            let native_call = claude_parent.and_then(|_| member.receipt.claude_agent_call());
-            let codex_spawn = if child.harness == "codex" && observed.harness == "codex" {
-                tx.query_row(
-                    "SELECT nickname FROM fact_session_observation WHERE source=?1 AND pos=0
-                     AND pos<?2 AND kind='header' AND parent_id=?3 AND nickname IS NOT NULL
-                     AND EXISTS (SELECT 1 FROM fact_record WHERE source=?1 AND pos=0 AND kind='session_meta' AND NOT gap)
-                     ORDER BY occurrence DESC LIMIT 1",
-                    params![member.source, i64::try_from(child_reference.offset).map_err(index)?, observed.native_id],
-                    |row| row.get::<_, String>(0),
-                ).optional().map_err(index)?
-            } else { None };
-            if let Some(name) = &codex_spawn {
-                let peers = identity.observed_peers().map_err(index)?;
-                let mut members = peers.values().filter(|peer| peer.harness == "codex")
-                    .flat_map(|peer| peer.members.iter().filter(move |member| member.source == peer.owner))
-                    .map(|member| (member.source, member.receipt.offset)).collect::<BTreeMap<_, _>>();
-                if identity.harness == "codex" {
-                    for member in frozen_members(&tx, identity.binding)? {
-                        if member.id == identity.owner { members.insert(member.id, member.receipt.offset); }
-                    }
-                }
-                unique_child = tx.query_row(
-                    "SELECT count(DISTINCT p.source)=1 FROM json_each(?1) m
-                     CROSS JOIN fact_session_observation p ON p.source=CAST(m.key AS INTEGER)
-                       AND p.pos=0 AND p.pos<m.value AND p.kind='header'
-                       AND p.parent_id=?2 AND p.nickname=?3
-                     CROSS JOIN fact_record r ON r.source=p.source AND r.pos=0 AND r.kind='session_meta' AND NOT r.gap",
-                    params![encode(&members)?, observed.native_id, name], |row| row.get(0),
-                ).map_err(index)?;
-            }
-            let marker = if native_call.is_none() && codex_spawn.is_none() {
+            let native_call = claude_parent.and_then(|_| child.receipt.claude_agent_call());
+            let marker = if native_call.is_none() {
                 let marker_offset: i64 = tx.query_row(
                     "SELECT p.pos FROM fact_parent_observation p
                      JOIN fact_record r ON r.source=p.source AND r.pos=p.pos AND r.block=0 AND NOT r.gap
                      WHERE p.source=?1 AND p.pos<?2 AND p.method='marker'
                      ORDER BY p.pos DESC,p.block DESC,p.occurrence DESC LIMIT 1",
-                    params![member.source, i64::try_from(child_reference.offset).map_err(index)?],
+                    params![child.id, i64::try_from(child_reference.offset).map_err(index)?],
                     |row| row.get(0),
                 ).optional().map_err(index)?.ok_or_else(unavailable)?;
                 drop(tx);
@@ -1736,7 +1616,7 @@ pub(in super::super) fn retained_launch_between(
                 None
             };
             let call_id = native_call.or_else(|| marker.as_ref().and_then(|marker| marker.tool_id.as_deref()));
-            let prompt = if call_id.is_none() && codex_spawn.is_none() {
+            let prompt = if call_id.is_none() {
                 Some(marker.as_ref().and_then(|marker| marker.handoff.as_deref()).ok_or_else(unavailable)?)
             } else {
                 None
@@ -1747,7 +1627,7 @@ pub(in super::super) fn retained_launch_between(
                     .map(|(id, reference)| (*id, reference.offset))
                     .collect::<BTreeMap<_, _>>(),
             )?;
-            let candidates = certified_launch_calls(db, &bounds, call_id, codex_spawn.as_deref())?;
+            let candidates = certified_launch_calls(db, &bounds, call_id)?;
             if candidates.len() > crate::handoff::MAX_CALLS {
                 return Err(unavailable());
             }
@@ -1773,27 +1653,6 @@ pub(in super::super) fn retained_launch_between(
                 if location.is_some() {
                     return Err(unavailable());
                 }
-                if let Some(visible) = visible {
-                    let tx = db.lock().map_err(index)?;
-                    let pos = i64::try_from(offset).map_err(index)?;
-                    let time = tx.query_row("SELECT coalesce(ts,-9223372036854775808) FROM fact_record
-                        WHERE source=?1 AND pos=?2 AND block=0 AND occurrence=?3", params![id,pos,occurrence], |row| row.get(0)).map_err(index)?;
-                    let at = Position { time, source:id, offset:pos, block:0, occurrence };
-                    let mut search = causal::TurnSearch::new(&tx, std::iter::once(at))?;
-                    let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
-                    for (id, reference) in parents {
-                        let predecessors = predecessor_bounds(&mut copies, &observed.harness, &bounds, &reference.native_id, *id)?;
-                        search.consider(parent_key, &observed.harness, causal::BoundaryMember {
-                            id: *id, end: i64::try_from(reference.offset).map_err(index)?, predecessors: &predecessors,
-                            launch_at: None, native_id: &reference.native_id, path: &reference.path,
-                        }, "{}")?;
-                    }
-                    // The native reducer qualifies an incoming child/relay boundary.
-                    let ordinary = !visible.iter().any(|id| id.starts_with(['r','s']));
-                    if ordinary && !search.finish().remove(&at).flatten().is_some_and(|turn| visible.contains(turn.id.as_str())) {
-                        return Err(unavailable());
-                    }
-                }
                 matched_call = Some((
                     block,
                     crate::ToolCall {
@@ -1813,82 +1672,17 @@ pub(in super::super) fn retained_launch_between(
     )?
     .ok_or_else(unavailable)?;
     let (block, tool) = matched_call.ok_or_else(unavailable)?;
-    Ok((record.address, block, tool, unique_child))
+    Ok((record.address, block, tool))
 }
 
-/// Qualify the return against the original child's and observed parent's prefixes.
-pub(in super::super) fn retained_spawn_return(
-    view: &ReadView<'_>,
-    source: &Source<'_>,
-    peer: PeerBinding<'_>,
-    parent: &str,
-    provider: Option<&dyn SessionSourceReader>,
-) -> Result<Option<TraceCompletion>, ReadError> {
-    retained_spawn_return_between(view, source, peer, peer.trace, parent, provider)
-}
-
-pub(in super::super) fn retained_spawn_return_between(
-    view: &ReadView<'_>,
-    source: &Source<'_>,
-    peer: PeerBinding<'_>,
-    child_key: &str,
-    parent: &str,
-    provider: Option<&dyn SessionSourceReader>,
-) -> Result<Option<TraceCompletion>, ReadError> {
-    let mut completion = None;
-    read_retained_peer_with_companion(
-        view,
-        source,
-        peer,
-        parent,
-        provider,
-        PAGE_BYTES,
-        Some(child_key),
-        |db, (identity, _), parents, read| {
-            let (child, plan) = {
-                let tx = db.lock().map_err(index)?;
-                let (child, _) = retained_participant(&tx, source, identity, peer, child_key)?;
-                if child.harness != "claude" {
-                    return Ok(None);
-                }
-                let Some(member) = child
-                    .members
-                    .iter()
-                    .find(|member| member.source == child.owner)
-                else {
-                    return Ok(None);
-                };
-                (
-                    child.owner,
-                    certified_parent_relay_member(
-                        &tx,
-                        source,
-                        child.owner,
-                        &member.receipt,
-                        parents,
-                        None,
-                        true,
-                    )?,
-                )
-            };
-            if let Some(plan) = plan {
-                completion = plan
-                    .resolve(child, |_, reference, offset| read(reference, offset))?
-                    .trace_completion;
-            }
-            Ok(None)
-        },
-    )?;
-    Ok(completion)
-}
-
+#[cfg(test)]
 type LaunchCallRow = (i64, i64, i64, u32, String, String);
 
+#[cfg(test)]
 fn certified_launch_calls(
     db: &chunk_proofs::Snapshot,
     bounds: &str,
     call: Option<&str>,
-    spawn_name: Option<&str>,
 ) -> Result<Vec<LaunchCallRow>, ReadError> {
     let tx = db.lock().map_err(index)?;
     let mut statement = tx
@@ -1898,19 +1692,13 @@ fn certified_launch_calls(
          CROSS JOIN fact_tool_call c ON c.source=CAST(prefix.key AS INTEGER) AND c.pos<prefix.value
          CROSS JOIN fact_record r ON r.source=c.source AND r.pos=c.pos AND r.block=0 AND NOT r.gap
          WHERE c.call_id IS NOT NULL AND c.tool IS NOT NULL AND
-           ((?2 IS NULL AND ?3 IS NULL AND c.tool IN ('Bash','Skill')) OR c.call_id=?2
-            OR (?3 IS NOT NULL AND c.tool IN ('spawn_agent','collaboration.spawn_agent') AND c.task_name=?3))
-         ORDER BY c.source,c.pos,c.block,c.occurrence LIMIT ?4",
+           ((?2 IS NULL AND c.tool IN ('Bash','Skill')) OR c.call_id=?2)
+         ORDER BY c.source,c.pos,c.block,c.occurrence LIMIT ?3",
         )
         .map_err(index)?;
     statement
         .query_map(
-            params![
-                bounds,
-                call,
-                spawn_name,
-                crate::handoff::MAX_CALLS as i64 + 1
-            ],
+            params![bounds, call, crate::handoff::MAX_CALLS as i64 + 1],
             |row| {
                 Ok((
                     row.get(0)?,
@@ -1927,6 +1715,7 @@ fn certified_launch_calls(
         .map_err(index)
 }
 
+#[cfg(test)]
 type CertifiedRecordRead<'a> =
     dyn FnMut(&SessionSourceRef, u64) -> Result<serde_json::Value, ReadError> + 'a;
 
@@ -2020,32 +1809,14 @@ pub(in super::super) fn retained_member_bounds(
     )
 }
 
+#[cfg(test)]
 fn read_retained_peer_in_view(
-    view: &ReadView<'_>,
-    source: &Source<'_>,
-    binding: PeerBinding<'_>,
-    peer: &str,
-    provider: Option<&dyn SessionSourceReader>,
-    bytes: usize,
-    select: impl FnOnce(
-        &Arc<chunk_proofs::Snapshot>,
-        (&warehouse::RetainedIdentity, &warehouse::ObservedPeer),
-        &[(i64, SessionSourceRef)],
-        &mut CertifiedRecordRead<'_>,
-    ) -> Result<Option<Address>, ReadError>,
-) -> Result<Option<Record>, ReadError> {
-    read_retained_peer_with_companion(view, source, binding, peer, provider, bytes, None, select)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn read_retained_peer_with_companion(
     view: &ReadView<'_>,
     source: &Source<'_>,
     PeerBinding { trace, witness }: PeerBinding<'_>,
     peer: &str,
     provider: Option<&dyn SessionSourceReader>,
     bytes: usize,
-    companion: Option<&str>,
     select: impl FnOnce(
         &Arc<chunk_proofs::Snapshot>,
         (&warehouse::RetainedIdentity, &warehouse::ObservedPeer),
@@ -2087,38 +1858,6 @@ fn read_retained_peer_with_companion(
             }
         }
         parents.push((member.source, reference));
-    }
-    if provider.is_none()
-        && let Some(key) = companion.filter(|key| *key != peer)
-    {
-        let (companion, current) =
-            retained_participant(&tx, source, &identity, PeerBinding { trace, witness }, key)?;
-        if current {
-            for member in &companion.members {
-                let carrier = member
-                    .receipt
-                    .path
-                    .to_str()
-                    .ok_or(ReadError::RetainedUnverified)?;
-                let path = relative(source.options, &companion.harness, carrier)
-                    .ok_or(ReadError::RetainedUnverified)?;
-                if let Availability::Expected(Some(stat)) =
-                    source.availability(&companion.harness, carrier)?
-                {
-                    let ledger: String = tx
-                        .query_row(
-                            "SELECT ledger FROM warehouse_source WHERE source=?1",
-                            [member.source],
-                            |row| row.get(0),
-                        )
-                        .map_err(index)?;
-                    let ledger = decode(&ledger)?;
-                    if stable_or_grown(&ledger.stat, &stat) {
-                        carriers.insert(path.into(), (carrier.into(), ledger));
-                    }
-                }
-            }
-        }
     }
     drop(tx);
     let peer_reader = FrozenPeerReader {

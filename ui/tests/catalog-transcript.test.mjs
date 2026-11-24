@@ -8,7 +8,7 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { parseCatalogNativeTranscriptPage, parseCatalogTranscriptPage } = await import(
+const { parseCatalogTranscriptPage } = await import(
   'data:text/javascript;base64,' + Buffer.from(outputFiles[0].text).toString('base64')
 );
 const source = () => ({
@@ -478,73 +478,4 @@ test('failed native message, thought, tool and action reads recover without cros
         entry.k === 'tool' ? entry.out : entry.text,
       );
     }
-});
-
-test('addressed native turns accept declared outgoing links beyond the page', () => {
-  const old = page(),
-    binding = 'a'.repeat(64),
-    source = old.identity.source_refs[0].source,
-    identity = { ...old.identity, read_scope: 'current' },
-    turn = {
-      id: 'native-turn',
-      sid: 'session',
-      sent: ['send'],
-      u: true,
-      end: { st: 'off', why: 'unavailable' },
-      last: false,
-    },
-    edge = {
-      id: 'send',
-      kind: 'relay',
-      from: 'session',
-      to: 'worker',
-      status: 'off',
-      at: 1,
-      declined: false,
-      source_turn: turn.id,
-      reason: 'delivery_unverified',
-    },
-    payload = {
-      api: 1,
-      projection: 7,
-      identity,
-      source_key: identity.source_key,
-      catalog_key: identity.catalog_key,
-      read_scope: identity.read_scope,
-      selected: { harness: 'claude', native_id: 'native', title: null, model: null },
-      session: null,
-      binding,
-      errors_generation: binding,
-      position: 'address',
-      earlier_cursor: null,
-      entries: [
-        {
-          k: 'u',
-          turn: turn.id,
-          text: 'Start work',
-          entry_id: 'prompt',
-          provenance: { source, native_event_id: null, offset: 0, block: 0 },
-          address: {
-            record: { path: source.path, offset: 0, block: 0, occurrence: 0 },
-            binding,
-            block: 0,
-            entry_id: 'prompt',
-          },
-        },
-      ],
-      relationship_context: {
-        state: 'incomplete',
-        turn_ids: [turn.id],
-        turns: [turn],
-        handoffs: [edge],
-      },
-    };
-  const context = parseCatalogNativeTranscriptPage(payload).relationship_context;
-  assert.deepEqual(context.turns[0].sent, [edge.id]);
-  assert.equal(context.handoffs[0].reason, edge.reason);
-  edge.source_turn = 'different-turn';
-  assert.throws(
-    () => parseCatalogNativeTranscriptPage(payload),
-    /Invalid ranged relationship scope/,
-  );
 });

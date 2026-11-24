@@ -2,16 +2,28 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 const { outputFiles } = await build({
-  entryPoints: [new URL('../src/app/catalogTranscriptView.ts', import.meta.url).pathname],
+  stdin: {
+    contents: `
+      export { catalogTranscriptBlocks, recordedRelationshipViews } from './src/app/catalogTranscriptView.ts';
+      export { parseCausalTrace, reachableTraceSummary } from './src/app/tracePresentation.ts';
+      export { senderRelationshipPresentation } from './src/domain/relationships.ts';
+    `,
+    resolveDir: new URL('..', import.meta.url).pathname,
+  },
   bundle: true,
   write: false,
   format: 'esm',
   platform: 'node',
 });
-const { catalogTranscriptBlocks, recordedRelationshipViews, retainedTranscriptTrace } =
-  await import(
-    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
-  );
+const {
+  catalogTranscriptBlocks,
+  recordedRelationshipViews,
+  parseCausalTrace,
+  reachableTraceSummary,
+  senderRelationshipPresentation,
+} = await import(
+  'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+);
 test('recorded child cards retain kind, duration, steps and cost without claiming historical activity', () => {
   const previous = globalThis.matchMedia;
   globalThis.matchMedia = () => ({ matches: false });
@@ -449,35 +461,96 @@ test('clipped tool notices stay with tool details while message loading actions 
   );
 });
 
-test('unavailable outgoing actions never link through shared participant summaries', () => {
-  for (const kind of ['relay', 'spawn']) {
-    const [row] = recordedRelationshipViews(
-      entry(1, 'turn', { k: 'h', id: 'unknown' }),
-      {
-        edge: { id: 'unknown', kind, from: 'owner', to: 'child', status: 'off', at: 0 },
-        reason: kind === 'spawn' ? 'spawn_unverified' : 'legacy_relay',
+test('sender relay and spawn cards preserve the recorded outcome and never link their target', () => {
+  const edges = [
+    { id: 'relay', kind: 'relay', status: 'err', target_label: 'Peer alias' },
+    { id: 'spawn', kind: 'spawn', status: 'done', target_label: 'Inspect parser' },
+  ].map((edge) => ({
+    ...edge,
+    from: 'owner',
+    to: null,
+    at: 1,
+    declined: false,
+    reason: 'not linked yet',
+  }));
+  const payload = {
+    api: 1,
+    projection: 7,
+    source_key: 'local',
+    catalog_key: 'owner',
+    root: 'turn',
+    generation: '0'.repeat(64),
+    previews: {},
+    participants: {},
+    evidence: [],
+    frontier: [],
+    incomplete: false,
+    previews_incomplete: false,
+    sessions: {
+      owner: {
+        name: 'Sender',
+        harness: 'claude',
+        state: 'off',
+        model: '',
+        start: 0,
+        last: 2,
+        cost: { usd: null },
+        tokens: [0, 0, 0],
+        busy: [],
+        wait_edges: [],
+        wait_edges_truncated: false,
       },
+    },
+    turns: [
+      {
+        id: 'turn',
+        sid: 'owner',
+        at: 1,
+        start: null,
+        u: true,
+        end: { st: 'off', why: 'unavailable' },
+        sent: ['relay', 'spawn'],
+        last: true,
+      },
+    ],
+    handoffs: edges,
+  };
+  const trace = parseCausalTrace(payload, 'local', 'owner', 'turn');
+  assert.match(reachableTraceSummary(trace.root, trace.starts), /^1 session · 2 handoffs$/);
+  for (const [id, text, outcome] of [
+    ['relay', 'Sent to Peer alias', 'Sender recorded failure'],
+    ['spawn', 'Spawned Inspect parser', 'Sender recorded success'],
+  ]) {
+    const edge = trace.handoffs.get(id);
+    assert.equal(edge.reason, 'not linked yet');
+    assert.equal(edge.to, '');
+    assert.equal(trace.starts.has(id), false);
+    const traceCard = senderRelationshipPresentation(edge);
+    assert.equal(traceCard.reason, 'not linked yet');
+    assert.equal(traceCard.parts[0].text, text);
+    assert.equal(traceCard.parts[0].action, undefined);
+    const [card] = recordedRelationshipViews(
+      entry(1, 'turn', { k: 'h', id }),
+      { edge },
       'owner',
-      { child: { name: 'Known from an unrelated edge', harness: 'claude' } },
+      {},
       {},
     );
-    assert.equal(row.kind, 'event');
-    assert.equal(row.stateLabel, 'Unavailable');
-    assert.equal(row.result, kind === 'spawn' ? 'Spawn not linked' : 'Legacy relay, not linked');
-    assert.ok(row.parts.every((part) => !part.action));
+    assert.equal(card.kind, 'event');
+    assert.equal(card.parts[0].text, text);
+    assert.equal(card.parts[0].action, undefined);
+    assert.equal(card.href, undefined);
+    assert.equal(card.result, 'not linked yet');
+    assert.equal(card.stateLabel, outcome);
   }
-});
-
-test('a retained peer Trace action needs the selected turn address and keeps its witness', () => {
-  const peer = { trace: 'original', witness: 'a'.repeat(64) },
-    address = {
-      binding: 'b'.repeat(64),
-      entry_id: 'prompt',
-      block: 0,
-      record: { path: 'child.jsonl', offset: 21, block: 0, occurrence: 0 },
-    },
-    context = { turns: [{ id: 'turn', address }] };
-  assert.deepEqual(retainedTranscriptTrace('turn', context, peer), { address, peer });
-  assert.equal(retainedTranscriptTrace('different-turn', context, peer), null);
-  assert.deepEqual(retainedTranscriptTrace('turn', context), {});
+  assert.throws(
+    () =>
+      parseCausalTrace(
+        { ...payload, handoffs: [{ ...edges[0], to: 'peer' }, edges[1]] },
+        'local',
+        'owner',
+        'turn',
+      ),
+    /Invalid sender relationship target/,
+  );
 });
