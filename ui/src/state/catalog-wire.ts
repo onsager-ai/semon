@@ -143,6 +143,23 @@ function sourceReference(value: unknown): CatalogSourceReference {
   const row = object(value);
   return { source: parseCatalogSource(row.source), state: freshness(row.state) };
 }
+export function parseTranscriptObservation(
+  value: unknown,
+): NonNullable<CatalogSession['transcript']> {
+  const projection = object(value),
+    generation = text(projection.generation),
+    errorsGeneration = text(projection.errors_generation),
+    total = integer(projection.total);
+  if (
+    Object.keys(projection).length !== 3 ||
+    !/^[a-f0-9]{64}$/.test(generation) ||
+    !/^[a-f0-9]{64}$/.test(errorsGeneration) ||
+    total < 0
+  )
+    throw new Error('Invalid selected transcript observation');
+  return { generation, errorsGeneration, total };
+}
+
 export function parseCatalogSession(value: unknown): CatalogSession {
   const row = object(value),
     cost = object(row.cost),
@@ -166,22 +183,7 @@ export function parseCatalogSession(value: unknown): CatalogSession {
     lifecycle: row.lifecycle,
     details: row.details == null ? undefined : parseSessionDetails(row.details),
     status: parseRecordedStatus(row.status),
-    transcript:
-      row.transcript == null
-        ? undefined
-        : (() => {
-            const projection = object(row.transcript),
-              generation = text(projection.generation),
-              errorsGeneration = text(projection.errors_generation),
-              total = integer(projection.total);
-            if (
-              !/^[a-f0-9]{64}$/.test(generation) ||
-              !/^[a-f0-9]{64}$/.test(errorsGeneration) ||
-              total < 0
-            )
-              throw Error('Invalid selected transcript observation');
-            return { generation, errorsGeneration, total };
-          })(),
+    transcript: row.transcript == null ? undefined : parseTranscriptObservation(row.transcript),
     annotation: row.annotation == null ? undefined : parseSessionAnnotation(row.annotation),
     key: text(row.key),
     name: text(row.name),

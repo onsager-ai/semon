@@ -34,6 +34,7 @@ import { parseCatalogCapabilities, type CatalogCapabilities } from '../state/cat
 import {
   catalogSessionKey,
   parseCatalogPage,
+  parseTranscriptObservation,
   type CatalogPage,
   type CatalogSession,
 } from '../state/catalog-wire';
@@ -159,6 +160,7 @@ interface SelectedView {
   jumpGeneration: string | null;
   newCount: number;
   lastTotal: number | null;
+  nativeObservation?: CatalogSession['transcript'];
   queuedAfter?: { after: number | null; preservePosition: boolean };
   contextLoading?: boolean;
   contextText?: Map<
@@ -186,6 +188,8 @@ interface SelectedView {
     first: number;
     key?: string;
     ranges: { first: number; end: number }[];
+    restoreNativeRanges?: () => void;
+    following: boolean;
     expanded: Set<string>;
     findOpen: boolean;
     find?: string;
@@ -1543,7 +1547,7 @@ export function createCatalogViewer(
                 },
                 find() {
                   if (!active) return;
-                  active.errorMode = undefined;
+                  if (active.errorMode) closeAnnotations(active);
                   for (const node of active.root.querySelectorAll('.err-current'))
                     node.classList.remove('err-current');
                   active.findOpen = true;
@@ -1881,8 +1885,9 @@ export function createCatalogViewer(
     if (active !== view || !view.errorMode) return;
     for (const node of view.root.querySelectorAll('.err-current'))
       node.classList.remove('err-current');
-    const page = view.annotations,
-      target = page?.entries[(view.errorIndex ?? 0) - page.first];
+    const page = view.annotations;
+    if (page?.generation !== annotationGeneration(view)) return;
+    const target = page?.entries[(view.errorIndex ?? 0) - page.first];
     if (!target) return;
     const identity =
       'address' in target
@@ -1922,6 +1927,22 @@ export function createCatalogViewer(
     const top = document.querySelector('#topbar')!.getBoundingClientRect().bottom;
     const bottom = phone ? innerHeight : main.getBoundingClientRect().bottom;
     const delta = (row.top + row.bottom - top - bottom) / 2;
+    if (view.nativeStore) {
+      // Exact-address reads can contain one row. Give that row enough space
+      // to center even when the returned range has no neighboring content.
+      const scroller = phone ? document.scrollingElement! : main;
+      const before = Number.parseFloat(getComputedStyle(view.root).paddingBlockStart) || 0;
+      const after = Number.parseFloat(getComputedStyle(view.root).paddingBlockEnd) || 0;
+      const position = scroller.scrollTop + delta;
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      const lead = Math.max(0, Math.ceil(-position));
+      const trail = Math.max(0, Math.ceil(position - max));
+      if (lead) setGeometry(view.root, 'annotationLeading', before + lead);
+      if (trail) setGeometry(view.root, 'annotationTrailing', after + trail);
+      scroller.scrollTop = position + lead;
+      syncJump(view, true);
+      return;
+    }
     if (phone) window.scrollBy(0, delta);
     else main.scrollTop += delta;
     syncJump(view, true);
@@ -1938,7 +1959,13 @@ export function createCatalogViewer(
     view.errorRestore = undefined;
     for (const node of view.root.querySelectorAll('.err-current'))
       node.classList.remove('err-current');
-    if (restore) view.store.retainRanges(restore.ranges);
+    if (restore?.restoreNativeRanges) {
+      scope.clearTimeout(view.retry);
+      view.retry = undefined;
+      restore.restoreNativeRanges();
+      view.following = restore.following;
+      releaseGeometry(view.root, ['annotationLeading', 'annotationTrailing']);
+    } else if (restore) view.store.retainRanges(restore.ranges);
     view.renderedRevision = -1;
     drawSelected(view);
     const restoreScreen = () => {
@@ -1956,7 +1983,11 @@ export function createCatalogViewer(
       chrome();
       document.querySelector<HTMLElement>(restore.focus)?.focus({ preventScroll: true });
     };
-    if (restore?.key && !view.store.entries().some((item) => item.entry_id === restore.key))
+    if (
+      !view.nativeStore &&
+      restore?.key &&
+      !view.store.entries().some((item) => item.entry_id === restore.key)
+    )
       void loadSelected(view, restore.first).finally(() => scope.frame(restoreScreen));
     else scope.frame(restoreScreen);
     chrome();
@@ -1972,6 +2003,8 @@ export function createCatalogViewer(
         first: first?.slot ?? 0,
         key: first?.entry_id,
         ranges: view.store.loadedRanges(),
+        restoreNativeRanges: view.nativeStore?.saveRanges(),
+        following: view.following,
         findOpen: view.findOpen ?? false,
         find: view.find,
         filter: view.filter,
@@ -3403,6 +3436,7 @@ export function createCatalogViewer(
   async function loadNative(
     view: SelectedView,
     window: CatalogNativeWindow = { position: 'latest' },
+    refresh = false,
   ) {
     const store = view.nativeStore,
       epoch = view.navigationEpoch,
@@ -3452,7 +3486,7 @@ export function createCatalogViewer(
       if (view.errorMode && view.annotations?.generation !== annotationGeneration(view))
         void readAnnotations(view, true);
       chrome();
-      if (window.position === 'address')
+      if (window.position === 'address' && !refresh && !view.errorMode)
         scope.frame(() => {
           if (!current()) return;
           const target = [...view.root.querySelectorAll<HTMLElement>('[data-entry-key]')].find(
@@ -3603,24 +3637,64 @@ export function createCatalogViewer(
     }
   }
   async function observeSelected(view: SelectedView) {
-    if (view.nativeStore) {
-      if (
-        view.following &&
-        !view.loading &&
-        view.nativeStore.selectedPage()?.position !== 'address'
-      )
-        await loadNative(view);
-      return;
-    }
     if (disposed || active !== view || view.loading || view.observing) return;
+    if (view.nativeStore && view.readScope !== 'current') return;
     const source = view.sourceKey,
       p = params(view.readScope);
     p.set('sid', view.key);
-    p.set('limit', '1');
+    const epoch = view.navigationEpoch;
     view.observing = true;
     try {
+      if (view.nativeStore) {
+        p.set('observe', 'transcript');
+        const observationPage = object(await api('/api/sessions?' + p));
+        if (disposed || active !== view || view.navigationEpoch !== epoch || view.loading) return;
+        if (
+          observationPage.api !== 1 ||
+          observationPage.machine !== source ||
+          observationPage.catalog_key !== view.key ||
+          observationPage.read_scope !== view.readScope
+        )
+          throw new Error('Selected transcript observation changed');
+        const selected = view.nativeStore.selectedPage();
+        if (!selected) return;
+        if (view.observationFailure) {
+          view.observationFailure = undefined;
+          drawSelected(view);
+        }
+        const observation = parseTranscriptObservation(observationPage.transcript);
+        const previous = view.nativeObservation;
+        const changed =
+          observation.generation !== selected.identity.generation ||
+          observation.errorsGeneration !== selected.errorsGeneration ||
+          (previous?.generation === observation.generation && previous.total !== observation.total);
+        if (changed) {
+          const address = selected.position === 'address' ? selected.entries[0]?.address : null;
+          await loadNative(view, address ? { position: 'address', address } : undefined, true);
+          const accepted = view.nativeStore.selectedPage();
+          if (disposed || active !== view || view.navigationEpoch !== epoch) return;
+          if (
+            accepted?.identity.generation !== observation.generation ||
+            accepted.errorsGeneration !== observation.errorsGeneration
+          )
+            return;
+          if (!view.following && previous && observation.total > previous.total) {
+            view.newCount += observation.total - previous.total;
+            syncJump(view);
+          }
+        }
+        view.nativeObservation = observation;
+        return;
+      }
+      p.set('limit', '1');
       const next = parseCatalogPage(await api('/api/sessions?' + p));
-      if (disposed || active !== view || capabilities.source_key !== source) return;
+      if (
+        disposed ||
+        active !== view ||
+        view.navigationEpoch !== epoch ||
+        capabilities.source_key !== source
+      )
+        return;
       const metadata = next.items[0],
         current = view.store.selectedPage();
       if (!metadata || metadata.key !== view.key || next.machine !== source)
@@ -3653,7 +3727,7 @@ export function createCatalogViewer(
         await loadSelected(view, incomplete.first, true);
       void loadIdentity(view);
     } catch (error) {
-      if (!disposed && active === view) {
+      if (!disposed && active === view && view.navigationEpoch === epoch) {
         view.observationFailure = { text: readError(error), retryable: retryable(error) };
         drawSelected(view);
       }
@@ -3947,7 +4021,9 @@ export function createCatalogViewer(
     view.errorMode = undefined;
     view.annotationsEpoch = (view.annotationsEpoch ?? 0) + 1;
     view.annotationsLoading = false;
+    view.errorRestore?.restoreNativeRanges?.();
     view.errorRestore = undefined;
+    releaseGeometry(view.root, ['annotationLeading', 'annotationTrailing']);
     view.findOpen = false;
     view.find = '';
     view.filter = 'all';
@@ -4802,7 +4878,7 @@ export function createCatalogViewer(
       : main.scrollHeight - main.scrollTop - main.clientHeight;
   }
   const readingScroll = () => {
-    if (!active || active.opening || !active.store.selectedPage()) return;
+    if (!active || active.opening || !(active.nativeStore ?? active.store).selectedPage()) return;
     const gap = readingGap();
     // Content-visibility can adjust a scroll offset after layout has settled,
     // without changing the observed boxes. Keep the initial tail transaction
@@ -4818,7 +4894,8 @@ export function createCatalogViewer(
       scrollEnd();
       return;
     }
-    active.following = gap <= 80;
+    if (active.errorMode) return;
+    active.following = gap <= 80 && active.nativeStore?.selectedPage()?.position !== 'address';
     if (!active.following) pinUntil = 0;
     if (active.following) active.newCount = 0;
     syncJump(active, true);
@@ -4916,7 +4993,7 @@ export function createCatalogViewer(
     if (
       active &&
       capabilities.selected_transcript &&
-      active.store.selectedPage() &&
+      (active.nativeStore ?? active.store).selectedPage() &&
       document.visibilityState === 'visible'
     )
       void observeSelected(active);

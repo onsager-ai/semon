@@ -70,13 +70,17 @@ fn read_error(error_value: ReadError) -> ViewerReply {
     }
 }
 
-fn parse_list(query: &str, union: bool) -> Result<(Request, Option<Continuation>), ViewerReply> {
+fn parse_list(
+    query: &str,
+    union: bool,
+) -> Result<(Request, Option<Continuation>, bool), ViewerReply> {
     if query.len() > 64 * 1024 {
         return Err(invalid());
     }
     let mut clean = Vec::new();
     let mut cursor = None;
     let mut machine = false;
+    let mut observation = false;
     for part in query.split('&').filter(|part| !part.is_empty()) {
         let (name, value) = part.split_once('=').unwrap_or((part, ""));
         match name {
@@ -96,6 +100,7 @@ fn parse_list(query: &str, union: bool) -> Result<(Request, Option<Continuation>
                 }
                 cursor = Some(parsed);
             }
+            "observe" if !observation && value == "transcript" => observation = true,
             "scope" | "limit" | "harness" | "repo" | "no_repo" | "model" | "q" | "sid" => {
                 clean.push(part)
             }
@@ -111,6 +116,17 @@ fn parse_list(query: &str, union: bool) -> Result<(Request, Option<Continuation>
         }
     }
     let request = Request::parse(&clean.join("&"))?;
+    if observation
+        && (union
+            || request.scope != CatalogReadScope::Current
+            || request.sid.is_none()
+            || cursor.is_some()
+            || clean
+                .iter()
+                .any(|part| !part.starts_with("sid=") && !part.starts_with("scope=")))
+    {
+        return Err(invalid());
+    }
     if request
         .sid
         .as_ref()
@@ -118,7 +134,7 @@ fn parse_list(query: &str, union: bool) -> Result<(Request, Option<Continuation>
     {
         return Err(invalid());
     }
-    Ok((request, cursor))
+    Ok((request, cursor, observation))
 }
 
 pub(crate) fn validate_list(query: &str) -> Result<(), ViewerReply> {
@@ -126,7 +142,7 @@ pub(crate) fn validate_list(query: &str) -> Result<(), ViewerReply> {
 }
 
 pub(crate) fn note_list_search(query: &str, evidence: &crate::native_evidence::NativeEvidence) {
-    if let Ok((request, _)) = parse_list(query, false)
+    if let Ok((request, _, _)) = parse_list(query, false)
         && request.scope == CatalogReadScope::Current
         && let Some(interest) = request.search_interest()
     {
@@ -222,7 +238,7 @@ fn read(
     query: &str,
     union: bool,
 ) -> Result<ViewerReply, ViewerReply> {
-    let (request, cursor) = parse_list(query, union)?;
+    let (request, cursor, observation) = parse_list(query, union)?;
     if !union
         && crate::viewer::query_value(query, "machine")
             .and_then(crate::viewer::decoded)
@@ -254,6 +270,18 @@ fn read(
             .map_err(read_error)?;
         let source =
             Source::focused(namespace, &path, &configured.options, None).map_err(read_error)?;
+        if observation {
+            let transcript = super::focused_transcript_observation(&source, key)
+                .map_err(read_error)?
+                .ok_or_else(not_found)?;
+            return Ok(crate::catalog::reply(
+                200,
+                json!({
+                    "api":1, "machine":configured.key, "catalog_key": key,
+                    "read_scope":request.scope, "transcript":transcript,
+                }),
+            ));
+        }
         let annotations = read_annotations(configured)?;
         let (item, generation) = match request.scope {
             CatalogReadScope::Current => {
@@ -381,7 +409,7 @@ fn selected_request(source_key: &str, query: &str) -> Result<Request, ViewerRepl
             return Err(invalid());
         }
     }
-    let (request, _) = parse_list(query, false)?;
+    let (request, _, _) = parse_list(query, false)?;
     if request.sid.is_none() {
         return Err(invalid());
     }

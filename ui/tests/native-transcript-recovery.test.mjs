@@ -224,3 +224,37 @@ test('an earlier retained page retries the same cursor after source preparation'
   assert.equal(store.entries()[0].entry.text, 'Earlier retained entry');
   assert.equal(store.earlierCursor(), null);
 });
+
+test('closing native annotation navigation restores accepted windows and cancels pending reads', () => {
+  const store = new CatalogNativeTranscriptStore(selection, 'current');
+  assert.ok(
+    store.accept(store.request({ position: 'latest' }), { ...page, earlier_cursor: 'older' }),
+  );
+  const earlier = structuredClone(page.entries[0]);
+  earlier.entry_id = 'earlier';
+  earlier.address.entry_id = earlier.entry_id;
+  assert.ok(
+    store.accept(store.request({ position: 'earlier', cursor: 'older' }), {
+      ...page,
+      position: 'earlier',
+      entries: [earlier],
+    }),
+  );
+  const restore = store.saveRanges();
+  const address = page.entries[0].address;
+  const window = { position: 'address', address };
+  const addressed = { ...page, position: 'address' };
+  assert.ok(store.accept(store.request(window), addressed));
+  assert.deepEqual(
+    store.entries().map(({ entry_id }) => entry_id),
+    ['prompt'],
+  );
+  const pending = store.request(window);
+  restore();
+  assert.equal(store.accept(pending, addressed), false);
+  assert.equal(store.selectedPage().position, 'latest');
+  assert.deepEqual(
+    store.entries().map(({ entry_id }) => entry_id),
+    ['earlier', 'prompt'],
+  );
+});

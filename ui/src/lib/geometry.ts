@@ -4,6 +4,8 @@ export type GeometrySlot =
   | 'readingClip'
   | 'minHeight'
   | 'paddingBottom'
+  | 'annotationLeading'
+  | 'annotationTrailing'
   | 'scrollPaddingTop'
   | 'barHeight'
   | 'accountLeft'
@@ -15,6 +17,8 @@ const properties: Record<GeometrySlot, string> = {
   readingClip: '--reading-clip',
   minHeight: 'min-height',
   paddingBottom: 'padding-bottom',
+  annotationLeading: 'padding-block-start',
+  annotationTrailing: 'padding-block-end',
   scrollPaddingTop: 'scroll-padding-top',
   barHeight: '--barh',
   accountLeft: '--account-left',
