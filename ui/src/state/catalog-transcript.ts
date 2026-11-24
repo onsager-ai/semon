@@ -1,3 +1,5 @@
+import { ApiError } from '../lib/api';
+import type { CatalogRecovery } from './catalog-recovery';
 import type { CatalogSelectionScope } from './catalog-selection';
 import type { CatalogReadScope } from '../domain/catalog';
 import type { NativeEntryAddress } from '../lib/sessionRoute';
@@ -432,5 +434,45 @@ export class CatalogNativeTranscriptStore {
     this.disposed = true;
     this.pending = undefined;
     this.pages = [];
+  }
+}
+
+/** Read one native window and schedule recovery while the selection is current. */
+export async function readNativeTranscript(
+  store: CatalogNativeTranscriptStore,
+  window: CatalogNativeWindow,
+  options: {
+    read(timeoutMs: number): Promise<unknown>;
+    current(): boolean;
+    recovery: CatalogRecovery;
+    retry(delay: number, error: ApiError | undefined): void;
+  },
+): Promise<boolean> {
+  const initial = !store.selectedPage();
+  const timeout = initial ? Math.min(15_000, options.recovery.remaining()) : 15_000;
+  if (initial && options.recovery.stopped) return false;
+  const request = store.request(window);
+  try {
+    const value = await options.read(timeout);
+    return (
+      options.current() && (!initial || !options.recovery.stopped) && store.accept(request, value)
+    );
+  } catch (error) {
+    if (!options.current()) return false;
+    const response = error instanceof ApiError ? error : undefined;
+    // The reader can recover a stale saved address by opening the latest page.
+    if (window.position === 'address' && response?.code === 'stale_cursor') throw error;
+    if (initial ? response?.retryable === true : response?.code === 'retained_source_preparing') {
+      const delay = initial
+        ? options.recovery.fail(Date.now(), Math.random(), 5)
+        : options.recovery.fail();
+      if (delay !== null) {
+        options.retry(delay, response);
+        return false;
+      }
+    }
+    throw error;
+  } finally {
+    store.reject(request);
   }
 }
