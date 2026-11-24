@@ -1648,7 +1648,9 @@ impl NativeEvidence {
         if cache.is_scoped() {
             cache.recover_catalog_version()?;
         }
-        work.tree_repair_pending = cache.advance_tree_repair(&self.options)?;
+        let local = crate::storage::Namespace::new("local").map_err(io::Error::other)?;
+        let namespace = self.storage.namespace().unwrap_or(&local);
+        work.tree_repair_pending = cache.advance_tree_repair(&self.options, namespace)?;
         if self.advance_semantic_stage(work, now, &mut before_build)? {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {

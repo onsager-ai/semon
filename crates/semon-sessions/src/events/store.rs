@@ -2872,8 +2872,9 @@ impl IndexStore for SqliteStore {
     fn advance_tree_repair(
         &mut self,
         options: &crate::Options,
+        namespace: &crate::storage::Namespace,
     ) -> io::Result<(bool, Option<String>)> {
-        let (pending, changed) = native_usage::advance(self, options)?;
+        let (pending, changed) = native_usage::advance(self, options, namespace)?;
         let cleanup = tree_state::cleanup_work(&mut self.connection).map_err(io::Error::other)?;
         Ok((pending || cleanup, changed))
     }

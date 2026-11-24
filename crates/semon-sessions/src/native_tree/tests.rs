@@ -398,7 +398,10 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     let mut steps = 0;
     let mut previous = 0;
     loop {
-        let pending = home.cache().advance_tree_repair(&home.options).unwrap();
+        let pending = home
+            .cache()
+            .advance_tree_repair(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
         steps += 1;
         let cursor: i64 = db
             .query_row("SELECT cursor FROM native_tree_repairs", [], |r| r.get(0))

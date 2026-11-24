@@ -1172,6 +1172,7 @@ pub(crate) trait IndexStore: Send {
     fn advance_tree_repair(
         &mut self,
         _options: &crate::Options,
+        _namespace: &crate::storage::Namespace,
     ) -> io::Result<(bool, Option<String>)> {
         Ok((false, None))
     }
@@ -2580,11 +2581,15 @@ impl EventCache {
         self.files.keys().map(String::as_str)
     }
 
-    pub(crate) fn advance_tree_repair(&mut self, options: &crate::Options) -> io::Result<bool> {
+    pub(crate) fn advance_tree_repair(
+        &mut self,
+        options: &crate::Options,
+        namespace: &crate::storage::Namespace,
+    ) -> io::Result<bool> {
         let Some(store) = self.store.as_mut() else {
             return Ok(false);
         };
-        let (pending, changed) = store.advance_tree_repair(options)?;
+        let (pending, changed) = store.advance_tree_repair(options, namespace)?;
         if let Some(path) = changed {
             self.files.remove(&path);
         }
