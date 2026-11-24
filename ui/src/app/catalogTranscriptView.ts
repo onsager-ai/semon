@@ -484,8 +484,10 @@ export function recordedRelationshipViews(
         icon: I.out,
         parts: sender.parts,
         time: clock(relationship.edge.at, Date.now()),
+        brief: '',
         result: sender.reason,
         resultLabel: 'Target',
+        waiting: false,
         stateLabel: sender.status,
       },
     ];
