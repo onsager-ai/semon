@@ -2046,10 +2046,21 @@ pub(super) fn selected_roles_current(
 
 /// Focused reads never prepare or convert another Semon storage contract.
 pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
+    focused_connection_with(path, require_current)
+}
+
+fn focused_index_connection(path: &Path) -> io::Result<Connection> {
+    focused_connection_with(path, require_index_current)
+}
+
+fn focused_connection_with(
+    path: &Path,
+    qualify: fn(&Connection) -> io::Result<()>,
+) -> io::Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(io::Error::other)?;
     let read = db.unchecked_transaction().map_err(io::Error::other)?;
-    require_current(&read)?;
+    qualify(&read)?;
     read.commit().map_err(io::Error::other)?;
     Ok(db)
 }
@@ -5077,10 +5088,16 @@ fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
 /// their own snapshot. Archive marker consumers additionally validate the exact selected marker;
 /// unrelated archive history is never traversed by a focused request.
 pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
+    require_index_current(connection)?;
+    if catalog_version_blocked(connection).map_err(io::Error::other)? {
+        return Err(io::Error::other("Catalog version publication is pending"));
+    }
+    Ok(())
+}
+
+// Native proofs also serve the producer while it repairs Index projections.
+fn require_index_current(connection: &Connection) -> io::Result<()> {
     match qualify_contract(connection).map_err(io::Error::other)? {
-        Init::Ready if catalog_version_blocked(connection).map_err(io::Error::other)? => {
-            Err(io::Error::other("Catalog version publication is pending"))
-        }
         Init::Ready => Ok(()),
         Init::Unsupported(reason) => Err(io::Error::other(unsupported_message(connection, reason))),
         _ => Err(io::Error::other("session index is not initialized")),

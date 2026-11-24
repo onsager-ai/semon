@@ -954,17 +954,11 @@ mod tests {
             };
             let db = rusqlite::Connection::open(&rebuilt).unwrap();
             let (index_before, catalog_before) = read_state(&db);
-            let stamp = sqlite::stamp();
-            let (index_stamp, projector) = stamp.rsplit_once('=').unwrap();
-            let previous = (projector.parse::<u32>().unwrap() - 1).to_string();
-            db.execute(
-                "UPDATE meta SET value=?1 WHERE key='storage_stamp'",
-                [format!("{index_stamp}={previous}")],
-            )
-            .unwrap();
+            let previous = crate::model::summary::CATALOG_VERSION - 1;
+            sqlite::set_creation_projector_for_test(&db, previous).unwrap();
             db.execute(
                 "UPDATE meta SET value=?1 WHERE key='catalog_version'",
-                [&previous],
+                [previous.to_string()],
             )
             .unwrap();
             drop(db);

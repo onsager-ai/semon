@@ -42,6 +42,18 @@ pub(crate) fn index_stamp_current(stamp: Option<&str>) -> bool {
         })
 }
 
+#[cfg(test)]
+pub(crate) fn set_creation_projector_for_test(
+    connection: &Connection,
+    projector: u32,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "UPDATE meta SET value=?1 WHERE key='storage_stamp'",
+        [format!("{}{projector}", index_stamp_prefix())],
+    )?;
+    Ok(())
+}
+
 /// The database's stamp and namespace binding, read in the caller's snapshot.
 pub(crate) fn binding(
     connection: &Connection,

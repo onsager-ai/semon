@@ -402,7 +402,7 @@ impl Focused {
     ) -> io::Result<Self> {
         let mut diagnostic = HeaderOpenDiagnostic::default();
         let result = (|| {
-            let db = super::focused_connection(cache)
+            let db = super::focused_index_connection(cache)
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
             db.busy_timeout(Duration::from_millis(100))
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
@@ -460,7 +460,7 @@ impl Focused {
                 FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
             );
         }
-        super::require_current(&connection)
+        super::require_index_current(&connection)
             .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
         if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
             diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
