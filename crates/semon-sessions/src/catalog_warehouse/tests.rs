@@ -1796,6 +1796,150 @@ fn warehouse_component_cursor_restarts_after_receipt_expiry() {
     );
 }
 
+fn append_background_launch(path: &Path, tool: &str, second: usize) {
+    append_native(
+        path,
+        json!({"type":"assistant","sessionId":"native",
+        "timestamp":format!("2026-09-24T00:00:{second:02}Z"),
+        "message":{"role":"assistant","content":[
+            {"type":"tool_use","id":tool,"name":"Bash","input":{
+                "command":"sleep 1","description":tool,"run_in_background":true}}
+        ]}}),
+    );
+    append_native(
+        path,
+        json!({"type":"user","sessionId":"native",
+        "timestamp":format!("2026-09-24T00:00:{:02}Z", second + 1),
+        "message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":tool,"content":"Command running in background"}
+        ]}}),
+    );
+}
+
+fn background_notification(tool: &str, status: &str, exit: i32) -> String {
+    format!(
+        "<task-notification><tool-use-id>{tool}</tool-use-id><status>{status}</status>\
+             <summary>{tool} {status} (exit code {exit})</summary></task-notification>"
+    )
+}
+
+#[test]
+fn warehouse_transcript_renders_completed_failed_and_stopped_background_commands() {
+    let mut fixture = Fixture::new("background-outcomes");
+    let path = fixture.claude("native", "Background commands");
+    let outcomes = [
+        ("build", "completed", 0, "done"),
+        ("test", "completed", 2, "failed"),
+        ("watch", "stopped", 137, "killed"),
+    ];
+    let mut notifications = String::new();
+    for (index, (tool, status, exit, _)) in outcomes.into_iter().enumerate() {
+        append_background_launch(&path, tool, 2 * index + 1);
+        notifications.push_str(&background_notification(tool, status, exit));
+    }
+    // These notifications must not replace the first terminal outcome or
+    // produce a finish row for an unpaired task.
+    append_native(
+        &path,
+        prompt("native", 7, &background_notification("build", "running", 0)),
+    );
+    append_native(&path, prompt("native", 8, &notifications));
+    append_native(
+        &path,
+        prompt("native", 9, &background_notification("build", "failed", 1)),
+    );
+    append_native(
+        &path,
+        prompt("native", 10, &background_notification("other", "failed", 1)),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+
+    let source = fixture.source(&[&path]);
+    let page = selected::latest_page(&fixture.options, &source, "native", 20, None)
+        .unwrap()
+        .unwrap();
+    let entries = selected::render::entries(&page, fixture.namespace.as_str(), "native", 0);
+    let finishes: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry["k"] == "bgend")
+        .collect();
+    assert_eq!(finishes.len(), outcomes.len());
+    for (tool, status, exit, state) in outcomes {
+        let launch = entries.iter().find(|entry| entry["tid"] == tool).unwrap();
+        let finish = finishes.iter().find(|entry| entry["call"] == tool).unwrap();
+        assert_eq!(finish["label"], tool);
+        assert_eq!(finish["state"], state);
+        assert_eq!(finish["bg"]["status"], status);
+        assert_eq!(
+            finish["bg"]["summary"],
+            format!("{tool} {status} (exit code {exit})")
+        );
+        assert_eq!(finish["exit"], exit);
+        assert_eq!(launch["bg"], finish["bg"]);
+    }
+    let addresses = finishes
+        .iter()
+        .map(|row| row["entry_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(addresses.len(), finishes.len());
+}
+
+#[test]
+fn warehouse_transcript_background_outcome_crosses_windows_at_the_selected_prefix() {
+    let mut fixture = Fixture::new("background-outcome-windows");
+    let path = fixture.claude("native", "Background command");
+    append_background_launch(&path, "build", 1);
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+
+    let page = |fixture: &Fixture, limit, cursor: Option<&selected::Cursor>| {
+        let source = fixture.source(&[&path]);
+        let view = selected::ReadView::open_transcript(&source, None).unwrap();
+        selected::transcript_window(
+            &view,
+            &source,
+            CatalogReadScope::Current,
+            "native",
+            limit,
+            cursor,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let before = page(&fixture, 1, None);
+    append_native(
+        &path,
+        prompt(
+            "native",
+            3,
+            &background_notification("build", "completed", 0),
+        ),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+
+    let render =
+        |component| selected::render::entries(component, fixture.namespace.as_str(), "native", 0);
+    let pinned = page(&fixture, 1, Some(before.next.as_ref().unwrap()));
+    let pinned_entries = render(&pinned);
+    assert_eq!(pinned_entries[0]["tid"], "build");
+    assert_eq!(pinned_entries[0]["bg"]["state"], "unknown");
+
+    let fresh = page(&fixture, 1, None);
+    assert_eq!(fresh.records.len(), 1);
+    let finish = render(&fresh);
+    assert_eq!(finish.len(), 1);
+    assert_eq!(finish[0]["k"], "bgend");
+    assert_eq!(finish[0]["label"], "build");
+    let older = page(&fixture, 2, Some(fresh.next.as_ref().unwrap()));
+    let launch = render(&older);
+    assert_eq!(launch.len(), 1);
+    assert_eq!(launch[0]["tid"], "build");
+    assert_eq!(launch[0]["bg"]["state"], "done");
+    assert_eq!(launch[0]["bg"], finish[0]["bg"]);
+}
+
 #[test]
 fn warehouse_component_tool_results_use_the_selected_prefix() {
     let mut fixture = Fixture::new("component-late-result");

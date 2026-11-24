@@ -2,7 +2,7 @@
 use super::{Component, Record};
 use crate::{
     events::{SignalKind, UNKNOWN},
-    model::{self, Shown, SignalData, Slot, SlotFile, SlotKind},
+    model::{self, Background, BgEnd, Shown, SignalData, Slot, SlotFile, SlotKind},
     session_route::NativeEntryAddress,
     tx::{self, Lines, RenderContext},
 };
@@ -228,6 +228,18 @@ fn render<T>(
                 record.entry_anchor.as_deref(),
             );
         }
+        for finish in &record.causal.background_ends {
+            add(
+                SlotKind::BgEnd {
+                    call: finish.id.clone(),
+                    status: finish.end.status.clone(),
+                    source: (file.clone(), finish.launch, finish.block),
+                    start: finish.start,
+                },
+                finish.end.occurrence,
+                None,
+            );
+        }
         for call in &record.causal.calls {
             let reply = call.display_reply().cloned();
             let shown = match reply.as_ref() {
@@ -275,7 +287,17 @@ fn render<T>(
                             .is_some_and(crate::events::result_source),
                     reply,
                     item: None,
-                    bg: None,
+                    bg: (shown == Shown::Ok && call.background).then(|| Background {
+                        tid: call.id.clone(),
+                        live: false,
+                        end: call.background_end.as_ref().map(|end| BgEnd {
+                            file: file.clone(),
+                            offset: end.offset,
+                            t: end.at,
+                            status: end.status.clone(),
+                            failed: end.failed,
+                        }),
+                    }),
                 }
             };
             add(kind, call.block, None);
