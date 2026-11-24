@@ -48,7 +48,8 @@ use crate::{
     Marker, Options, events,
     events::{
         ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASSISTANT_END_TURN,
-        ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
+        ASYNC, DENIED, Event, EventCache, FileIndex, Kind, PIN, SEND_FAILED,
+        TASK_NOTIFICATION_ORIGIN, UNKNOWN,
     },
     facts::{MachineFacts, ReportedModelUsage, ReportedRunSnapshot},
     field, file_list, handoff,
@@ -2276,6 +2277,11 @@ impl<'a> Builder<'a> {
                                     session.last.is_none_or(|last| last <= updated)
                                 })
                             });
+                            let unconfirmed_busy = session
+                                .pid_files
+                                .iter()
+                                .any(|pid| pid.gone && pid.busy())
+                                .then(|| "busy".to_owned());
                             match candidates.next() {
                                 Some(pid) if pid.gone => match candidates.next() {
                                     None => (
@@ -2288,9 +2294,9 @@ impl<'a> Builder<'a> {
                                     Some(other) if other.gone && candidates.all(|pid| pid.gone) => {
                                         ("session", None, Some(false), None, None)
                                     }
-                                    Some(_) => ("session", None, None, None, None),
+                                    Some(_) => ("session", None, None, unconfirmed_busy, None),
                                 },
-                                _ => ("session", None, None, None, None),
+                                _ => ("session", None, None, unconfirmed_busy, None),
                             }
                         }
                     }
@@ -3148,6 +3154,7 @@ impl<'a> Builder<'a> {
         // Terminal task notifications by tool-use id, in log order: a
         // subagent's run ends (its spawning call's id) among them.
         let mut notifications = HashMap::<String, Vec<Ref>>::new();
+        let mut resumes = HashMap::<(usize, &str), Vec<Ref>>::new();
         let mut task_notifications = HashMap::<String, Vec<Ref>>::new();
         // Every up agent message a session received: a subagent's sends to
         // `main` and its hand-backs, received in its parent, and its sends to
@@ -3167,7 +3174,18 @@ impl<'a> Builder<'a> {
                 }
                 match (event.k, &event.id) {
                     (Kind::Tn, Some(id))
-                        if !matches!(event.n.as_deref(), None | Some("running" | "started")) =>
+                        if event.script & TASK_NOTIFICATION_ORIGIN != 0
+                            && matches!(
+                                event.n.as_deref(),
+                                Some(
+                                    "completed"
+                                        | "success"
+                                        | "done"
+                                        | "failed"
+                                        | "killed"
+                                        | "stopped"
+                                )
+                            ) =>
                     {
                         notifications
                             .entry(id.clone())
@@ -3176,6 +3194,14 @@ impl<'a> Builder<'a> {
                         if let Some(task_id) = &event.task_id {
                             task_notifications
                                 .entry(task_id.clone())
+                                .or_default()
+                                .push((position, at));
+                        }
+                    }
+                    (Kind::Tool, Some(_)) => {
+                        if let Some(agent) = event.resumed_agent.as_deref() {
+                            resumes
+                                .entry((self.of_file[position], agent))
                                 .or_default()
                                 .push((position, at));
                         }
@@ -3338,9 +3364,18 @@ impl<'a> Builder<'a> {
                 .flatten()
                 .copied()
                 .filter(|at| self.of_file[at.0] == spawner)
-                .map(|at| (at, false));
-            // The resumed run reports the SendMessage call's ID instead of
-            // the spawning call's. The stable task ID identifies the child.
+                .map(|at| (at, None));
+            let resume_calls = resumes
+                .get(&(spawner, native_id))
+                .map_or(&[][..], Vec::as_slice);
+            let resume_ids: HashMap<Ref, usize> = resume_calls
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, at)| (at, index))
+                .collect();
+            // The native task ID and SendMessage reply must identify the same
+            // child. The specific call closes only the run it resumed.
             let mut ambiguous_notice = false;
             let resumed_ends = task_notifications
                 .get(native_id)
@@ -3354,24 +3389,22 @@ impl<'a> Builder<'a> {
                     if Some(id) == tool_use_id.as_deref() {
                         return None;
                     }
-                    let qualified = self.find_in(spawner, id).is_some_and(|call| {
-                        let send = event(self.files, call);
-                        send.n.as_deref() == Some("SendMessage")
-                            && send.r.as_ref().is_some_and(|reply| {
-                                !reply.e
-                                    && reply.f & PIN != 0
-                                    && reply.f & (DENIED | SEND_FAILED) == 0
-                                    && reply
-                                        .t
-                                        .zip(notice.t)
-                                        .is_some_and(|(reply, notice)| reply <= notice)
-                            })
-                    });
-                    ambiguous_notice |= !qualified;
-                    qualified.then_some((at, true))
+                    let resume = self
+                        .find_in(spawner, id)
+                        .and_then(|call| resume_ids.get(&call))
+                        .copied();
+                    ambiguous_notice |= resume.is_none() && notice.t >= self.sessions[child].last;
+                    resume.map(|resume| (at, Some(resume)))
                 });
             let ends = original_ends.chain(resumed_ends).collect::<Vec<_>>();
-            let (runs, inline) = self.claude_runs(&child_events, first_prompt, &finals, &ends);
+            let (runs, inline) = relay_match::claude_runs(
+                self.files,
+                &child_events,
+                first_prompt,
+                &finals,
+                &ends,
+                resume_calls,
+            );
             let mut result = None;
             // The latest run that ended: its hand-back receipt's text, else
             // its notification's, else the child's `SubagentHandback`. The
@@ -3507,34 +3540,6 @@ impl<'a> Builder<'a> {
             );
         }
         Ok(())
-    }
-
-    /// A Claude subagent's runs, in order: the brief's, then one per message
-    /// that reached it after the run before had ended (a resume). A run ends
-    /// at its hand-back (the parent's final receipt, or the child's
-    /// `SubagentHandback`) or at its agent-end notification, whichever comes
-    /// first; the other then belongs to the same run. Also returns the
-    /// parent's messages (`AGM_DOWN`) that reached an open run: inline in
-    /// its turn, not a resume.
-    ///
-    /// The parent writes a run's notification seconds after its hand-back,
-    /// and its hand-back receipt at its next turn, so a resume sent in
-    /// between already opened the next run. Such a completed notification
-    /// belongs to the run before when that one handed back without one, and
-    /// such a receipt when the child handed that run back
-    /// (`SubagentHandback`) and it has no receipt. A failed or killed
-    /// notification ends the open run. One misattribution remains: if run k
-    /// hands back, the child resumes, then a late failed or killed notification
-    /// arrives, it ends run k+1 as `err`; run k+1's own completed notification
-    /// is then ignored.
-    fn claude_runs(
-        &self,
-        child_events: &[Ref],
-        first_prompt: Option<Ref>,
-        finals: &[Ref],
-        ends: &[(Ref, bool)],
-    ) -> (Vec<Run>, BTreeSet<Ref>) {
-        relay_match::claude_runs(self.files, child_events, first_prompt, finals, ends)
     }
 
     /// Pairs each message `child`'s parent sent it while it ran or to resume

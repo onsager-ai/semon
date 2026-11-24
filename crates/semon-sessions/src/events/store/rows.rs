@@ -16,6 +16,8 @@ struct EventState {
     poll_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resumed_agent: Option<String>,
     #[serde(default)]
     result_source: bool,
     #[serde(default, skip_serializing_if = "crate::events::is_false")]
@@ -51,6 +53,7 @@ pub(super) fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)
         y,
         poll_target,
         task_id,
+        resumed_agent,
         result_source,
         native_direct_call,
         activity_observation,
@@ -60,12 +63,13 @@ pub(super) fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)
             state.yielded,
             state.poll_target,
             state.task_id,
+            state.resumed_agent,
             state.result_source,
             state.native_direct_call,
             state.activity_observation,
             state.activity_tool,
         ),
-        None => (None, None, None, false, false, None, None),
+        None => (None, None, None, None, false, false, None, None),
     };
     let r = if row.get::<_, bool>(14)? {
         Some(Reply {
@@ -102,6 +106,7 @@ pub(super) fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)
         script: row.get(11)?,
         poll_target,
         task_id,
+        resumed_agent,
         result_source,
         y,
         poll: row.get::<_, Option<i64>>(13)?.map(seq_of),
@@ -173,6 +178,7 @@ pub(super) fn put_event(
         script,
         poll_target,
         task_id,
+        resumed_agent,
         result_source,
         y,
         poll,
@@ -186,6 +192,7 @@ pub(super) fn put_event(
     let y = if y.is_some()
         || poll_target.is_some()
         || task_id.is_some()
+        || resumed_agent.is_some()
         || *result_source
         || *native_direct_call
         || activity_observation.is_some()
@@ -196,6 +203,7 @@ pub(super) fn put_event(
             yielded: y.as_ref().map(|yielded| Box::new((**yielded).clone())),
             poll_target: poll_target.as_ref().cloned(),
             task_id: task_id.clone(),
+            resumed_agent: resumed_agent.clone(),
             result_source: *result_source,
             native_direct_call: *native_direct_call,
             activity_observation: activity_observation.clone(),

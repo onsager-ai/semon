@@ -376,7 +376,7 @@ impl<M> Plan<M> {
                     in_child: false,
                     at: receipt.address.at,
                     failed: false,
-                    resumed: false,
+                    resume: None,
                     preview: body.map(|text| crate::model::cap(&text, crate::model::MSG_MAX)),
                 });
             }
@@ -466,7 +466,7 @@ impl<M> Plan<M> {
                         .spawn
                         .as_deref()
                         .and_then(|id| crate::model::notification_result(&native, id)),
-                    Step::Start { .. } => None,
+                    Step::Resume { .. } | Step::Start { .. } => None,
                 };
                 preview = text.map(|text| crate::model::cap(&text, crate::model::MSG_MAX));
             }

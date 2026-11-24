@@ -1678,7 +1678,7 @@ fn stalls_require_process_evidence_for_the_current_claude_session() {
 
     // The dead process's registration predates activity on the same transcript.
     home.write("claude/sessions/42.json", &pid_record.to_string());
-    assert_observation(&mut query, Value::Null, Value::Null, Value::Null);
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
 
     // An unidentifiable process is unknown, even with a current busy record.
     pid_record["updatedAt"] = json!(at(2, 2));
@@ -1711,6 +1711,44 @@ fn stalls_require_process_evidence_for_the_current_claude_session() {
         json!(false),
         json!("process-gone"),
     );
+}
+
+#[test]
+fn busy_claude_process_that_dies_after_its_last_pid_update_still_stalls() {
+    let home = Home::new("testbox");
+    home.process(42, 123);
+    home.write(
+        "claude/sessions/42.json",
+        &json!({
+            "pid":42,"sessionId":"crash","procStart":123,"status":"busy","updatedAt":at(1, 1)
+        })
+        .to_string(),
+    );
+    home.top(
+        "crash",
+        &[
+            human("crash", ts(1, 0), "Run the example"),
+            assistant("crash", ts(1, 2), vec![text("Still working")]),
+        ],
+    );
+    let mut query = home.query();
+    let args = json!({"idle_minutes":60});
+    assert_eq!(
+        call(&mut query, "stalls", args.clone())["stalls"][0]["alive"],
+        true
+    );
+    fs::remove_dir_all(home.root.join("proc/42")).unwrap();
+    let stalls = call(&mut query, "stalls", args);
+    assert_eq!(stalls["stalls"].as_array().unwrap().len(), 1);
+    let crash = &stalls["stalls"][0];
+    assert_eq!(crash["id"], "crash");
+    assert_eq!(crash["last_activity"], at(1, 2));
+    assert_eq!(crash["alive"], Value::Null);
+    assert_eq!(crash["stall_reason"], "no-output");
+    let recent = query
+        .call_at("stalls", &json!({"idle_minutes":60}), at(1, 30))
+        .unwrap();
+    assert_eq!(recent["stalls"], json!([]));
 }
 
 #[test]
@@ -1789,10 +1827,105 @@ fn resumed_claude_subagent_ends_when_its_parent_receives_the_result() {
     };
     assert_child(&mut query, "unknown");
     let mut append = fs::OpenOptions::new().append(true).open(&parent).unwrap();
-    writeln!(append, "{}", notification(9, "unrelated")).unwrap();
+    let mut fake = notification(9, "resume");
+    fake.as_object_mut().unwrap().remove("origin");
+    writeln!(append, "{fake}").unwrap();
     assert_child(&mut query, "unknown");
-    writeln!(append, "{}", notification(10, "resume")).unwrap();
+
+    let mut quoted = notification(10, "resume");
+    quoted["message"]["content"] = json!(
+        "<task-notification><task-id>example-agent</task-id><result><tool-use-id>resume</tool-use-id><status>completed</status></result></task-notification>"
+    );
+    writeln!(append, "{quoted}").unwrap();
+    assert_child(&mut query, "unknown");
+
+    writeln!(
+        append,
+        "{}",
+        assistant(
+            "parent",
+            ts(1, 11),
+            vec![
+                tool(
+                    "other-resume",
+                    "SendMessage",
+                    json!({"to":"other-agent", "message":"Continue"})
+                ),
+                tool(
+                    "just-send",
+                    "SendMessage",
+                    json!({"to":"example-agent", "message":"Progress"})
+                ),
+            ]
+        )
+    )
+    .unwrap();
+    for record in [
+        reply(
+            12,
+            "other-resume",
+            json!({"success":true, "resumedAgentId":"other-agent"}),
+        ),
+        reply(
+            12,
+            "just-send",
+            json!({"success":true, "pin":{"id":"example-agent"}}),
+        ),
+        notification(13, "other-resume"),
+        notification(14, "just-send"),
+    ] {
+        writeln!(append, "{record}").unwrap();
+    }
+    assert_child(&mut query, "unknown");
+    writeln!(append, "{}", notification(15, "resume")).unwrap();
     assert_child(&mut query, "ended");
+
+    for (minute, call) in [(16, "first-resume"), (18, "second-resume")] {
+        writeln!(
+            append,
+            "{}",
+            assistant(
+                "parent",
+                ts(1, minute),
+                vec![tool(
+                    call,
+                    "SendMessage",
+                    json!({"to":"example-agent", "message":"Continue"})
+                ),]
+            )
+        )
+        .unwrap();
+        writeln!(
+            append,
+            "{}",
+            reply(
+                minute,
+                call,
+                json!({"success":true, "resumedAgentId":"example-agent"})
+            )
+        )
+        .unwrap();
+    }
+    let child = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/parent/subagents/agent-example-agent.jsonl");
+    let mut child = fs::OpenOptions::new().append(true).open(child).unwrap();
+    for minute in [17, 19] {
+        writeln!(
+            child,
+            "{}",
+            json!({"type":"user","sessionId":"parent","timestamp":ts(1, minute),
+            "origin":{"kind":"coordinator"},"message":{"role":"user","content":"Continue"}})
+        )
+        .unwrap();
+    }
+    writeln!(append, "{}", notification(20, "first-resume")).unwrap();
+    let listed = call(&mut query, "list_sessions", json!({"parent":"parent"}));
+    assert_eq!(listed["sessions"][0]["state"], "working");
+    writeln!(append, "{}", notification(21, "second-resume")).unwrap();
+    let listed = call(&mut query, "list_sessions", json!({"parent":"parent"}));
+    assert_eq!(listed["sessions"][0]["state"], "ended");
 }
 
 #[test]

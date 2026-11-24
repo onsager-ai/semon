@@ -104,7 +104,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v42: retain the next physical record ordinal for qualified Copilot sources.
 /// v43: Claude task notifications retain the task ID, and assistant text
 /// retains the native end-turn marker.
-pub(crate) const CACHE_VERSION: u32 = 43;
+/// v44: retain qualified Claude task headers and explicit SendMessage resumes.
+pub(crate) const CACHE_VERSION: u32 = 44;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -4165,6 +4166,8 @@ pub(crate) const SENDS: u8 = 2;
 pub(crate) const BACKGROUND: u8 = 4;
 /// A task notification reports failure by status or a nonzero summary exit code.
 pub(crate) const BACKGROUND_FAILED: u8 = 8;
+/// A Claude task notification delivered with native task-notification origin.
+pub(crate) const TASK_NOTIFICATION_ORIGIN: u8 = 1;
 /// An agent message sent by an agent to the session that receives it: a
 /// subagent's hand-back or send, or a Codex child's message to its parent.
 pub(crate) const AGM_UP: u8 = 16;
@@ -4269,6 +4272,9 @@ pub(crate) struct Event {
     /// A Claude task notification's native task ID, independent of tool-use ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) task_id: Option<String>,
+    /// A successful Claude SendMessage result's explicit `resumedAgentId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resumed_agent: Option<String>,
     /// A bounded literal code-mode `write_stdin` target. Retained so an
     /// output arriving after the terminal event can still be checked exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4749,9 +4755,19 @@ pub(crate) fn notifications(text: &str) -> Vec<(Option<&str>, Option<&str>, &str
             continue;
         }
         let body = &text[*start..close];
-        result.push((inner(body, "tool-use-id"), inner(body, "status"), body));
+        let header = notification_header(body);
+        result.push((inner(header, "tool-use-id"), inner(header, "status"), body));
     }
     result
+}
+
+fn notification_header(body: &str) -> &str {
+    let end = ["<result>", "<summary>"]
+        .into_iter()
+        .filter_map(|tag| body.find(tag))
+        .min()
+        .unwrap_or(body.len());
+    &body[..end]
 }
 
 fn peer_event(origin: &Value, offset: u64, time: Option<i64>) -> Event {
@@ -4913,15 +4929,19 @@ fn prompt_events(
             );
             found = true;
         }
+        let delivered =
+            origin.and_then(|origin| field(origin, "kind")) == Some("task-notification");
         for (id, status, body) in notifications(text) {
-            // The native header precedes result/summary text, which can
-            // contain quoted tags that do not identify this task.
-            let header_end = ["<result>", "<summary>"]
-                .into_iter()
-                .filter_map(|tag| body.find(tag))
-                .min()
-                .unwrap_or(body.len());
-            let header = &body[..header_end];
+            let task_id = if delivered {
+                inner(notification_header(body), "task-id").filter(|id| {
+                    !id.is_empty()
+                        && id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                })
+            } else {
+                None
+            };
             push(
                 summary,
                 Event {
@@ -4930,21 +4950,18 @@ fn prompt_events(
                     t: time,
                     id: id.map(str::to_owned),
                     n: status.map(str::to_owned),
-                    task_id: inner(header, "task-id")
-                        .filter(|id| {
-                            !id.is_empty()
-                                && id.bytes().all(|byte| {
-                                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-                                })
-                        })
-                        .map(str::to_owned),
-                    script: if !matches!(status, Some("killed" | "stopped"))
+                    task_id: task_id.map(str::to_owned),
+                    script: (if !matches!(status, Some("killed" | "stopped"))
                         && (status == Some("failed")
                             || inner(body, "summary")
                                 .and_then(notification_exit)
                                 .is_some_and(|exit| exit != 0))
                     {
                         BACKGROUND_FAILED
+                    } else {
+                        0
+                    }) | if delivered {
+                        TASK_NOTIFICATION_ORIGIN
                     } else {
                         0
                     },
@@ -6809,6 +6826,16 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                     kind: "tool_result",
                                 }
                             });
+                            if !error
+                                && flags & (DENIED | SEND_FAILED) == 0
+                                && let Some(index) = summary.pending.get(id).copied()
+                                && let Some(call) = summary.event_mut(index)
+                                && call.n.as_deref() == Some("SendMessage")
+                            {
+                                call.resumed_agent = tool_result
+                                    .and_then(|result| field(result, "resumedAgentId"))
+                                    .map(str::to_owned);
+                            }
                             resolve(summary, id, |_| reply);
                         }
                     }

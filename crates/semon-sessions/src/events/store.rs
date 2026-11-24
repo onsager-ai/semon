@@ -10229,6 +10229,7 @@ mod tests {
                     script: STDIN | SENDS,
                     poll_target: Some("26789".to_owned()),
                     task_id: None,
+                    resumed_agent: None,
                     result_source: true,
                     y: Some(Box::new(Yield {
                         polls: vec![1, 2, u64::MAX],

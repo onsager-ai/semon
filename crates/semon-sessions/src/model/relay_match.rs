@@ -149,14 +149,15 @@ pub(super) fn claude_runs(
     child_events: &[Ref],
     first_prompt: Option<Ref>,
     finals: &[Ref],
-    ends: &[(Ref, bool)],
+    ends: &[(Ref, Option<usize>)],
+    resume_calls: &[Ref],
 ) -> (Vec<super::Run>, super::BTreeSet<Ref>) {
     use super::{AGM_DOWN, BTreeSet};
     use ClaudeRunStep as Step;
     let mut steps: Vec<(Ref, Step)> = finals
         .iter()
         .map(|at| (*at, Step::Final))
-        .chain(ends.iter().map(|(at, resumed)| {
+        .chain(ends.iter().map(|(at, resume)| {
             let completed = matches!(
                 event(files, *at).n.as_deref(),
                 Some("completed" | "success" | "done")
@@ -165,10 +166,17 @@ pub(super) fn claude_runs(
                 *at,
                 Step::Notification {
                     completed,
-                    resumed: *resumed,
+                    resume: *resume,
                 },
             )
         }))
+        .chain(
+            resume_calls
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(call, at)| (at, Step::Resume { call })),
+        )
         .collect();
     for at in child_events {
         let found = event(files, *at);
@@ -194,8 +202,16 @@ pub(super) fn claude_runs(
 pub(crate) enum ClaudeRunStep {
     Final,
     Handback,
-    Notification { completed: bool, resumed: bool },
-    Start { coordinator: bool },
+    Notification {
+        completed: bool,
+        resume: Option<usize>,
+    },
+    Resume {
+        call: usize,
+    },
+    Start {
+        coordinator: bool,
+    },
 }
 
 pub(crate) fn group_claude_runs<A: Copy + Ord>(
@@ -208,15 +224,30 @@ pub(crate) fn group_claude_runs<A: Copy + Ord>(
         let order = match step {
             Step::Final => 0,
             Step::Handback => 1,
-            Step::Notification { .. } => 2,
-            Step::Start { .. } => 3,
+            Step::Notification { resume: None, .. } => 2,
+            Step::Resume { .. } => 3,
+            Step::Start { .. } => 4,
+            Step::Notification {
+                resume: Some(_), ..
+            } => 5,
         };
         (time.is_none(), *time, order, *at)
     });
     let mut runs = vec![Run::default()];
+    let mut by_resume_call = std::collections::HashMap::new();
+    let mut awaiting_coordinator = false;
     for (_, step, at) in steps {
         let last = runs.len() - 1;
         match step {
+            Step::Resume { call } => {
+                runs.push(Run::default());
+                by_resume_call.insert(call, runs.len() - 1);
+                awaiting_coordinator = true;
+            }
+            Step::Start { coordinator: true } if awaiting_coordinator && !runs[last].ended() => {
+                // The child logs receipt separately from the parent's resume call.
+                awaiting_coordinator = false;
+            }
             Step::Start { .. } if runs[last].ended() => runs.push(Run::default()),
             Step::Start { coordinator: true } => inline(at),
             Step::Start { coordinator: false } => (),
@@ -240,10 +271,14 @@ pub(crate) fn group_claude_runs<A: Copy + Ord>(
             // handed back before it, when that one has none. A failed or
             // killed one is about the run still open: the one before had
             // handed back, so it didn't fail.
-            Step::Notification { completed, resumed } => {
-                let target = if last > 0
+            Step::Notification { completed, resume } => {
+                let target = if let Some(call) = resume {
+                    let Some(&target) = by_resume_call.get(&call) else {
+                        continue;
+                    };
+                    target
+                } else if last > 0
                     && completed
-                    && !resumed
                     && !runs[last].ended()
                     && runs[last - 1].handed_back()
                     && runs[last - 1].tn.is_none()
