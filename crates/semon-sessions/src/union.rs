@@ -774,6 +774,42 @@ impl ViewerCore {
         core
     }
 
+    /// Reuse the receiver's current Catalog owners and return only the fields
+    /// needed by the authorized management page.
+    pub(crate) fn management_stalls(&self, now: i64) -> Option<Vec<Value>> {
+        const STALLED_SESSION_IDLE_MINUTES: u32 = 60;
+        let _entered = self.open.enter()?;
+        self.follow().ok()?;
+        let views = self.views();
+        let sources = crate::SessionSources::from_evidence(
+            views
+                .iter()
+                .map(|(key, view)| (key.clone(), view.evidence.clone()))
+                .collect(),
+        );
+        let result = crate::query::Query::from_sources(Arc::new(sources))
+            .catalog_stalls_metadata(STALLED_SESSION_IDLE_MINUTES, now);
+        if result.is_err() {
+            for (_, view) in views.iter() {
+                let _ = view.note_catalog_interest();
+            }
+        }
+        Some(
+            result.ok()?["stalls"]
+                .as_array()?
+                .iter()
+                .map(|row| {
+                    json!({
+                        "id": row["id"],
+                        "machine": row["machine"],
+                        "stall_reason": row["stall_reason"],
+                        "last_activity": row["last_activity"],
+                    })
+                })
+                .collect(),
+        )
+    }
+
     /// The machines served now.
     fn views(&self) -> Arc<Views> {
         read_lock(&self.views).clone()

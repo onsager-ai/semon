@@ -1094,3 +1094,181 @@ fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
     let stored = fs::read_to_string(f.dir().join("enrollment/registry.json")).unwrap();
     assert!(stored.contains("revoked"));
 }
+
+#[test]
+fn management_snapshot_write_scope_validation_and_append_order() {
+    const INGEST: &str = "/v1/manage/snapshot";
+    const DATA: &str = "/api/viewer/manage";
+    let mut fixture = Fixture::new();
+    let push = pair_fixture(&fixture.dir());
+    let url = fixture.start_receiver();
+    let token = |args: &[&str]| {
+        let output = semon()
+            .arg("token")
+            .args(args)
+            .arg("--dir")
+            .arg(fixture.dir())
+            .output()
+            .unwrap();
+        assert_ok(&output, "management token command");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let owner = token(&[]);
+    let revoked = token(&["--snapshot"]);
+    let listing = token(&["--list"]);
+    assert!(!listing.contains(&revoked));
+    let id = listing
+        .lines()
+        .find(|line| line.ends_with("\tsnapshot"))
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap();
+    token(&["--revoke", id]);
+    assert!(
+        token(&["--list"])
+            .lines()
+            .any(|line| line.starts_with(id) && line.ends_with("\ttrue\tsnapshot"))
+    );
+    let writer = token(&["--snapshot"]);
+    let bearer = |secret| format!("Authorization: Bearer {secret}\r\n");
+    let ingest = |secret: Option<&str>, body: &str, extra: &str| {
+        let mut headers = secret.map(bearer).unwrap_or_default();
+        headers.push_str(extra);
+        http(&url, INGEST, &headers, Some(body))
+    };
+    let fixture_json = include_str!("../../../tests/ui/fixtures/manage-snapshot.json");
+    let newest: serde_json::Value = serde_json::from_str(fixture_json).unwrap();
+    let post = |body: &str| ingest(Some(&writer), body, "Content-Type: application/json\r\n");
+    for denied in [
+        None,
+        Some(owner.as_str()),
+        Some(push.as_str()),
+        Some(revoked.as_str()),
+    ] {
+        assert!(
+            ingest(denied, fixture_json, "Content-Type: application/json\r\n")
+                .starts_with("HTTP/1.1 401")
+        );
+    }
+    for route in ["/manage", DATA] {
+        assert!(http(&url, route, "", None).starts_with("HTTP/1.1 403"));
+        assert!(http(&url, route, &bearer(&writer), None).starts_with("HTTP/1.1 403"));
+        assert!(http(&url, route, &bearer(&owner), None).starts_with("HTTP/1.1 200"));
+    }
+    assert!(
+        http(&url, "/v1/push/status", &bearer(&writer), Some("{}")).starts_with("HTTP/1.1 401")
+    );
+    assert!(http(&url, INGEST, &bearer(&writer), None).starts_with("HTTP/1.1 405"));
+    let read = || {
+        let response = http(&url, DATA, &bearer(&owner), None);
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("cache-control: no-store")
+        );
+        serde_json::from_str::<serde_json::Value>(response.split_once("\r\n\r\n").unwrap().1)
+            .unwrap()
+    };
+    assert!(read()["snapshot"].is_null());
+    assert!(
+        ingest(Some(&writer), fixture_json, "Content-Type: text/plain\r\n")
+            .starts_with("HTTP/1.1 415")
+    );
+    assert!(
+        ingest(
+            Some(&writer),
+            fixture_json,
+            "Content-Type: application/json\r\nContent-Encoding: gzip\r\n"
+        )
+        .starts_with("HTTP/1.1 415")
+    );
+    // Check the declared-size rejection without uploading any part of the body.
+    use std::io::{Read, Write};
+    let address = url.strip_prefix("http://").unwrap();
+    let mut socket = std::net::TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(socket, "POST {INGEST} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n", 256 * 1024 + 1, bearer(&writer)).unwrap();
+    socket.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut oversized = String::new();
+    socket.read_to_string(&mut oversized).unwrap();
+    assert!(oversized.starts_with("HTTP/1.1 413"));
+    for (pointer, value) in [
+        ("/version", json!(2)),
+        ("/generated_at", json!("2026-02-31T12:00:00Z")),
+        ("/generated_at", json!("2099-01-01T00:00:00Z")),
+        ("/chief_pm_checked_at", json!("2026-01-01T12:00:00+00:00")),
+        ("/hosts/0/gate", json!("warning")),
+        (
+            "/decisions_waiting/0/question",
+            json!("Bearer fixture-credential"),
+        ),
+        (
+            "/decisions_waiting/0/question",
+            json!("kXn6MwQ9VpL4Js2hUz3Nq5FcRs7Ta8BdYz"),
+        ),
+        (
+            "/decisions_today/0/link",
+            json!("https://owner:fixture@example.com/decision"),
+        ),
+        (
+            "/decisions_today/0/id",
+            newest["decisions_waiting"][0]["id"].clone(),
+        ),
+        ("/budgets/0/breakdown/0/agent", json!("missing-agent")),
+    ] {
+        let mut snapshot = newest.clone();
+        *snapshot.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            post(&snapshot.to_string()).starts_with("HTTP/1.1 400"),
+            "{pointer}"
+        );
+    }
+    for payload in [
+        "{}".to_owned(),
+        format!(
+            "{{\"version\":1,{}",
+            fixture_json.trim_start().strip_prefix('{').unwrap()
+        ),
+        format!(
+            "{{\"unknown\":0,{}",
+            fixture_json.trim_start().strip_prefix('{').unwrap()
+        ),
+    ] {
+        assert!(post(&payload).starts_with("HTTP/1.1 400"));
+    }
+    let mut missing = newest.clone();
+    missing["budgets"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("reset_at");
+    assert!(post(&missing.to_string()).starts_with("HTTP/1.1 400"));
+    assert!(!fixture.dir().join("manage-snapshots").exists());
+    let accepted = post(fixture_json);
+    assert!(accepted.starts_with("HTTP/1.1 204"));
+    assert!(accepted.ends_with("\r\n\r\n"));
+    let store = fixture.dir().join("manage-snapshots");
+    let first = fs::read_dir(&store)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let original = fs::read(&first).unwrap();
+    let mut older = newest.clone();
+    older["generated_at"] = json!("2026-01-01T16:29:00Z");
+    assert!(post(&older.to_string()).starts_with("HTTP/1.1 204"));
+    assert_eq!(read()["snapshot"], newest);
+    let mut tied = newest;
+    tied["hosts"][0]["temperature_c"] = json!(88);
+    assert!(post(&tied.to_string()).starts_with("HTTP/1.1 204"));
+    assert_eq!(read()["snapshot"], tied);
+    assert_eq!(fs::read_dir(store).unwrap().count(), 3);
+    assert_eq!(fs::read(first).unwrap(), original);
+    let record: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    assert_ne!(record["credential_id"], writer);
+    assert!(record["received_at"].as_str().unwrap().ends_with('Z'));
+}

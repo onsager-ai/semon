@@ -1396,3 +1396,28 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
   :root { --tap: 44px; }
   .composer-unavailable { min-height: var(--tap); }
 }
+
+/* Receiver-owned management content inside the canonical host page slot. */
+.manage-dashboard {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 48rem;
+  margin-inline: auto;
+  padding: var(--s4) var(--gutter) var(--s6);
+  font-size: var(--fs-read);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.manage-dashboard h2 { font-size: var(--fs-fig); margin: 0 0 var(--s2); }
+.manage-dashboard h3 { font-size: var(--fs-read); margin: 0 0 var(--s1); }
+.manage-dashboard section { border-top: 1px solid var(--line-2); margin-top: var(--s5); padding-top: var(--s4); }
+.manage-dashboard p { margin: 0 0 var(--s1); }
+.manage-dashboard ul { margin: var(--s2) 0; padding-inline-start: var(--s4); }
+.manage-dashboard .manage-rows { padding: 0; list-style: none; }
+.manage-rows > li + li { border-top: 1px solid var(--line); margin-top: var(--s2); padding-top: var(--s2); }
+.manage-muted { color: var(--muted); }
+.manage-status { text-transform: capitalize; }
+.manage-green { color: var(--ink); background: var(--diff-add); }
+.manage-amber { color: var(--wait); }
+.manage-red { color: var(--err); }
+.manage-dashboard a { color: var(--work); text-decoration: underline; display: inline-flex; align-items: center; min-height: var(--tap); }

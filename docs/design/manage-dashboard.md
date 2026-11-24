@@ -1,6 +1,6 @@
 # Owner management dashboard
 
-Proposed design for Chief PM approval before implementation. The receiver hosts a
+Chief PM approved the v1 dashboard on 2026-11-24. The receiver hosts a
 read-only `/manage` page in the existing Viewer. The Chief PM publishes a full
 snapshot of decisions, budgets, lanes and hosts. Semon reads stalled sessions
 from its live Catalog through `stalls`.
@@ -218,9 +218,9 @@ the infra lane's `Thermal` reading and its observation time.
 
 ### Receiver validation
 
-- Enforce a proposed **256 KiB** limit on the entire request body before JSON
+- Enforce a **256 KiB** limit on the entire request body before JSON
   parsing. Enforce the limit while reading as well as for declared lengths.
-  Accept uncompressed JSON with all required fields. Reject malformed UTF-8 or
+  Require Content-Length and accept uncompressed UTF-8 JSON with all required fields. Reject malformed UTF-8 or
   JSON, duplicate object keys, unknown fields or versions and invalid enums.
   Version `1` is the sole current contract under the pre-release policy.
 - Parse structured timestamps as UTC RFC 3339 with an uppercase `Z` and
@@ -237,16 +237,21 @@ the infra lane's `Thermal` reading and its observation time.
   A breakdown row must name a lane, an agent, or both. These names must resolve
   to the snapshot's entries and, when both are present, identify the same lane.
   Require a host in decision links and disallow URL credentials. Treat all
-  supplied text as plain text. Reject invalid payloads as a whole.
+  supplied text as plain text. Snapshots must contain no secrets. Screen every
+  text value for credential assignments, bearer markers, common token prefixes,
+  private keys, and high-entropy strings. A 40-character hex Git SHA in the
+  required `#n@sha` PR reference form is allowed. Credential assignments and
+  known credential forms are still rejected. Reject invalid payloads as a whole.
 - Return `204` after durable append, `400` for invalid JSON or schema, `401`
   for absent, invalid, revoked or wrong-scope credentials, `413` for oversized
-  bodies and `415` for unsupported content type or encoding. Responses carry
+  bodies, `415` for unsupported content type or encoding, and `411` when the
+  request has no Content-Length. Responses carry
   no snapshot data. A failed write leaves the last committed snapshot readable.
 
 ## Authority and storage
 
 Follow the receiver's push bearer pattern. Extend `semon token --dir DIR` with
-an explicit minting scope for `POST /v1/manage/snapshot` and issue that token
+`--snapshot` as the explicit minting scope for `POST /v1/manage/snapshot` and issue that token
 only to the Chief PM. Recheck the route scope and revocation on every request.
 The token grants only this POST. Owner read credentials and push credentials
 cannot submit snapshots. The receiver operator lists IDs with
@@ -260,8 +265,7 @@ The receiver appends one immutable private record per accepted POST, with
 receiver receipt time, credential ID and the validated snapshot. Show the
 committed record with the newest `generated_at`, breaking ties by append
 order. A delayed older snapshot stays in history without replacing newer
-content. The v1 retention proposal is to keep all records until explicit
-operator deletion. There is no automatic expiry or page history browser.
+content. Retention is indefinite. Only explicit operator action deletes records. There is no automatic expiry or page history browser.
 Snapshot data stays receiver-local and outside analytics, the Catalog and the
 Hub. Native body text and T3 thread reads are outside the ingest path.
 
@@ -284,7 +288,8 @@ snapshot, show “No snapshot received.”
    and `waiting_since`.
 2. **Spend.** Show each budget's `spent`, `cap`, `unit`, reset and run-out
    forecast. Give the two Kiro pools, OpenRouter and each lane cap its own
-   budget ID. A null time means the Chief PM supplied no reset or forecast.
+   budget ID. A null time means the Chief PM supplied no reset or forecast. Show “Forecast
+   unavailable” when forecast data is incomplete. Do not extrapolate.
    Show optional breakdown rows by lane or agent and include the model where
    known. Rows use the parent budget's unit and reporting period. Breakdown
    rows can cover part of a budget. Use the budget's reported total.
@@ -293,28 +298,27 @@ snapshot, show “No snapshot received.”
    lane and agent `activity` as run activity and show their `last_seen_at`
    times separately. Show unavailable timestamps as unknown. Flag an active
    lane as overdue when its due time has passed and stale when its last contact
-   is six hours old. Parked and done lanes have no heartbeat requirement.
+   is 6 hours 30 minutes old, allowing 30 minutes beyond the six-hour heartbeat.
+   Parked and done lanes have no heartbeat requirement. The separate Catalog
+   stalls list uses a fixed `idle_minutes = 60`.
    Surface current alerts with their lane.
 4. **Decisions made without the owner today.** Show the Chief PM decision log's
-   entries for the current UTC day, with decision ID, lane, summary, time and
+   entries for the current Asia/Shanghai day, with decision ID, lane, summary, time and
    source link. The owner follows the link to review or veto in the decision
    log. `/manage` has no write controls.
 5. **Hosts.** Show temperature in °C, `ok` or `gated`, and observation time.
    Below the host readings, show live stalled sessions from the existing
    owner-authorized Catalog `stalls` query. Show Catalog unavailability
-   independently of the snapshot's status.
+   independently of the snapshot's status. The query uses Catalog metadata and
+   leaves native question bodies unread.
 
-## Open questions for Chief PM approval
+## V1 data boundaries
 
-- Confirm the 256 KiB limit and five-minute clock allowance against the
-  producer's expected payload size and clock behavior.
-- Confirm indefinite retention with explicit operator deletion, or choose
-  a retention window and a way to authorize pruning.
-- Confirm UTC day boundaries and whether lane staleness should allow a grace
-  period beyond the six-hour heartbeat interval.
-- Confirm the two Kiro pool IDs and who owns the run-out forecast method when
-  provider usage data is delayed or incomplete.
-- Confirm which Chief PM observations support agent availability and run state.
+Structured snapshot timestamps are stored in UTC. The Viewer converts them to
+Asia/Shanghai for display and for the “today” boundary. Budgets, forecasts,
+lane health and run activity come from the supplied snapshot. Native session
+activity does not cross-check the snapshot in v1. The stalled-session list is
+an independent Catalog read.
 
 Prior art: multica (custom license, no code reuse).
 
