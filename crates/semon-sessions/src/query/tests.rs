@@ -1729,21 +1729,43 @@ fn stalls_require_process_evidence_for_the_current_claude_session() {
     // Absence is distinct from unreadable and survives a recorded Facts read.
     fs::remove_file(stat).unwrap();
     fs::remove_dir(home.root.join("proc/42")).unwrap();
-    let facts = crate::local_runtime_facts(&home.options).unwrap();
+    let mut facts = crate::local_runtime_facts(&home.options).unwrap();
     assert!(facts.missing_claude_pids.contains(&42));
     let facts_path = home.root.join("facts.json");
     crate::write_facts(&facts_path, &facts).unwrap();
-    let mut recorded = Query::new(Options {
-        facts: Some(facts_path),
+    let recorded_options = Options {
+        facts: Some(facts_path.clone()),
         cache: home.root.join("recorded.json"),
         ..home.options.clone()
-    });
+    };
+    let mut recorded = Query::new(recorded_options.clone());
+    let publish = |facts: &crate::Facts| {
+        let write = crate::SessionFactsWrite::begin(&recorded_options, "", facts).unwrap();
+        crate::write_facts(&facts_path, facts).unwrap();
+        write.complete().unwrap();
+    };
     assert_observation(
         &mut recorded,
         json!(42),
         json!(false),
         json!("process-gone"),
     );
+    // Facts-only changes republish a warmed catalog in both directions.
+    facts.missing_claude_pids.remove(&42);
+    publish(&facts);
+    assert_observation(&mut recorded, Value::Null, Value::Null, json!("no-output"));
+    facts.missing_claude_pids.insert(42);
+    publish(&facts);
+    assert_observation(
+        &mut recorded,
+        json!(42),
+        json!(false),
+        json!("process-gone"),
+    );
+    // A simultaneously recorded start and absence are contradictory.
+    facts.proc_starts.insert(42, 456);
+    publish(&facts);
+    assert_observation(&mut recorded, Value::Null, Value::Null, json!("no-output"));
 }
 
 #[test]

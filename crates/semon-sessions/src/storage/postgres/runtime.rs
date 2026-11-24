@@ -251,6 +251,7 @@ impl PgProjectionStore {
                 let mut saved = saved.clone();
                 if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
                     saved["summary"]["alive"] = serde_json::Value::Null;
+                    saved["recorded_status"] = serde_json::Value::Null;
                     saved["summary"]["run"] = serde_json::Value::Null;
                     if matches!(
                         saved["summary"]["state"].as_str(),

@@ -1560,12 +1560,15 @@ pub(crate) fn enqueue_facts(
         .proc_starts
         .keys()
         .chain(after.proc_starts.keys())
+        .chain(before.missing_claude_pids.iter())
+        .chain(after.missing_claude_pids.iter())
         .chain(before.runs.keys())
         .chain(after.runs.keys())
         .chain(before.process_ancestors.keys())
         .chain(after.process_ancestors.keys())
     {
         if before.proc_starts.get(pid) != after.proc_starts.get(pid)
+            || before.missing_claude_pids.contains(pid) != after.missing_claude_pids.contains(pid)
             || before.runs.get(pid) != after.runs.get(pid)
             || before.process_ancestors.get(pid) != after.process_ancestors.get(pid)
         {
@@ -1583,6 +1586,8 @@ pub(crate) fn enqueue_facts(
         &crate::facts::MachineFacts::Recorded(Box::new(after.clone())),
     ) {
         if before.proc_starts.get(&pid.pid) != after.proc_starts.get(&pid.pid)
+            || before.missing_claude_pids.contains(&pid.pid)
+                != after.missing_claude_pids.contains(&pid.pid)
             || before.runs.get(&pid.pid) != after.runs.get(&pid.pid)
             || before.process_ancestors.get(&pid.pid) != after.process_ancestors.get(&pid.pid)
         {

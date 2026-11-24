@@ -535,7 +535,9 @@ pub(crate) enum Lock {
 }
 
 fn recorded_claude_proc(facts: &Facts, pid: u32) -> Option<Option<u64>> {
-    if facts.offline_since.is_some() {
+    if facts.offline_since.is_some()
+        || (facts.proc_starts.contains_key(&pid) && facts.missing_claude_pids.contains(&pid))
+    {
         return None;
     }
     facts
