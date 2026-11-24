@@ -1641,6 +1641,7 @@ fn read_retained_peer_in_view(
     Ok(result)
 }
 
+#[cfg(test)]
 fn frozen_reference(
     harness: &str,
     path: &str,
