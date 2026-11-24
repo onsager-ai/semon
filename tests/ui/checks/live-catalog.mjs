@@ -126,6 +126,7 @@ export default async function liveCatalog(browser) {
             'catalog_key',
             'machine',
             'read_scope',
+            'refresh',
             'transcript',
           ]);
           assert.equal(
