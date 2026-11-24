@@ -462,8 +462,10 @@ export async function readNativeTranscript(
     const response = error instanceof ApiError ? error : undefined;
     // The reader can recover a stale saved address by opening the latest page.
     if (window.position === 'address' && response?.code === 'stale_cursor') throw error;
-    if (initial && response?.retryable === true) {
-      const delay = options.recovery.fail(Date.now(), Math.random());
+    if (initial ? response?.retryable === true : response?.code === 'retained_source_preparing') {
+      const delay = initial
+        ? options.recovery.fail(Date.now(), Math.random(), 5)
+        : options.recovery.fail();
       if (delay !== null) {
         options.retry(delay, response);
         return false;

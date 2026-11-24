@@ -9,8 +9,6 @@ export class CatalogRecovery {
   private terminal = false;
   private progress: CatalogRecoveryProgress = {};
 
-  constructor(private readonly maxRetries = 3) {}
-
   get stopped(): boolean {
     if (
       !this.terminal &&
@@ -26,14 +24,14 @@ export class CatalogRecovery {
     return Math.max(0, this.startedAt + CATALOG_RECOVERY_WALL_BUDGET_MS - now);
   }
 
-  fail(now = Date.now(), jitter = 1): number | null {
+  fail(now = Date.now(), jitter = 1, maxRetries = 3): number | null {
     if (this.stopped || this.expired(now)) {
       this.terminal = true;
       return null;
     }
     this.startedAt ??= now;
     ++this.failures;
-    if (this.failures > this.maxRetries) {
+    if (this.failures > maxRetries) {
       this.terminal = true;
       return null;
     }

@@ -3441,7 +3441,7 @@ export function createCatalogViewer(
         retry(delay, error) {
           view.note =
             error?.history || error?.code === 'retained_source_preparing' ? readError(error) : '';
-          view.transientNote = false;
+          view.transientNote = store.selectedPage() !== null;
           view.retry = scope.timeout(() => {
             view.retry = undefined;
             if (!current()) return;
@@ -3491,7 +3491,9 @@ export function createCatalogViewer(
           error instanceof ApiError && error.status === 503 && !error.history
             ? error.message
             : readError(error);
-        view.transientNote = error instanceof ApiError && error.retryable === true;
+        view.transientNote = store.selectedPage()
+          ? retryable(error)
+          : error instanceof ApiError && error.retryable === true;
       }
     } finally {
       if (view.navigationEpoch === epoch) {
@@ -3897,7 +3899,7 @@ export function createCatalogViewer(
         note: '',
         opening: true,
         identityLoading: false,
-        recovery: new CatalogRecovery(capabilities.native_transcript ? 5 : undefined),
+        recovery: new CatalogRecovery(),
         renderedRevision: -1,
         renderedNote: '',
         renderedFooter: '',

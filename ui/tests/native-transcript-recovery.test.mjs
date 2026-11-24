@@ -71,32 +71,30 @@ const page = {
   relationship_context: { state: 'complete', turn_ids: [], handoffs: [] },
 };
 
-function fixture(t, answers) {
-  let requests = 0;
-  t.mock.method(globalThis, 'fetch', async () => {
-    const answer = answers[requests++];
+function fixture(t, answers, scope = 'current') {
+  const paths = [];
+  t.mock.method(globalThis, 'fetch', async (path) => {
+    const answer = answers[paths.push(path) - 1];
     const [status, body] = typeof answer === 'function' ? await answer() : answer;
     return Response.json(body, { status });
   });
-  const store = new CatalogNativeTranscriptStore(selection, 'current');
+  const store = new CatalogNativeTranscriptStore(selection, scope);
   const delays = [],
     timeouts = [];
-  const recovery = new CatalogRecovery(5);
-  const read = () =>
-    readNativeTranscript(
-      store,
-      { position: 'latest' },
-      {
-        read(timeoutMs) {
-          timeouts.push(timeoutMs);
-          return requestJson('/api/session-transcript?sid=example');
-        },
-        current: () => true,
-        recovery,
-        retry: (delay) => delays.push(delay),
+  const recovery = new CatalogRecovery();
+  const read = (window = { position: 'latest' }) =>
+    readNativeTranscript(store, window, {
+      read(timeoutMs) {
+        timeouts.push(timeoutMs);
+        const query = new URLSearchParams({ sid: 'example', scope });
+        if (window.position === 'earlier') query.set('cursor', window.cursor);
+        return requestJson('/api/session-transcript?' + query);
       },
-    );
-  return { store, read, delays, timeouts, recovery, requests: () => requests };
+      current: () => true,
+      recovery,
+      retry: (delay) => delays.push(delay),
+    });
+  return { store, read, delays, timeouts, recovery, paths, requests: () => paths.length };
 }
 
 const failure = (status, code, retryable, progress) => [
@@ -187,4 +185,42 @@ test('full jitter samples different offsets across the backoff window', async (t
   assert.equal(await read(), false);
   assert.equal(await read(), false);
   assert.deepEqual(delays, [100, 1800]);
+});
+
+test('an earlier retained page retries the same cursor after source preparation', async (t) => {
+  const random = t.mock.method(Math, 'random', () => 0.15);
+  const latest = {
+    ...page,
+    read_scope: 'retained_history',
+    identity: { ...page.identity, read_scope: 'retained_history' },
+    earlier_cursor: 'previous-window',
+  };
+  const earlierEntry = {
+    ...page.entries[0],
+    text: 'Earlier retained entry',
+    entry_id: 'earlier-prompt',
+    address: { ...page.entries[0].address, entry_id: 'earlier-prompt' },
+  };
+  const earlierPage = {
+    ...latest,
+    position: 'earlier',
+    entries: [earlierEntry],
+    earlier_cursor: null,
+  };
+  const { store, read, delays, timeouts, paths } = fixture(
+    t,
+    [[200, latest], failure(503, 'retained_source_preparing', true), [200, earlierPage]],
+    'retained_history',
+  );
+  assert.equal(await read(), true);
+  const window = { position: 'earlier', cursor: store.earlierCursor() };
+  assert.equal(await read(window), false);
+  assert.deepEqual(delays, [1000]);
+  assert.equal(random.mock.callCount(), 0);
+  assert.equal(await read(window), true);
+  assert.equal(paths[1], paths[2]);
+  assert.match(paths[2], /[&?]cursor=previous-window(?:&|$)/);
+  assert.deepEqual(timeouts, [15_000, 15_000, 15_000]);
+  assert.equal(store.entries()[0].entry.text, 'Earlier retained entry');
+  assert.equal(store.earlierCursor(), null);
 });
