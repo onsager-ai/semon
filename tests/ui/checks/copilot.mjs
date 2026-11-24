@@ -33,7 +33,13 @@ export default async function copilotCheck(browser) {
         families.push({ version, name, id, file });
       }
     server = await start(root);
-    const catalog = await nativeRead(server);
+    let catalog = await nativeRead(server);
+    const deadline = Date.now() + 10_000;
+    while (catalog.completeness?.state === 'partial') {
+      assert.ok(Date.now() < deadline, 'Copilot Catalog publication did not finish');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      catalog = await nativeRead(server);
+    }
     assert.equal(catalog.items.filter((s) => s.harness === 'copilot').length, families.length);
     const sessions = await Promise.all(
       families.map((fixture) => nativeSession(server, fixture.id)),

@@ -1215,7 +1215,7 @@ async function runScreen(browser, screen, server, fixture) {
                 entry.id >= after &&
                 entry.endpoint === '/api/sessions' &&
                 entry.query.sid === 'marathon' &&
-                entry.query.limit === '1',
+                (entry.query.observe === 'transcript' || entry.query.limit === '1'),
             ),
           previous,
           { timeout: 60_000, polling: 50 },
@@ -1227,7 +1227,7 @@ async function runScreen(browser, screen, server, fixture) {
                 entry.id >= after &&
                 entry.endpoint === '/api/sessions' &&
                 entry.query.sid === 'marathon' &&
-                entry.query.limit === '1',
+                (entry.query.observe === 'transcript' || entry.query.limit === '1'),
             ),
           previous,
         );

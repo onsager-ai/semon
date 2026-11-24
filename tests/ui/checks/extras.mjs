@@ -1644,7 +1644,10 @@ export default async function (browser) {
         const page = await served(browser, { extras: true, size, dark });
         await goto(page, { v: 'session', id: spawn.from }, D);
         const card = page.locator(`.event[data-h="${spawn.id}"]`);
-        await card.getByText('not linked yet', { exact: true }).waitFor();
+        await card
+          .locator('.ev-result')
+          .filter({ hasText: /^Target\s*not linked yet$/ })
+          .waitFor();
         r.expect(
           (await card.getByText('Spawn requested', { exact: true }).count()) === 1 &&
             (await card.locator('a, .hicon, .ev-head button').count()) === 0,

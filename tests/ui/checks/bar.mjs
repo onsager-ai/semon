@@ -30,7 +30,14 @@ export default async function barCheck(browser) {
         await menu.waitFor();
         assert.match(await menu.textContent(), /at API rates/);
         assert.match(await menu.textContent(), /Claude Code/);
-        assert.match(await menu.textContent(), /feat\/offline-sync|Runs/);
+        assert.equal(
+          await menu
+            .locator('dt')
+            .filter({ hasText: /^Branch$/ })
+            .locator('+ dd')
+            .textContent(),
+          D.SESS.harbor.branch,
+        );
         const rectangle = await menu.boundingBox();
         assert.ok(rectangle.x >= 0 && rectangle.x + rectangle.width <= width + 1);
         await page.keyboard.press('Escape');

@@ -6,7 +6,7 @@ export function installRefreshTracing() {
     const url = new URL(typeof input === 'string' ? input : input.url, location.href);
     if (!url.pathname.startsWith('/api/')) return null;
     const query = Object.fromEntries(
-      ['machine', 'sid', 'after', 'limit', 'generation', 'errors_generation']
+      ['machine', 'sid', 'scope', 'observe', 'after', 'limit', 'generation', 'errors_generation']
         .filter((key) => url.searchParams.has(key))
         .map((key) => [key, url.searchParams.get(key)]),
     );
@@ -37,10 +37,16 @@ export function installRefreshTracing() {
         try {
           const value = await nativeJson.call(this);
           entry.jsonCompletedAt = now();
-          entry.generation = value?.projection?.generation ?? value?.generation ?? null;
-          entry.total = value?.projection?.total ?? null;
+          entry.generation =
+            value?.identity?.generation ??
+            value?.projection?.generation ??
+            value?.generation ??
+            null;
+          entry.total = value?.transcript?.total ?? value?.projection?.total ?? null;
           entry.selected =
-            value?.items?.find((item) => item.key === 'marathon')?.transcript ?? null;
+            value?.transcript ??
+            value?.items?.find((item) => item.key === 'marathon')?.transcript ??
+            null;
           entry.refresh = value?.refresh ?? null;
           return value;
         } catch (error) {

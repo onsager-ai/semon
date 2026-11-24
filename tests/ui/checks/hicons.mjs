@@ -515,7 +515,10 @@ export default async function hiconsCheck(browser) {
     for (const event of senderFixtures) {
       await goto(page, { v: 'session', id: event.from }, D);
       const card = page.locator(`.event[data-h="${event.id}"]`);
-      await card.getByText('not linked yet', { exact: true }).waitFor();
+      await card
+        .locator('.ev-result')
+        .filter({ hasText: /^Target\s*not linked yet$/ })
+        .waitFor();
       r.expect(
         (await card.locator('.hicon, .ev-head a, .ev-head button').count()) === 0,
         tag + ': ' + event.kind + ' sender card exposes an unlinked target',

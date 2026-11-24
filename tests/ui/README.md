@@ -35,6 +35,12 @@ its completion witness is the native-publication success message in the CI log.
   and others) are uploaded in each suite's `viewer-ui-<suite>` artifact for
   human review only. Text, contrast, geometry, touch-target, DOM, coverage,
   order and transport assertions stay blocking.
+- Each stable-order suite records the held and applied Sessions order in
+  `out/order/` for every selected theme and viewport.
+- Native relationship probes cover the sender’s recorded outcome and the
+  “not linked yet” target. The trace contains the selected sender, so the old
+  fold control for linked agents and waiting cross-session cards are outside
+  the representative native touch census.
 - The Sessions-default decision in `docs/design/ui-design-brief.md` supersedes
   Home navigation and inbox assertions. Root/title waits now require Sessions;
   ordering leaves the list through Analytics and returns to Sessions; pending

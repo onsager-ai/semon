@@ -416,7 +416,8 @@ export default async function turnsCheck(browser) {
           );
           const bar = document.querySelector('#topbar').getBoundingClientRect();
           if (!t) return { st, found: false };
-          const r = t.getBoundingClientRect();
+          const marker = t.querySelector('[data-entry-key].flash');
+          const r = (marker ?? t).getBoundingClientRect();
           return {
             found: true,
             turn: st.turn,
@@ -424,7 +425,7 @@ export default async function turnsCheck(browser) {
             barBottom: Math.round(bar.bottom),
             barHidden: document.body.classList.contains('bar-hidden'),
             inView: r.top >= bar.bottom - 1 && r.top < innerHeight - 40,
-            flash: t.classList.contains('flash'),
+            flash: !!marker,
             scrollY: Math.round(scrollY),
           };
         });
@@ -476,7 +477,10 @@ export default async function turnsCheck(browser) {
         await goto(page, { v: 'sessions' }, D0);
         await goto(page, { v: 'session', id: started.sid, turn: started.id }, D0);
         await page.waitForFunction(
-          (turn) => document.querySelector('.turn.flash[data-turn="' + CSS.escape(turn) + '"]'),
+          (turn) =>
+            document.querySelector(
+              '.turn[data-turn="' + CSS.escape(turn) + '"] [data-entry-key].flash',
+            ),
           started.id,
         );
         D1.fromSessions = { expectTurn: started.id, ...(await landed()) };
@@ -779,7 +783,7 @@ export default async function turnsCheck(browser) {
         if (!h) throw new Error('The fixture must exercise an unlinked ' + kind);
         await goto(page, { v: 'session', id: h.from }, D0);
         const card = page.locator(`.event[data-h="${h.id}"]`);
-        const target = card.getByText('not linked yet', { exact: true });
+        const target = card.locator('.ev-result').filter({ hasText: /^Target\s*not linked yet$/ });
         await target.waitFor();
         const before = page.url();
         await target.click();

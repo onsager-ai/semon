@@ -110,9 +110,8 @@ export default async function homeCheck(browser) {
     const over = () => overflow(page);
     const nav = async (go) => {
       await page.evaluate(() => window.scrollTo(0, 0));
-      await page.click('#lead-btn');
-      await page.waitForTimeout(280);
-      await page.click('.nav-item[data-go="' + go + '"]');
+      if (!(await page.locator('body.drawer-open').count())) await page.click('#lead-btn');
+      await page.locator('.nav-item[data-go="' + go + '"]').click();
       await page.waitForTimeout(150);
     };
 

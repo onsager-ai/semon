@@ -143,7 +143,10 @@ export default async function tokensCheck(browser) {
       }
       if (name === 'sender-card') {
         const card = page.locator(`.event[data-h="${sender.id}"]`);
-        await card.getByText('not linked yet', { exact: true }).waitFor();
+        await card
+          .locator('.ev-result')
+          .filter({ hasText: /^Target\s*not linked yet$/ })
+          .waitFor();
         r.expect(
           (await card.locator('.who-link').count()) === 0,
           tag + ': sender card has no target link',
