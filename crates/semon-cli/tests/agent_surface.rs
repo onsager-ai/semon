@@ -82,7 +82,7 @@ impl Home {
         home.write("proc/31/stat", &format!("31 (claude) {}\n", stat.join(" ")));
         home.write(
             "claude/sessions/31.json",
-            &json!({"pid": 31, "sessionId": "asker", "procStart": 777, "status": "idle", "name": "asker-lane"})
+            &json!({"pid": 31, "sessionId": "asker", "procStart": 777, "status": "idle", "updatedAt": at(2, 1), "name": "asker-lane"})
                 .to_string(),
         );
         let codex = |time: String, kind: &str, payload: Value| json!({"timestamp": time, "type": kind, "payload": payload});

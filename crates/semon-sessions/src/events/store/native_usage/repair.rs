@@ -49,7 +49,13 @@ struct Batch {
     bytes: u64,
 }
 
-fn prepare(store: &SqliteStore, path: &str, ledger: &Ledger, resume: Resume) -> io::Result<Batch> {
+fn prepare(
+    store: &SqliteStore,
+    path: &str,
+    ledger: &Ledger,
+    resume: Resume,
+    namespace: &crate::storage::Namespace,
+) -> io::Result<Batch> {
     let Resume {
         cursor,
         model,
@@ -99,8 +105,13 @@ fn prepare(store: &SqliteStore, path: &str, ledger: &Ledger, resume: Resume) -> 
     }
     let db = Connection::open_with_flags(&store.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(sql_error)?;
-    let proof =
-        chunk_proofs::Focused::with_db(chunk_proofs::Snapshot::new(db), &store.path, path, ledger)?;
+    let proof = chunk_proofs::Focused::with_db_for_namespace(
+        chunk_proofs::Snapshot::new(db),
+        &store.path,
+        path,
+        ledger,
+        namespace,
+    )?;
     let mut reader = BufReader::new(Verified {
         file,
         proof,
@@ -242,6 +253,7 @@ fn progress(
 pub(in crate::events::store) fn advance(
     store: &mut SqliteStore,
     options: &crate::Options,
+    namespace: &crate::storage::Namespace,
 ) -> io::Result<(bool, Option<String>)> {
     let sql_error = io::Error::other;
     let selected: Option<PendingSource> = store.connection.query_row("SELECT source_path,receipt,source_id,cursor,last_model,tree_root,projection_id FROM native_tree_repairs WHERE state IN ('ready','running') ORDER BY last_attempt,source_path LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,u64::try_from(r.get::<_,i64>(3)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Integer,Box::new(e)))?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(sql_error)?;
@@ -372,6 +384,7 @@ pub(in crate::events::store) fn advance(
             projection_id,
             harness: input.expect("input checked").root.as_str().into(),
         },
+        namespace,
     ) {
         Ok(batch) => batch,
         Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),

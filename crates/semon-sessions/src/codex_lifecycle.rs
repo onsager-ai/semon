@@ -578,7 +578,10 @@ mod tests {
             crate::events::scan_file(&home.path, "codex", &mut cache, &mut false).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         let mut steps = 0;
-        while cache.advance_tree_repair(&home.options).unwrap() {
+        while cache
+            .advance_tree_repair(&home.options, &crate::storage::Namespace::local())
+            .unwrap()
+        {
             steps += 1;
             assert!(steps < 8);
         }

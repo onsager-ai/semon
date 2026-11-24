@@ -322,7 +322,7 @@ pub(crate) struct SessionFacts {
     pub(crate) pid: Option<u32>,
     /// Whether that process runs: `true` when its start time matches (or its
     /// writer lock is held), `false` when the record's process is gone,
-    /// `None` when there is no process record to check.
+    /// `None` when current process evidence is missing, stale or unreadable.
     pub(crate) alive: Option<bool>,
     /// The status the Claude pid file recorded (`busy`, `idle`, `shell`, `waiting`, …).
     pub(crate) recorded_status: Option<String>,
@@ -897,12 +897,14 @@ pub(crate) struct PidFile {
     pub(crate) pid: u32,
     pub(crate) session: String,
     pub(crate) alive: bool,
+    pub(crate) gone: bool,
     /// The process start time the file records.
     pub(crate) start: Option<u64>,
     /// When the process started, in epoch milliseconds (`startedAt`): a
     /// process that resumed a session into the same file ran none of the
     /// background calls logged before it.
     started: Option<i64>,
+    updated: Option<i64>,
     status: Option<String>,
     /// What the process is waiting on you for, when it says so
     /// (`input needed`, `permission prompt`): the record's `waitingFor`.
@@ -1017,20 +1019,31 @@ pub(crate) fn pid_files(options: &Options, machine: &MachineFacts) -> Vec<PidFil
             .get("procStart")
             .and_then(Value::as_u64)
             .or_else(|| field(&record, "procStart").and_then(|value| value.parse().ok()));
+        let alive = start
+            .zip(machine.claude_proc_start(options, pid))
+            .map(|(start, observed)| Some(start) == observed);
+        let started = record.get("startedAt").and_then(Value::as_i64);
+        let status_updated = record
+            .get("statusUpdatedAt")
+            .and_then(Value::as_i64)
+            .or_else(|| field(&record, "statusUpdatedAt").and_then(events::parse_ms));
         result.push(PidFile {
             pid,
             session: session.to_owned(),
-            alive: start.is_some() && machine.proc_start(options, pid) == start,
+            alive: alive == Some(true),
+            gone: alive == Some(false),
             start,
-            started: record.get("startedAt").and_then(Value::as_i64),
+            started,
+            updated: record
+                .get("updatedAt")
+                .and_then(Value::as_i64)
+                .or(status_updated)
+                .or(started),
             status: field(&record, "status").map(str::to_owned),
             waiting_for: field(&record, "waitingFor")
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_owned),
-            waiting_since: record
-                .get("statusUpdatedAt")
-                .and_then(Value::as_i64)
-                .or_else(|| field(&record, "statusUpdatedAt").and_then(events::parse_ms)),
+            waiting_since: status_updated,
             name: field(&record, "name").map(str::to_owned),
         });
     }
@@ -1654,8 +1667,8 @@ struct Sess {
     names: BTreeSet<String>,
     refs: Vec<Ref>,
     parent: Option<usize>,
-    /// Every pid file that names this lineage: (pid, alive, status, start).
-    pid_files: Vec<(u32, bool, Option<String>, Option<u64>)>,
+    /// Every pid file that names this lineage.
+    pid_files: Vec<PidFile>,
     /// The earliest and latest line's time, when any line has one.
     first: Option<i64>,
     last: Option<i64>,
@@ -2247,23 +2260,43 @@ impl<'a> Builder<'a> {
                 }
                 let (kind, pid, alive, recorded_status, run) = match session.kind {
                     SessKind::Lineage => {
-                        let live = session.pid_files.iter().find(|(_, alive, _, _)| *alive);
-                        match (live, session.pid_files.as_slice()) {
-                            (Some((pid, _, status, start)), _) => (
+                        const PID_CLOCK_SKEW_MS: i64 = 5 * 60_000;
+                        match session.pid_files.as_slice() {
+                            [pid] if pid.start.is_some() && pid.updated.is_some() && pid.alive => (
                                 "session",
-                                Some(*pid),
+                                Some(pid.pid),
                                 Some(true),
-                                status.clone(),
-                                run_of(*pid, *start),
+                                pid.status.clone(),
+                                run_of(pid.pid, pid.start),
                             ),
-                            // One pid file, and its process is gone.
-                            (None, [(pid, _, status, _)]) => {
-                                ("session", Some(*pid), Some(false), status.clone(), None)
+                            [pid]
+                                if pid.start.is_some()
+                                    && pid.gone
+                                    && pid.updated.zip(session.last).is_some_and(
+                                        |(updated, last)| {
+                                            updated.saturating_sub(last) > PID_CLOCK_SKEW_MS
+                                        },
+                                    ) =>
+                            {
+                                (
+                                    "session",
+                                    Some(pid.pid),
+                                    Some(false),
+                                    pid.status.clone(),
+                                    None,
+                                )
                             }
-                            // No process record: nothing to check.
-                            (None, []) => ("session", None, None, None, None),
-                            // Several, all gone: which one ran last isn't logged.
-                            (None, _) => ("session", None, Some(false), None, None),
+                            _ => (
+                                "session",
+                                None,
+                                None,
+                                session
+                                    .pid_files
+                                    .iter()
+                                    .any(PidFile::busy)
+                                    .then(|| "busy".to_owned()),
+                                None,
+                            ),
                         }
                     }
                     // A subagent runs in its parent's process: no record of
@@ -2395,9 +2428,7 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let session = &mut self.sessions[index];
-            session
-                .pid_files
-                .push((pid.pid, pid.alive, pid.status.clone(), pid.start));
+            session.pid_files.push(pid.clone());
             if let Some(name) = &pid.name {
                 session.names.insert(plain_name(name));
             }

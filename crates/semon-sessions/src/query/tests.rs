@@ -1167,7 +1167,7 @@ impl Home {
     fn pid_file(&self, pid: u32, session: &str, status: &str, start: u64) {
         self.write(
             &format!("claude/sessions/{pid}.json"),
-            &json!({"pid": pid, "sessionId": session, "procStart": start, "status": status, "name": format!("{session}-lane")})
+            &json!({"pid": pid, "sessionId": session, "procStart": start, "status": status, "updatedAt": NOW, "name": format!("{session}-lane")})
                 .to_string(),
         );
     }
@@ -1280,7 +1280,10 @@ fn fixture() -> Home {
         ],
     );
     // Its pid file says busy, but no process 32 runs.
-    home.pid_file(32, "crashed", "busy", 555);
+    home.write(
+        "claude/sessions/32.json",
+        &json!({"pid": 32, "sessionId": "crashed", "procStart": 555, "status": "busy", "updatedAt": at(3, 7)}).to_string(),
+    );
     home.top(
         "done",
         &[
@@ -1638,6 +1641,169 @@ fn read_transcript_pages_as_the_viewer_does() {
         ),
         "invalid_arguments"
     );
+}
+
+#[test]
+fn stalls_require_process_evidence_for_the_current_claude_session() {
+    let home = Home::new("testbox");
+    let first = human("resumed", ts(1, 0), "Start the example");
+    let reply = assistant("resumed", ts(1, 1), vec![text("First run")]);
+    let continued = human("resumed", ts(2, 0), "Continue the example");
+    let latest = assistant("resumed", ts(2, 1), vec![text("Resumed run")]);
+    home.top("resumed", &[first, reply, continued, latest]);
+    let mut pid_record = json!({
+        "pid": 42, "sessionId": "resumed", "procStart": "123", "status": "busy",
+        "startedAt": at(1, 0), "statusUpdatedAt": at(1, 1), "updatedAt": at(1, 2)
+    });
+    let mut query = home.query();
+    let assert_observation = |query: &mut Query, pid: Value, alive: Value, reason: Value| {
+        let listed = call(query, "list_sessions", json!({}));
+        assert_eq!(listed["total"], 1);
+        let row = &listed["sessions"][0];
+        assert_eq!(row["id"], "resumed");
+        assert_eq!(row["parent"], Value::Null);
+        assert_eq!(row["last_activity"], at(2, 1));
+        assert_eq!(row["pid"], pid);
+        assert_eq!(row["alive"], alive);
+        let stalls = call(query, "stalls", json!({"idle_minutes": 60}));
+        if reason.is_null() {
+            assert_eq!(stalls["stalls"], json!([]));
+        } else {
+            assert_eq!(stalls["stalls"].as_array().unwrap().len(), 1);
+            assert_eq!(stalls["stalls"][0]["stall_reason"], reason);
+            assert_eq!(stalls["stalls"][0]["idle_ms"], NOW - at(2, 1));
+        }
+    };
+    assert_observation(&mut query, Value::Null, Value::Null, Value::Null);
+
+    // The dead process's registration predates activity on the same transcript.
+    home.write("claude/sessions/42.json", &pid_record.to_string());
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+
+    // An unidentifiable process is unknown, even with a current busy record.
+    pid_record["updatedAt"] = json!(at(2, 6));
+    home.write("claude/sessions/42.json", &pid_record.to_string());
+    let stat = home.write("proc/42/stat", "invalid stat\n");
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+
+    // A checked start time qualifies the process. A different start then
+    // proves that process is gone even though its numeric PID is in use.
+    home.process(42, 123);
+    assert_observation(&mut query, json!(42), json!(true), json!("no-output"));
+    home.process(42, 456);
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    pid_record["updatedAt"] = json!(at(2, 7));
+    home.write("claude/sessions/42.json", &pid_record.to_string());
+    assert_observation(&mut query, json!(42), json!(false), json!("process-gone"));
+
+    // A second registration makes the evidence ambiguous before timestamp filtering.
+    let duplicate = home.write(
+        "claude/sessions/43.json",
+        &json!({
+            "pid":43, "sessionId":"resumed", "status":"busy"
+        })
+        .to_string(),
+    );
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    home.write(
+        "claude/sessions/43.json",
+        &json!({
+            "pid":43, "sessionId":"resumed", "procStart":123, "status":"busy", "updatedAt":at(1, 0)
+        })
+        .to_string(),
+    );
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    fs::remove_file(duplicate).unwrap();
+    let mut incomplete = pid_record.clone();
+    incomplete.as_object_mut().unwrap().remove("procStart");
+    home.write("claude/sessions/42.json", &incomplete.to_string());
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    incomplete = pid_record.clone();
+    for key in ["startedAt", "statusUpdatedAt", "updatedAt"] {
+        incomplete.as_object_mut().unwrap().remove(key);
+    }
+    home.write("claude/sessions/42.json", &incomplete.to_string());
+    assert_observation(&mut query, Value::Null, Value::Null, json!("no-output"));
+    home.write("claude/sessions/42.json", &pid_record.to_string());
+
+    // Absence is distinct from unreadable and survives a recorded Facts read.
+    fs::remove_file(stat).unwrap();
+    fs::remove_dir(home.root.join("proc/42")).unwrap();
+    let mut facts = crate::local_runtime_facts(&home.options).unwrap();
+    assert!(facts.missing_claude_pids.contains(&42));
+    let facts_path = home.root.join("facts.json");
+    crate::write_facts(&facts_path, &facts).unwrap();
+    let recorded_options = Options {
+        facts: Some(facts_path.clone()),
+        cache: home.root.join("recorded.json"),
+        ..home.options.clone()
+    };
+    let mut recorded = Query::new(recorded_options.clone());
+    let publish = |facts: &crate::Facts| {
+        let write = crate::SessionFactsWrite::begin(&recorded_options, "", facts).unwrap();
+        crate::write_facts(&facts_path, facts).unwrap();
+        write.complete().unwrap();
+    };
+    assert_observation(
+        &mut recorded,
+        json!(42),
+        json!(false),
+        json!("process-gone"),
+    );
+    // Facts-only changes republish a warmed catalog in both directions.
+    facts.missing_claude_pids.remove(&42);
+    publish(&facts);
+    assert_observation(&mut recorded, Value::Null, Value::Null, json!("no-output"));
+    facts.missing_claude_pids.insert(42);
+    publish(&facts);
+    assert_observation(
+        &mut recorded,
+        json!(42),
+        json!(false),
+        json!("process-gone"),
+    );
+    // A simultaneously recorded start and absence are contradictory.
+    facts.proc_starts.insert(42, 456);
+    publish(&facts);
+    assert_observation(&mut recorded, Value::Null, Value::Null, json!("no-output"));
+}
+
+#[test]
+fn busy_claude_process_that_dies_after_its_last_pid_update_still_stalls() {
+    let home = Home::new("testbox");
+    home.process(42, 123);
+    home.write(
+        "claude/sessions/42.json",
+        &json!({
+            "pid":42,"sessionId":"crash","procStart":123,"status":"busy","updatedAt":at(1, 1)
+        })
+        .to_string(),
+    );
+    home.top(
+        "crash",
+        &[
+            human("crash", ts(1, 0), "Run the example"),
+            assistant("crash", ts(1, 2), vec![text("Still working")]),
+        ],
+    );
+    let mut query = home.query();
+    let args = json!({"idle_minutes":60});
+    assert_eq!(
+        call(&mut query, "stalls", args.clone())["stalls"][0]["alive"],
+        true
+    );
+    fs::remove_dir_all(home.root.join("proc/42")).unwrap();
+    let stalls = call(&mut query, "stalls", args);
+    assert_eq!(stalls["stalls"].as_array().unwrap().len(), 1);
+    let crash = &stalls["stalls"][0];
+    assert_eq!(crash["id"], "crash");
+    assert_eq!(crash["last_activity"], at(1, 2));
+    assert_eq!(crash["alive"], Value::Null);
+    assert_eq!(crash["stall_reason"], "no-output");
+    let recent = query
+        .call_at("stalls", &json!({"idle_minutes":60}), at(1, 30))
+        .unwrap();
+    assert_eq!(recent["stalls"], json!([]));
 }
 
 #[test]
@@ -2755,9 +2921,9 @@ fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
                 );
             }
             if revision == 2 {
-                let path = home.root.join("proc/30/stat");
+                let path = home.root.join("proc/30");
                 if path.exists() {
-                    fs::remove_file(path).unwrap();
+                    fs::remove_dir_all(path).unwrap();
                 }
             }
             let calls = [
@@ -2949,6 +3115,11 @@ fn assert_contract_reference(
     project_activity(&mut actual);
     let mut expected = rows[0]["response"].clone();
     lifecycle_contract(&mut expected);
+    if tool == "stalls"
+        && let Some(ok) = expected.get_mut("ok")
+    {
+        ok["rule"] = json!(STALL_RULE);
+    }
     assert_eq!(
         actual, expected,
         "{scope}: {scenario}, multiple={multiple}, {tool} {args}"

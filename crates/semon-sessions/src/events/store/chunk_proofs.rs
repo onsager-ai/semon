@@ -402,11 +402,18 @@ impl Focused {
     ) -> io::Result<Self> {
         let mut diagnostic = HeaderOpenDiagnostic::default();
         let result = (|| {
-            let db = super::focused_connection(cache)
+            let db = super::focused_index_connection(cache)
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
             db.busy_timeout(Duration::from_millis(100))
                 .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
-            Self::with_db_inner(Snapshot::new(db), cache, path, ledger, &mut diagnostic)
+            Self::with_db_inner(
+                Snapshot::new(db),
+                cache,
+                path,
+                ledger,
+                None,
+                &mut diagnostic,
+            )
         })();
         if let Err(error) = &result
             && let Some(stage) = FailureStage::of(error)
@@ -424,8 +431,28 @@ impl Focused {
         path: &str,
         ledger: &Ledger,
     ) -> io::Result<Self> {
+        Self::with_db_qualified(db, cache, path, ledger, None)
+    }
+
+    pub(super) fn with_db_for_namespace(
+        db: Arc<Snapshot>,
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        namespace: &crate::storage::Namespace,
+    ) -> io::Result<Self> {
+        Self::with_db_qualified(db, cache, path, ledger, Some(namespace))
+    }
+
+    fn with_db_qualified(
+        db: Arc<Snapshot>,
+        cache: &Path,
+        path: &str,
+        ledger: &Ledger,
+        namespace: Option<&crate::storage::Namespace>,
+    ) -> io::Result<Self> {
         let mut diagnostic = HeaderOpenDiagnostic::default();
-        let result = Self::with_db_inner(db, cache, path, ledger, &mut diagnostic);
+        let result = Self::with_db_inner(db, cache, path, ledger, namespace, &mut diagnostic);
         if let Err(error) = &result
             && let Some(stage) = FailureStage::of(error)
         {
@@ -440,6 +467,7 @@ impl Focused {
         cache: &Path,
         path: &str,
         ledger: &Ledger,
+        namespace: Option<&crate::storage::Namespace>,
         diagnostic: &mut HeaderOpenDiagnostic,
     ) -> io::Result<Self> {
         let connection = db.lock().map_err(|_| {
@@ -460,8 +488,12 @@ impl Focused {
                 FailureStage::HeaderStore.wrap(io::Error::other("Native proof store changed"))
             );
         }
-        super::require_current(&connection)
+        super::require_index_current(&connection)
             .map_err(|error| FailureStage::ProofOpenDb.wrap(error))?;
+        if let Some(namespace) = namespace {
+            crate::storage::sqlite::qualify(&connection, namespace)
+                .map_err(|error| FailureStage::ProofOpenDb.wrap(io::Error::other(error)))?;
+        }
         if let Some((_, index)) = super::ledger_row(&connection, path).ok().flatten() {
             diagnostic.index_ledger_digest = Some(crate::source_carrier::ledger_digest(&index));
             diagnostic.index_offset = Some(index.offset);
@@ -1445,6 +1477,34 @@ mod tests {
         let reader = Focused::open(&path, "original", &ledger).unwrap();
         assert_eq!(reader.prefix, prefix("original"));
         drop(reader);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repair_proof_snapshot_refuses_a_foreign_namespace() {
+        let root = cleanup_root();
+        let path = root.join("index.sqlite3");
+        let mut store = cleanup_store(&root, "index.sqlite3");
+        let (ledger, index) = cleanup_proof(1, 0);
+        let local = crate::storage::Namespace::local();
+        let foreign = crate::storage::Namespace::new("foreign").unwrap();
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        let open = |namespace: &crate::storage::Namespace| {
+            let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            Focused::with_db_for_namespace(Snapshot::new(db), &path, "original", &ledger, namespace)
+        };
+        assert!(open(&local).is_ok());
+        let tx = store.connection.transaction().unwrap();
+        crate::storage::sqlite::bind_connection(&tx, &foreign).unwrap();
+        tx.commit().unwrap();
+        let Err(error) = open(&local) else {
+            panic!("proof opened with a foreign namespace");
+        };
+        assert_eq!(FailureStage::of(&error), Some(FailureStage::ProofOpenDb));
+        assert!(open(&foreign).is_ok());
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

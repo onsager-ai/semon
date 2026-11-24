@@ -831,7 +831,7 @@ pub(crate) fn qualified_analytics_incarnation(
     }
     let (stamp, bound) = crate::storage::sqlite::binding(db)
         .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
-    if stamp.as_deref() != Some(crate::storage::sqlite::stamp().as_str()) {
+    if !crate::storage::sqlite::index_stamp_current(stamp.as_deref()) {
         return Err(Error::new(ErrorKind::UnsupportedState, Stage::Index));
     }
     if bound.is_some_and(|bound| bound != "local") {
@@ -890,7 +890,9 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
         .map_err(io::Error::other)?;
     let stages: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='catalog_semantic_stage')", [], |row| row.get(0)).map_err(io::Error::other)?;
     let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_backfill_state' AND value IN ('discovering','draining')) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_gc' AND value='1')",[],|row|row.get(0)).map_err(io::Error::other)?;
-    Ok(pending || (stages && semantic_stage::active(&connection).map_err(io::Error::other)?))
+    Ok(pending
+        || catalog_version_blocked(&connection).map_err(io::Error::other)?
+        || (stages && semantic_stage::active(&connection).map_err(io::Error::other)?))
 }
 
 /// Qualify a former Catalog source as a verified relocation of a current one.
@@ -1303,13 +1305,29 @@ pub(crate) fn begin_catalog_recovery(options: &crate::Options, reason: &str) -> 
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
     require_current_sql(&tx).map_err(io::Error::other)?;
-    tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');").map_err(io::Error::other)?;
+    start_catalog_recovery(&tx, reason).map_err(io::Error::other)?;
+    tx.commit().map_err(io::Error::other)
+}
+
+// Cohort writes can advance catalog_version before all sources have been
+// republished. The recovery target fences reads across batches and restarts.
+fn catalog_version_status(connection: &Connection) -> rusqlite::Result<(bool, Option<String>)> {
+    connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1), (SELECT value FROM meta WHERE key='catalog_recovery_version')")?
+        .query_row([crate::model::summary::CATALOG_VERSION.to_string()], |row| Ok((row.get(0)?, row.get(1)?)))
+}
+
+pub(crate) fn catalog_version_blocked(connection: &Connection) -> rusqlite::Result<bool> {
+    let (stale, recovering) = catalog_version_status(connection)?;
+    Ok(stale || recovering.is_some())
+}
+
+fn start_catalog_recovery(tx: &Transaction<'_>, reason: &str) -> rusqlite::Result<()> {
+    tx.execute_batch("DELETE FROM catalog_backfill_sources; INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','discovering'),('catalog_recovery_after','');")?;
     tx.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_reason',?1)",
         [reason],
-    )
-    .map_err(io::Error::other)?;
-    tx.commit().map_err(io::Error::other)
+    )?;
+    Ok(())
 }
 
 pub(crate) fn push_driven(options: &crate::Options) -> io::Result<bool> {
@@ -1560,12 +1578,15 @@ pub(crate) fn enqueue_facts(
         .proc_starts
         .keys()
         .chain(after.proc_starts.keys())
+        .chain(before.missing_claude_pids.iter())
+        .chain(after.missing_claude_pids.iter())
         .chain(before.runs.keys())
         .chain(after.runs.keys())
         .chain(before.process_ancestors.keys())
         .chain(after.process_ancestors.keys())
     {
         if before.proc_starts.get(pid) != after.proc_starts.get(pid)
+            || before.missing_claude_pids.contains(pid) != after.missing_claude_pids.contains(pid)
             || before.runs.get(pid) != after.runs.get(pid)
             || before.process_ancestors.get(pid) != after.process_ancestors.get(pid)
         {
@@ -1583,6 +1604,8 @@ pub(crate) fn enqueue_facts(
         &crate::facts::MachineFacts::Recorded(Box::new(after.clone())),
     ) {
         if before.proc_starts.get(&pid.pid) != after.proc_starts.get(&pid.pid)
+            || before.missing_claude_pids.contains(&pid.pid)
+                != after.missing_claude_pids.contains(&pid.pid)
             || before.runs.get(&pid.pid) != after.runs.get(&pid.pid)
             || before.process_ancestors.get(&pid.pid) != after.process_ancestors.get(&pid.pid)
         {
@@ -2023,16 +2046,21 @@ pub(super) fn selected_roles_current(
 
 /// Focused reads never prepare or convert another Semon storage contract.
 pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
+    focused_connection_with(path, require_current)
+}
+
+fn focused_index_connection(path: &Path) -> io::Result<Connection> {
+    focused_connection_with(path, require_index_current)
+}
+
+fn focused_connection_with(
+    path: &Path,
+    qualify: fn(&Connection) -> io::Result<()>,
+) -> io::Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(io::Error::other)?;
     let read = db.unchecked_transaction().map_err(io::Error::other)?;
-    match qualify_contract(&read).map_err(io::Error::other)? {
-        Init::Ready => {}
-        Init::Unsupported(reason) => {
-            return Err(io::Error::other(unsupported_message(&read, reason)));
-        }
-        _ => return Err(io::Error::other("session index is not initialized")),
-    }
+    qualify(&read)?;
     read.commit().map_err(io::Error::other)?;
     Ok(db)
 }
@@ -2524,6 +2552,34 @@ impl IndexStore for SqliteStore {
         Ok(Some(sources.into_iter().collect()))
     }
 
+    fn recover_catalog_version(&mut self) -> Result<bool, StoreError> {
+        let version = crate::model::summary::CATALOG_VERSION.to_string();
+        let needs_start = |stale, recovery: Option<&str>| match recovery {
+            Some(target) => target != version,
+            None => stale,
+        };
+        let (stale, recovery) = catalog_version_status(&self.connection).map_err(failure)?;
+        if !needs_start(stale, recovery.as_deref()) {
+            return Ok(stale);
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        let (stale, recovery) = catalog_version_status(&tx).map_err(failure)?;
+        if needs_start(stale, recovery.as_deref()) {
+            start_catalog_recovery(&tx, "catalog-version").map_err(failure)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_version',?1)",
+                [&version],
+            )
+            .map_err(failure)?;
+        }
+        tx.commit().map_err(failure)?;
+        Ok(stale)
+    }
+
     fn backfill_state(&self) -> Result<Option<String>, StoreError> {
         self.connection
             .query_row(
@@ -2585,7 +2641,7 @@ impl IndexStore for SqliteStore {
         if generation.as_deref() != expected || pending {
             return Ok(Outcome::Conflict);
         }
-        tx.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key='catalog_recovery_reason';").map_err(failure)?;
+        tx.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','complete'),('catalog_completeness','complete'),('search_backfill_complete','1'); DELETE FROM meta WHERE key IN ('catalog_recovery_reason','catalog_recovery_version');").map_err(failure)?;
         tx.commit().map_err(failure)?;
         Ok(Outcome::Written)
     }
@@ -2749,6 +2805,9 @@ impl IndexStore for SqliteStore {
         }
         tx.commit().map_err(failure)?;
 
+        if catalog_version_blocked(&self.connection).map_err(failure)? {
+            return Ok(false);
+        }
         self.connection.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_version')=?1 AND (SELECT value FROM meta WHERE key='catalog_completeness')='complete' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_stage) AND (SELECT value FROM meta WHERE key='catalog_generation')=(SELECT value FROM meta WHERE key='slot_projection_catalog_generation')", [crate::model::summary::CATALOG_VERSION.to_string()], |row| row.get::<_,Option<bool>>(0)).map(|value| value.unwrap_or(false)).map_err(failure)
     }
 
@@ -2813,8 +2872,9 @@ impl IndexStore for SqliteStore {
     fn advance_tree_repair(
         &mut self,
         options: &crate::Options,
+        namespace: &crate::storage::Namespace,
     ) -> io::Result<(bool, Option<String>)> {
-        let (pending, changed) = native_usage::advance(self, options)?;
+        let (pending, changed) = native_usage::advance(self, options, namespace)?;
         let cleanup = tree_state::cleanup_work(&mut self.connection).map_err(io::Error::other)?;
         Ok((pending || cleanup, changed))
     }
@@ -2998,7 +3058,7 @@ impl IndexStore for SqliteStore {
         // stamped database needs no writer reservation to report it.
         let (stamp, bound) = crate::storage::sqlite::binding(&self.connection).map_err(failure)?;
         if let Some(bound) = bound
-            && stamp.as_deref() == Some(crate::storage::sqlite::stamp().as_str())
+            && crate::storage::sqlite::index_stamp_current(stamp.as_deref())
         {
             return Ok(bound);
         }
@@ -3008,7 +3068,7 @@ impl IndexStore for SqliteStore {
             .map_err(failure)?;
         require_current_sql(&transaction).map_err(failure)?;
         let (stamp, bound) = crate::storage::sqlite::binding(&transaction).map_err(failure)?;
-        if stamp.as_deref() != Some(crate::storage::sqlite::stamp().as_str()) {
+        if !crate::storage::sqlite::index_stamp_current(stamp.as_deref()) {
             return Err(StoreError::Failed(
                 "unsupported session store: version stamp".into(),
             ));
@@ -4974,8 +5034,8 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         ));
     }
     let publication: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_recipe' AND value<>?3)",
-        params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION, semantic_stage::RECIPE],
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_recipe' AND value<>?2)",
+        params![crate::catalog_search::VERSION, semantic_stage::RECIPE],
         |row| row.get(0),
     )?;
     if publication {
@@ -5025,10 +5085,19 @@ fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Bounded selected reads qualify the storage contract in their own snapshot.
-/// Archive marker consumers additionally validate the exact selected marker;
+/// Bounded selected reads qualify the storage contract and Catalog version in
+/// their own snapshot. Archive marker consumers additionally validate the exact selected marker;
 /// unrelated archive history is never traversed by a focused request.
 pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
+    require_index_current(connection)?;
+    if catalog_version_blocked(connection).map_err(io::Error::other)? {
+        return Err(io::Error::other("Catalog version publication is pending"));
+    }
+    Ok(())
+}
+
+// Native proofs also serve the producer while it repairs Index projections.
+fn require_index_current(connection: &Connection) -> io::Result<()> {
     match qualify_contract(connection).map_err(io::Error::other)? {
         Init::Ready => Ok(()),
         Init::Unsupported(reason) => Err(io::Error::other(unsupported_message(connection, reason))),
@@ -10873,11 +10942,6 @@ mod tests {
                 "newer-parser",
                 "UPDATE meta SET value='4294967295' WHERE key='cache_version'",
                 "parser version mismatch",
-            ),
-            (
-                "publication",
-                "INSERT INTO meta VALUES('catalog_version','4294967295')",
-                "publication version",
             ),
             (
                 "search",
