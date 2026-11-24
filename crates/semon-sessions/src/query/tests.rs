@@ -2921,9 +2921,9 @@ fn local_tools_match_legacy_evidence_without_compatibility_preparation() {
                 );
             }
             if revision == 2 {
-                let path = home.root.join("proc/30/stat");
+                let path = home.root.join("proc/30");
                 if path.exists() {
-                    fs::remove_file(path).unwrap();
+                    fs::remove_dir_all(path).unwrap();
                 }
             }
             let calls = [
