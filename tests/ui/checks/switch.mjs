@@ -95,7 +95,7 @@ export default async function switchCheck(browser) {
         fail = null;
         await page.getByRole('button', { name: 'Retry selected transcript', exact: false }).click();
         await page.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
-        assert.ok(seen.every((row) => row.source && row.scope === 'retained_history'));
+        assert.ok(seen.every((row) => row.source && row.scope === 'current'));
         assert.equal(await overflow(page), 0);
         assert.deepEqual(retired, []);
         assert.deepEqual(page.errors, []);

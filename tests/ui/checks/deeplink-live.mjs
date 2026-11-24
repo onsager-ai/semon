@@ -41,7 +41,7 @@ export default async function deepLinkLive(browser) {
           reads.every(
             (url) =>
               url.searchParams.get('machine') === source &&
-              url.searchParams.get('scope') === 'retained_history',
+              url.searchParams.get('scope') === 'current',
           ),
         );
         const before = await anchor.boundingBox();

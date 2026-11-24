@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { context, ENV, launch, wide } from '../lib.mjs';
+import { context, ENV, fixtureRequest, launch, waitForFixtureTranscript, wide } from '../lib.mjs';
 import { writeLong } from '../long.mjs';
 import { installRefreshTracing, armRefreshPaint, readRefreshTrace } from './perf-refresh.mjs';
 
@@ -1369,6 +1369,15 @@ async function main() {
       fixtureSummary = { now: fixture.now, counts: fixture.counts };
       const server = await serve(fixtureDir, fixture.now);
       try {
+        const request = await fixtureRequest(server.base, server.token);
+        for (const [sid, marker] of Object.entries(PAINT_MARKERS))
+          await waitForFixtureTranscript(
+            request,
+            'local',
+            sid,
+            (entry) => entry.text?.includes(marker),
+            60_000,
+          );
         screens[screen.name] = await runScreen(browser, screen, server, fixture);
         if (REFRESH_DIAGNOSTICS) screens[screen.name].serverDiagnostics = server.diagnostics();
       } finally {

@@ -89,9 +89,8 @@ export async function nativeRead(server, sid, { transcript = false } = {}) {
   const machine = inventory.items[0].source_key;
   const query = new URLSearchParams({
     machine,
-    scope: 'retained_history',
-    limit: '100',
-    after: '0',
+    scope: 'current',
+    limit: transcript ? '32' : '100',
   });
   if (sid != null) query.set('sid', sid);
   const page = await get((transcript ? '/api/session-transcript?' : '/api/sessions?') + query);
@@ -104,13 +103,7 @@ export async function nativeRead(server, sid, { transcript = false } = {}) {
   if (transcript) {
     assert.equal(page.identity.source_key, machine);
     assert.equal(page.identity.catalog_key, sid);
-    assert.equal(page.range.first, 0);
-    assert.equal(
-      page.range.end,
-      page.projection.total,
-      'small harness fixture fits one native page',
-    );
-    assert.equal(page.entries.length, page.projection.total);
+    assert.equal(page.earlier_cursor, null, 'small harness fixture fits one native window');
   }
   return page;
 }

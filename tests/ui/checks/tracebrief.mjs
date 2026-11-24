@@ -84,7 +84,7 @@ export default async function tracebrief(browser) {
             previews.every(
               (url) =>
                 url.searchParams.get('machine') &&
-                url.searchParams.get('scope') === 'retained_history' &&
+                url.searchParams.get('scope') === 'current' &&
                 /^[a-f0-9]{64}$/.test(url.searchParams.get('generation')),
             ),
         );

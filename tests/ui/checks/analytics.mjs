@@ -219,7 +219,7 @@ export default async function analyticsCheck(browser) {
     const inventory = await (await fetch('/api/session-sources')).json();
     const query = new URLSearchParams({
       machine: inventory.items[0].source_key,
-      scope: 'retained_history',
+      scope: 'current',
       sid: 'archive',
       limit: '1',
     });

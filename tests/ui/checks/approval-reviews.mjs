@@ -66,7 +66,7 @@ export default async function approvalReviews(browser) {
     const source = (await (await fixture.request('/api/session-capabilities')).json()).source_key;
     const query = new URLSearchParams({
       machine: source,
-      scope: 'retained_history',
+      scope: 'current',
       q: 'approval-',
       limit: '100',
     });

@@ -1,16 +1,13 @@
 # Viewer UI checks
 
-The required `viewer browser checks` status aggregates the selected Viewer UI
-tier. Pull requests run no browser suites when every changed path is docs-only
-(except compiled `docs/shell.md`); other code changes run the navigation,
-live-update and transport smoke suites; viewer inputs run all eleven suites. Pushes to main and manual dispatch always run all eleven. The smoke
-suites cover the catalog navigation/data path, updates arriving while logs are
-written, and pushed/received data parity across transport. CI builds the test-clock
-binary and account fixture once, transfers those binaries to isolated runners, and
-gives each runner its own servers, fixture directories, and report artifact
-(`viewer-ui-<suite>`). Failures in a selected suite fail the aggregate; intentional
-skips pass when the selected tier succeeds.
-New PR commits cancel superseded runs of that PR. Main and manual events have separate concurrency groups and do not cancel running validation. Infrastructure regressions run once in the required foundation job before binary builds and browser fan-out. The touch hit-testing regressions need Chromium and run once in the required interaction suite.
+The Viewer UI workflow runs by manual dispatch. Pull requests and pushes to main
+have had their triggers disabled since November 15, 2026. To run all eleven
+suites on a branch, dispatch `gh workflow run ui.yml --ref <branch>`.
+The `viewer browser checks` job aggregates the run. CI builds the test-clock
+binary and account fixture once, transfers them to isolated runners, and gives
+each suite its own servers, fixture directories and `viewer-ui-<suite>` report
+artifact. Infrastructure regressions run in the foundation job before the browser
+fan-out. Touch hit-testing runs once in the Chromium interaction suite.
 
 Functional groups live in `suite-plan.mjs`. `checks/run.mjs` verifies that every
 registered check belongs to exactly one group before running anything. Adding a
@@ -93,14 +90,22 @@ that estimate as an achieved CI duration.
 
 Shared design rules and consumer auditing are documented in [the design contract](../../docs/design/design-contract.md).
 
-All served suites enter the canonical reader. The shared fixture oracle reads
-Catalog, selected metadata and transcripts through source-qualified native pages
-and pins their generation across every range. Prompt and answer expectations use
-the same bounded native preview API as the browser. The reference census projects
-recorded timing into the default 24-hour observation window; retained evidence
-stays complete. Candidate fixture metadata and capture traffic use bounded
-Source and selected-session APIs. Compatibility query bookmarks are normalized
-to the same reader.
+All served suites enter the canonical reader. Live fixture census, selected
+transcript and order reads use `scope=current`. The census requires expected
+fixture keys as well as complete Catalog coverage. Use `retained_history` when
+the fixture explicitly retires a source. The fixture oracle starts at the latest
+native transcript window and follows `earlier_cursor` back through the committed
+records, checking source, selection, generation and binding across windows.
+Attachment and field expansions use the native entry address from that window.
+Prompt and answer comparisons use the same bounded native preview API as the
+browser.
+
+Home is ready when its observations list is empty and Recent has at least one
+row. The transport check requires that publication witness independently on both
+servers before comparing transcript and relationship data. Performance journeys
+wait outside the measured browser context for a current selected window containing
+the intended session's final marker. This keeps indexing time out of the budget
+without changing the browser's recorded requests or thresholds.
 
 The interaction lane also runs `ui/tests/catalog-served.mjs` and
 `ui/tests/overview-served.mjs` against the compiled producer and embedded bundle

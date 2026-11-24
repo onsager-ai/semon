@@ -80,7 +80,7 @@ test(
       const query = new URLSearchParams({
         machine: waiting.source_key,
         sid: waiting.catalog_key,
-        scope: 'retained_history',
+        scope: 'current',
         generation: waiting.session.content_generation,
         events: JSON.stringify([waiting.event.id]),
       });

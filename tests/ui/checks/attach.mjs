@@ -18,7 +18,7 @@ import { ENV, served, settled, reporter, overflow } from '../lib.mjs';
 
 const SID = 'attach';
 
-// The browser and embedding host use the same source/slot/generation contract.
+// The browser and embedding host use the same source and native address contract.
 async function attachmentApi(sid) {
   const inventory = await (await fetch('/api/session-sources')).json();
   if (inventory.items.length !== 1) throw Error('Attachment fixture must admit one source');
@@ -32,18 +32,20 @@ async function attachmentApi(sid) {
   const home = await overview.json();
   if (home.machines.length !== 1 || home.machines[0].key !== machine)
     throw Error('Embedding Home source changed');
-  const args = new URLSearchParams({ machine, sid, scope: 'retained_history', limit: '100' });
+  const args = new URLSearchParams({ machine, sid, scope: 'current' });
   const response = await fetch('/api/session-transcript?' + args);
   if (!response.ok)
     throw Error('Attachment transcript read: ' + response.status + ' ' + (await response.text()));
   const text = await response.text();
   const page = JSON.parse(text),
-    generation = page.projection.generation;
+    binding = page.binding;
   if (
     page.identity.source_key !== machine ||
     page.identity.catalog_key !== sid ||
-    !/^[a-f0-9]{64}$/.test(generation) ||
-    page.range.has_more
+    page.projection !== 7 ||
+    page.read_scope !== 'current' ||
+    !/^[a-f0-9]{64}$/.test(binding) ||
+    page.earlier_cursor !== null
   )
     throw Error('Attachment fixture transcript identity or range changed');
   const entries = page.entries;
@@ -51,7 +53,7 @@ async function attachmentApi(sid) {
     .filter((entry) => entry.img)
     .map((entry) => ({ k: entry.k, img: entry.img }));
   const references = entries.flatMap((entry) =>
-    (entry.img ?? []).map((image, ordinal) => ({ slot: entry.slot, ordinal, image })),
+    (entry.img ?? []).map((image, ordinal) => ({ address: entry.address, ordinal, image })),
   );
   const first = references.find((reference) => !reference.image.na),
     masked = references.find((reference) => reference.image.na);
@@ -71,10 +73,8 @@ async function attachmentApi(sid) {
     new URLSearchParams({
       machine,
       sid,
-      scope: 'retained_history',
-      after: String(reference.slot),
-      limit: '1',
-      generation,
+      scope: 'current',
+      address: JSON.stringify(reference.address),
       part: 'attachment',
       image: String(reference.ordinal),
       ...changes,
@@ -86,7 +86,11 @@ async function attachmentApi(sid) {
     ok: first ? await head(url(first)) : null,
     textBlock: first ? await head(url(first, { image: String(first.ordinal + 1) })) : null,
     otherSession: first ? await head(url(first, { sid: 'harbor' })) : null,
-    otherVersion: first ? await head(url(first, { generation: '0'.repeat(64) })) : null,
+    otherVersion: first
+      ? await head(
+          url(first, { address: JSON.stringify({ ...first.address, binding: '0'.repeat(64) }) }),
+        )
+      : null,
     masked: masked ? await head(url(masked)) : null,
     size: first?.image.size,
   };
@@ -196,7 +200,7 @@ export default async function attachCheck(browser) {
         api.otherSession?.status === 409 &&
         api.otherVersion?.status === 409 &&
         api.masked?.status === 404,
-      'native entries refuse missing images, foreign session generations, stale generations and masked images: ' +
+      'native entries refuse missing images, foreign session addresses, stale bindings and masked images: ' +
         JSON.stringify([
           api.textBlock?.status,
           api.otherSession?.status,
