@@ -4980,7 +4980,7 @@ mod tests {
         );
         fixture.write(
             "claude/sessions/100.json",
-            &json!({"pid":100,"sessionId":"live","procStart":123,"status":"busy"}).to_string(),
+            &json!({"pid":100,"sessionId":"live","procStart":123,"status":"busy", "updatedAt":crate::model::now_ms()}).to_string(),
         );
         fixture.claude(
             "live",

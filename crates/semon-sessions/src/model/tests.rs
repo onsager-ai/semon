@@ -5606,6 +5606,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         hostname: "laptop".into(),
         home: Some("/home/fake-user".into()),
         proc_starts: BTreeMap::from([(40, 777)]),
+        missing_claude_pids: BTreeSet::new(),
         codex_locks: BTreeMap::new(),
         codex_rollouts: None,
         codex_provisional_rollouts: None,

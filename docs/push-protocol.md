@@ -137,7 +137,7 @@ workspace and native harness state required for independent recovery.
   - `claude` root: `projects/**/*.jsonl`, `projects/**/subagents/agent-<id>.meta.json`, `sessions/<pid>.json`.
   - `codex` root: `sessions/**/*.jsonl`, `archived_sessions/**/*.jsonl` and their native `.jsonl.zst` archive equivalents. Native databases are excluded.
   - Native `.jsonl.zst` equivalents of supported Claude and Copilot logs are also transport sources. The sender decodes and verifies each archive internally, then sends complete redacted logical records under the corresponding `.jsonl` path. Encoded byte positions never enter append cursors, status targets, quota accounting or source proofs. Full Codex inventory uses those same logical target paths. This changes neither the receiver allowlist nor the wire forms.
-- **The facts** (`semon_sessions::Facts`): what the model takes from the machine rather than from the logs. That is the hostname, `$HOME`, the start time of each process a Claude pid file names, which Codex runs hold their writer lock (and the holder's pid), the repository of each working directory the logs name, and its sanitized `origin` identity (`repo_id`). A receiver builds with these in place of its own `/proc`, hostname and disk.
+- **The facts** (`semon_sessions::Facts`): what the model takes from the machine rather than from the logs. That is the hostname, `$HOME`, the observed start time or absence of each process a Claude pid file names, which Codex runs hold their writer lock (and the holder's pid), the repository of each working directory the logs name, and its sanitized `origin` identity (`repo_id`). A receiver builds with these in place of its own `/proc`, hostname and disk.
 - Optional v2 facts `codex_rollouts` lists the sender's current plain Codex rollout paths, relative to its home and validated by the Codex input allowlist. It is a content-free collector inventory. A present empty list selects no current sources; an absent field means selection is unknown for an older snapshot. The receiver retains previously uploaded files, but model, tree and transcript lookup use only the explicitly selected paths when this inventory is present. Thus an active-to-archive move, or its reverse, does not duplicate work. A completed push sends facts after its file pass; a partial pass is not a complete snapshot. No deletion or inferred move is performed.
 - **Redaction.** Every byte is redacted on the sending machine before it leaves (`semon_push::redact`). Known secret shapes become `*`, byte for byte, so lengths and offsets are unchanged and JSON lines stay valid. It is best effort: a secret of an unknown shape is sent as it is.
 
@@ -176,8 +176,10 @@ Answers:
 The body is a `Facts` object:
 
 ```json
-{"version": 1, "hostname": "laptop", "home": "/home/me", "proc_starts": {"4242": 7788}, "codex_locks": {"<thread id>": 4250}, "repos": {"/home/me/work/app": "app", "/tmp": null}, "repo_ids": {"/home/me/work/app": {"kind": "remote", "value": "github.com/me/app"}}}
+{"version": 2, "hostname": "laptop", "home": "/home/me", "proc_starts": {"4242": 7788}, "missing_claude_pids": [4243], "codex_locks": {"<thread id>": 4250}, "repos": {"/home/me/work/app": "app", "/tmp": null}, "repo_ids": {"/home/me/work/app": {"kind": "remote", "value": "github.com/me/app"}}}
 ```
+
+`missing_claude_pids` lists the PIDs from Claude PID files that the sender observed absent. A PID absent from both `proc_starts` and `missing_claude_pids` has unknown process state. Receiver offlining clears both observations.
 
 `repo_ids` holds, per working directory inside a repository, a sanitized identity of the repository's `origin` remote, read from the Git config without running git. A `remote` value has credentials, the scheme and a trailing `.git` removed, the host lowercased and the scheme's default port dropped (https 443, http 80, ssh 22, git 9418; every other port is kept); scp-style `git@host:owner/repo` becomes `host/owner/repo`. A `file:` URL or local path remote is `{"kind": "path", "value": "<remote as written>"}`, and a repository with no `origin` is `{"kind": "unknown"}`. A directory outside any repository has no entry.
 

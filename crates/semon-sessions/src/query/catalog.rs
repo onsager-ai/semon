@@ -53,6 +53,9 @@ pub(super) fn stall_response(
                 match row["state"].as_str() {
                     Some("waiting-question") => StallReason::WaitingQuestion,
                     Some("working") => StallReason::NoOutput,
+                    _ if row["alive"].is_null() && recorded_status.as_deref() == Some("busy") => {
+                        StallReason::NoOutput
+                    }
                     _ => return None,
                 }
             };
@@ -326,6 +329,7 @@ pub(crate) fn sqlite_read(
             }
             if lifecycle != "current" {
                 saved["summary"]["alive"] = Value::Null;
+                saved["recorded_status"] = Value::Null;
                 saved["summary"]["run"] = Value::Null;
                 if matches!(
                     saved["summary"]["state"].as_str(),

@@ -657,13 +657,39 @@ fn codex_id_from_filename(path: &Path) -> Option<String> {
 }
 
 pub(crate) fn proc_start(root: &Path, pid: u32) -> Option<u64> {
-    let stat = fs::read_to_string(root.join(pid.to_string()).join("stat")).ok()?;
-    let close = stat.rfind(')')?;
-    stat.get(close + 1..)?
-        .split_whitespace()
-        .nth(19)?
-        .parse()
-        .ok()
+    read_proc_start(root, pid).ok()
+}
+
+fn read_proc_start(root: &Path, pid: u32) -> io::Result<u64> {
+    let stat = fs::read_to_string(root.join(pid.to_string()).join("stat"))?;
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .and_then(|start| start.parse().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid process stat"))
+}
+
+/// Some(None) is observed absence. An unreadable stat or proc root is unknown.
+fn observe_claude_proc_start(root: &Path, pid: u32) -> Option<Option<u64>> {
+    match read_proc_start(root, pid) {
+        Ok(start) => Some(Some(start)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            #[cfg(target_os = "linux")]
+            if root == Path::new("/proc") {
+                // A hidden proc entry is also ENOENT. Signal 0 checks existence
+                // in the local PID namespace without signaling the process.
+                let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+                // SAFETY: signal 0 performs only kernel error checking.
+                let result = unsafe { libc::kill(pid, 0) };
+                return (result == -1
+                    && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+                .then_some(None);
+            }
+            let pid_dir = root.join(pid.to_string());
+            (root.is_dir() && matches!(fs::metadata(pid_dir), Err(error) if error.kind() == io::ErrorKind::NotFound))
+                .then_some(None)
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(unix)]
