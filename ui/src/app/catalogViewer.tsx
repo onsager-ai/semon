@@ -47,6 +47,7 @@ import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catal
 import {
   CatalogNativeTranscriptStore,
   CatalogTranscriptStore,
+  readNativeTranscript,
   type CatalogNativeWindow,
 } from '../state/catalog-transcript';
 import { CatalogRecovery, type CatalogRecoveryProgress } from '../state/catalog-recovery';
@@ -694,9 +695,9 @@ export function createCatalogViewer(
     causalEpoch = 0,
     causalLoading = false;
   const causalExpanded = new Map<string, Set<string>>();
-  const api = async (path: string, body?: unknown): Promise<unknown> => {
+  const api = async (path: string, body?: unknown, timeoutMs = 15_000): Promise<unknown> => {
     const controller = scope.request(),
-      deadline = scope.timeout(() => controller.abort(), 15000);
+      deadline = scope.timeout(() => controller.abort(), timeoutMs);
     if (
       path === '/api/viewer/home' ||
       path.startsWith('/api/viewer/home?') ||
@@ -2780,6 +2781,7 @@ export function createCatalogViewer(
   }
   function observeSelectedProgress(view: SelectedView, progress: CatalogRecoveryProgress) {
     if (view.sourceKey !== capabilities.source_key) return;
+    if (view.nativeStore && !view.nativeStore.selectedPage()) return;
     if (!view.recovery.observeProgress(progress)) return;
     view.note = '';
     view.transientNote = false;
@@ -2830,7 +2832,7 @@ export function createCatalogViewer(
             ? 'Recorded history is unavailable'
             : 'Recorded history is updating',
           retry:
-            view.recovery.stopped || (view.note && !view.loading)
+            view.recovery.stopped || (view.note && !view.loading && view.retry === undefined)
               ? {
                   label: 'Retry selected transcript',
                   run() {
@@ -3419,8 +3421,7 @@ export function createCatalogViewer(
       return;
     scope.clearTimeout(view.retry);
     view.retry = undefined;
-    const request = store.request(window),
-      p = params(view.readScope);
+    const p = params(view.readScope);
     p.set('sid', view.key);
     if (view.peer) p.set('peer', JSON.stringify(view.peer));
     if (window.position === 'earlier') p.set('cursor', window.cursor);
@@ -3433,8 +3434,23 @@ export function createCatalogViewer(
     view.root.setAttribute('aria-busy', 'true');
     drawSelected(view);
     try {
-      const value = await api('/api/session-transcript?' + p);
-      if (!current() || !store.accept(request, value)) return;
+      const loaded = await readNativeTranscript(store, window, {
+        read: (timeoutMs) => api('/api/session-transcript?' + p, undefined, timeoutMs),
+        current,
+        recovery: view.recovery,
+        retry(delay, error) {
+          view.note =
+            error?.history || error?.code === 'retained_source_preparing' ? readError(error) : '';
+          view.transientNote = store.selectedPage() !== null;
+          view.retry = scope.timeout(() => {
+            view.retry = undefined;
+            if (!current()) return;
+            if (view.recovery.stopped) drawSelected(view);
+            else void loadNative(view, window);
+          }, delay);
+        },
+      });
+      if (!loaded || !current()) return;
       const page = store.selectedPage()!;
       view.note = '';
       view.transientNote = false;
@@ -3471,19 +3487,15 @@ export function createCatalogViewer(
         view.anchorNote = 'This saved transcript position is unavailable.';
         newest = true;
       } else {
-        view.note = readError(error);
-        view.transientNote = retryable(error);
-        if (error instanceof ApiError && error.code === 'retained_source_preparing') {
-          const delay = view.recovery.fail();
-          if (delay !== null)
-            view.retry = scope.timeout(() => {
-              view.retry = undefined;
-              if (current()) void loadNative(view, window);
-            }, delay);
-        }
+        view.note =
+          error instanceof ApiError && error.status === 503 && !error.history
+            ? error.message
+            : readError(error);
+        view.transientNote = store.selectedPage()
+          ? retryable(error)
+          : error instanceof ApiError && error.retryable === true;
       }
     } finally {
-      store.reject(request);
       if (view.navigationEpoch === epoch) {
         view.loading = false;
         view.root.setAttribute('aria-busy', 'false');
@@ -3917,6 +3929,12 @@ export function createCatalogViewer(
     }
     sessionPanel?.destroy();
     active = view;
+    if (view.nativeStore && !view.nativeStore.selectedPage()) {
+      scope.clearTimeout(view.retry);
+      view.retry = undefined;
+      view.recovery.reset();
+      view.note = '';
+    }
     const turn = savedPositionUnavailable
       ? undefined
       : (anchor ?? (push ? undefined : sessionAnchor()));
@@ -4347,15 +4365,17 @@ export function createCatalogViewer(
       Object.assign(capabilities, next);
       if (next.source_candidates && !candidateLoaded && !active && !sourcesOpen)
         void loadCandidates(false);
-      if (active) void loadIdentity(active);
-      if (ready && active && !active.store.selectedPage()) void loadSelected(active);
+      if (active && (!active.nativeStore || active.nativeStore.selectedPage()))
+        void loadIdentity(active);
+      if (ready && active && !(active.nativeStore ?? active.store).selectedPage())
+        void loadSelected(active);
       if (capabilities.global_union) {
         if (!active && !sourcesOpen && items.length <= 60) await loadList(false);
       } else await refreshMetadata(observedSource, observedEpoch);
     } catch (error) {
       if (disposed || observedEpoch !== sourcesEpoch || observedSource !== capabilities.source_key)
         return;
-      if (active && !active.store.selectedPage()) {
+      if (active && !active.nativeStore && !active.store.selectedPage()) {
         active.note = readError(error);
         drawSelected(active);
       }

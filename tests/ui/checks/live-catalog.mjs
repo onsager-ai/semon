@@ -46,7 +46,14 @@ export default async function liveCatalog(browser) {
         route.fulfill({
           status: 503,
           headers: { 'Retry-After': '1' },
-          json: { error: { code: 'history_rebuilding', progress: { done: 2, total: 3 } } },
+          json: {
+            error: {
+              code: 'history_rebuilding',
+              message: 'Rebuilding history (2 of 3 sources)',
+              retryable: true,
+              progress: { done: 2, total: 3 },
+            },
+          },
         }),
       );
       await selectedRecovery.goto(fixture.base + '/session/local/harbor');

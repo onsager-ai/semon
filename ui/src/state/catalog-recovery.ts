@@ -19,18 +19,23 @@ export class CatalogRecovery {
     return this.terminal;
   }
 
-  fail(now = Date.now()): number | null {
+  remaining(now = Date.now()): number {
+    this.startedAt ??= now;
+    return Math.max(0, this.startedAt + CATALOG_RECOVERY_WALL_BUDGET_MS - now);
+  }
+
+  fail(now = Date.now(), jitter = 1, maxRetries = 3): number | null {
     if (this.stopped || this.expired(now)) {
       this.terminal = true;
       return null;
     }
     this.startedAt ??= now;
     ++this.failures;
-    if (this.failures > 3) {
+    if (this.failures > maxRetries) {
       this.terminal = true;
       return null;
     }
-    const delay = 1000 * 2 ** (this.failures - 1);
+    const delay = Math.floor(jitter * 1000 * 2 ** (this.failures - 1));
     if (now + delay >= this.startedAt + CATALOG_RECOVERY_WALL_BUDGET_MS) {
       this.terminal = true;
       return null;

@@ -8,6 +8,7 @@ export class ApiError extends Error {
     readonly status: number,
     readonly history?: { done: number; total: number; retryMs: number } | 'recovery_failed',
     readonly code?: string,
+    readonly retryable?: boolean,
   ) {
     super(message);
   }
@@ -43,7 +44,17 @@ export async function requestJson(
         const error = payload.error;
         if (error && typeof error === 'object' && 'code' in error) {
           if (response.status === 503 && error.code === 'history_recovery_failed')
-            throw new ApiError('History recovery failed', 503, 'recovery_failed');
+            throw new ApiError(
+              'History recovery failed',
+              503,
+              'recovery_failed',
+              error.code,
+              false,
+            );
+          const retryable =
+            'retryable' in error && typeof error.retryable === 'boolean'
+              ? error.retryable
+              : undefined;
           if (
             response.status === 503 &&
             error.code === 'history_rebuilding' &&
@@ -63,11 +74,17 @@ export async function requestJson(
               progress.total >= progress.done
             ) {
               const seconds = Number(response.headers.get('Retry-After')) || 1;
-              throw new ApiError('History rebuilding', 503, {
-                done: progress.done,
-                total: progress.total,
-                retryMs: Math.min(8000, Math.max(1000, seconds * 1000)),
-              });
+              throw new ApiError(
+                'History rebuilding',
+                503,
+                {
+                  done: progress.done,
+                  total: progress.total,
+                  retryMs: Math.min(8000, Math.max(1000, seconds * 1000)),
+                },
+                error.code,
+                retryable,
+              );
             }
           }
           if (typeof error.code === 'string') {
@@ -75,7 +92,7 @@ export async function requestJson(
               'message' in error && typeof error.message === 'string'
                 ? error.message
                 : response.status + ' ' + response.statusText;
-            throw new ApiError(message, response.status, undefined, error.code);
+            throw new ApiError(message, response.status, undefined, error.code, retryable);
           }
         }
       }
