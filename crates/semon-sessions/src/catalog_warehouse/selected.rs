@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     cell::OnceCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io,
     path::Path,
     sync::{Arc, Mutex},
@@ -272,6 +272,7 @@ const EXACT_RELAY_RECEIPTS: &str =
 
 #[derive(Clone, Debug)]
 pub(super) struct RelayReceipt {
+    pub(super) typed: bool,
     pub(super) path: String,
     pub(super) offset: u64,
     pub(super) block: i64,
@@ -415,7 +416,7 @@ fn relay_receipts(
            ) LIMIT 2
          ) SELECT (SELECT count(*) FROM owners)=1 AND EXISTS (
              SELECT 1 FROM owners o CROSS JOIN fact_relay_result r ON r.source=o.source
-               AND r.call_id=o.call_id AND (r.call_pos IS NULL OR (r.call_pos=o.pos AND r.call_block=o.block))
+               AND r.call_id=o.call_id AND r.call_pos=o.pos AND r.call_block=o.block AND r.pos>o.pos
              WHERE r.source=?4 AND r.pos=?5 AND r.block=?6 AND r.occurrence=?7
                AND r.correlation=?2 AND NOT r.failed
          )",
@@ -456,6 +457,7 @@ fn relay_receipts(
         let receipt = decode(&receipt)?;
         if offset < receipt.offset {
             qualified.push(RelayReceipt {
+                typed: true,
                 path,
                 offset,
                 block: row.get(4).map_err(index)?,
@@ -1518,6 +1520,58 @@ pub(super) fn trace_turn(
             retained::read_frozen(view, source, key, target, None, retained, None).map(Some)
         }
     }
+}
+
+// Skip native proof reads for launches whose indexed turn lies outside the
+// selected window. The caller still verifies the actual record and turn.
+pub(super) fn current_launch_turn(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    component: &Component,
+    address: &Address,
+    visible: &BTreeSet<&str>,
+) -> Result<bool, ReadError> {
+    let Some(harness) = crate::InputRoot::parse(&component.harness) else {
+        return Ok(false);
+    };
+    let carrier = harness.home(source.options).join(&address.path);
+    let db = view.lock()?;
+    let candidate = db.query_row(
+        "SELECT w.source,m.component,coalesce(r.ts,-9223372036854775808),
+                (SELECT max(revision) FROM warehouse_prefix)
+         FROM warehouse_current w CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?1
+         CROSS JOIN lineage_member m ON m.source=w.source
+         CROSS JOIN fact_record r ON r.source=w.source AND r.pos=?3 AND r.block=0 AND r.occurrence=?4 AND NOT r.gap
+         WHERE w.path=?2",
+        params![source.namespace.binding(), carrier.to_str(), i64::try_from(address.offset).map_err(index)?, address.occurrence],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional().map_err(index)?;
+    let Some((source_id, group, time, revision)) = candidate else {
+        return Ok(false);
+    };
+    let pos = Position {
+        source: source_id,
+        time,
+        offset: i64::try_from(address.offset).map_err(index)?,
+        block: 0,
+        occurrence: address.occurrence,
+    };
+    let turn = causal::turns(
+        &db,
+        source,
+        &component.identity.catalog_key,
+        &component.harness,
+        group,
+        revision,
+        std::iter::once(pos),
+        "{}",
+    )?
+    .remove(&pos)
+    .flatten();
+    // Untyped inbound Claude receipts can split an indexed user turn.
+    // A selected legacy relay boundary still requires the native reducer.
+    Ok(turn.is_some_and(|turn| visible.contains(turn.id.as_str()))
+        || (component.harness == "claude" && visible.iter().any(|id| id.starts_with('r'))))
 }
 
 pub(super) fn trace_record(

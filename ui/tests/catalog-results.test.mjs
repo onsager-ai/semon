@@ -455,7 +455,7 @@ test('unavailable outgoing actions never link through shared participant summari
       entry(1, 'turn', { k: 'h', id: 'unknown' }),
       {
         edge: { id: 'unknown', kind, from: 'owner', to: 'child', status: 'off', at: 0 },
-        reason: 'Receipt unavailable',
+        reason: kind === 'spawn' ? 'spawn_unverified' : 'legacy_relay',
       },
       'owner',
       { child: { name: 'Known from an unrelated edge', harness: 'claude' } },
@@ -463,6 +463,7 @@ test('unavailable outgoing actions never link through shared participant summari
     );
     assert.equal(row.kind, 'event');
     assert.equal(row.stateLabel, 'Unavailable');
+    assert.equal(row.result, kind === 'spawn' ? 'Spawn not linked' : 'Legacy relay, not linked');
     assert.ok(row.parts.every((part) => !part.action));
   }
 });

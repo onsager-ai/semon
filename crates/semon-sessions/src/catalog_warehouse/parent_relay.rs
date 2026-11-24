@@ -628,6 +628,7 @@ fn collect_receipts<M: Clone>(
             record_occurrence: row.get(5).map_err(index)?,
             relative: relative.to_owned(),
             address: RelayReceipt {
+                typed: false,
                 path: path.to_owned(),
                 offset,
                 block: row.get(1).map_err(index)?,

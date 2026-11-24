@@ -10,7 +10,7 @@ import {
   recordedThoughtLabel,
   visibleMaskedThoughts,
 } from '../domain/thinking';
-import type { RecordedRelationship } from '../domain/relationships';
+import { unavailableRelationshipLabels, type RecordedRelationship } from '../domain/relationships';
 import type {
   CatalogTranscriptPage,
   RecordedSessionPresentation,
@@ -642,7 +642,9 @@ export function recordedRelationshipViews(
       parts,
       time: clock(edge.at, Date.now()),
       brief: preview(native.brief ?? item.native_action_text ?? ''),
-      result: relationship.reason ?? native.result ?? edge.result,
+      result: relationship.reason
+        ? unavailableRelationshipLabels[relationship.reason]
+        : (native.result ?? edge.result),
       resultLabel: relationship.reason ? 'Evidence' : 'Result',
       answers:
         native.answer == null

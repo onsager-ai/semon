@@ -136,6 +136,11 @@ intended recipient. A Codex spawn needs one child and one call in the selected
 prefixes. The transcript carries the certified source turn address when it
 opens on a peer, so either Trace action can preserve that peer’s witness.
 
+Unavailable `reason` codes are `legacy_relay` for an untyped delivery,
+`delivery_unverified` when typed delivery ownership or receipt cannot be proven,
+`ambiguous_delivery` when several receipts match, and `spawn_unverified` when
+launch placement cannot be proven. The Viewer renders these codes as short text.
+
 For linked participants, the Viewer reads `name`, `harness` and `model` from
 `sessions`, with optional `kind`, `state`, `start`, `last`, `calls`, `usd`,
 `live_observation` and `activity` (`tool`, `since`) for child cards. `previews`

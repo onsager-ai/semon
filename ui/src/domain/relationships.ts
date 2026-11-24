@@ -1,13 +1,19 @@
 import { array, boolean, object, text, number } from './validate';
 import type { Handoff } from './types';
 
+export const unavailableRelationshipLabels = {
+  legacy_relay: 'Legacy relay, not linked',
+  delivery_unverified: 'Delivery could not be verified',
+  ambiguous_delivery: 'Ambiguous delivery',
+  spawn_unverified: 'Spawn not linked',
+} as const;
 export interface RecordedRelationship {
   edge: Handoff;
   briefOwner?: string;
   resultOwner?: string;
   targetTurn?: string;
   sourceTurn?: string;
-  reason?: string;
+  reason?: keyof typeof unavailableRelationshipLabels;
 }
 export interface RecordedTurn {
   id: string;
@@ -60,8 +66,12 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
   } else if (kind === 'move') edge = { ...base, kind, fromMachine: '', toMachine: '' };
   else if (kind === 'ask' || kind === 'spawn' || kind === 'relay') edge = { ...base, kind };
   else throw Error('Invalid recorded handoff');
-  const reason = row.reason == null ? undefined : text(row.reason);
-  if (reason && (reason.length > 1024 || status !== 'off'))
+  const reason =
+    row.reason == null ? undefined : (text(row.reason) as RecordedRelationship['reason']);
+  if (
+    reason !== undefined &&
+    (!Object.hasOwn(unavailableRelationshipLabels, reason) || status !== 'off')
+  )
     throw Error('Invalid unavailable relationship');
   return {
     edge,

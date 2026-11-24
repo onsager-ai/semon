@@ -502,7 +502,7 @@ test('addressed native turns accept declared outgoing links beyond the page', ()
       at: 1,
       declined: false,
       source_turn: turn.id,
-      reason: 'No certified peer receipt could be matched.',
+      reason: 'delivery_unverified',
     },
     payload = {
       api: 1,

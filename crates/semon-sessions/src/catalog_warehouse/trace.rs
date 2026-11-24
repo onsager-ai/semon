@@ -229,14 +229,31 @@ pub(super) fn read(
     let mut relay_limit_reached = false;
     let mut launched = Vec::new();
     let children = child_keys(&view, source, key, peer)?;
-    relay_limit_reached |= children.len() > 16;
-    for child in children.into_iter().take(16) {
-        let Some((launch, block, unique)) =
-            available_relationship(launch_location(&view, source, key, &child, peer, provider))?
-                .flatten()
-        else {
+    let mut matching_launches = 0;
+    for child in children {
+        let Some((launch, block, unique)) = available_relationship(launch_location(
+            &view,
+            source,
+            key,
+            &child,
+            peer,
+            provider,
+            &BTreeSet::from([root]),
+        ))?
+        .flatten() else {
             continue;
         };
+        if peer.is_none()
+            && !selected::current_launch_turn(
+                &view,
+                source,
+                &component,
+                &launch,
+                &BTreeSet::from([root]),
+            )?
+        {
+            continue;
+        }
         let parent = match peer {
             Some(peer) => {
                 selected::retained_peer_trace_window(&view, source, key, peer, &launch, provider)
@@ -255,11 +272,16 @@ pub(super) fn read(
         else {
             continue;
         };
+        if matching_launches == 16 {
+            relay_limit_reached = true;
+            break;
+        }
+        matching_launches += 1;
         if !unique {
             let id = unavailable_spawn_id(&launch, block, &child);
             launched.push(id.clone());
             handoffs.push(json!({"id":id,"kind":"spawn","from":key,"to":child,"at":at,
-                "status":"off","declined":false,"source_turn":root}));
+                "status":"off","declined":false,"source_turn":root,"reason":"spawn_unverified"}));
             evidence.push(json!({"catalog_key":child,"reason":"More than one certified child claims the launch."}));
             continue;
         }
@@ -396,6 +418,7 @@ pub(super) fn read(
             target,
             at,
             reason,
+            reason_code,
             qualified,
         } in refusals
         {
@@ -419,7 +442,7 @@ pub(super) fn read(
             }
             handoffs.push(
                 json!({"id":id,"kind":"relay","from":from,"to":target,"at":at,
-                "status":"off","declined":false,"source_turn":from_turn}),
+                "status":"off","declined":false,"source_turn":from_turn,"reason":reason_code}),
             );
             sent.push(id);
         }
@@ -988,6 +1011,7 @@ pub(super) struct RelayRefusal {
     pub(super) target: String,
     pub(super) at: i64,
     pub(super) reason: String,
+    pub(super) reason_code: &'static str,
     pub(super) qualified: bool,
 }
 
@@ -997,6 +1021,7 @@ pub(super) struct Send {
     recipient: String,
     at: i64,
     untyped_delivery: bool,
+    correlated: bool,
 }
 
 // The page already proved these source IDs and record offsets. Probe exactly
@@ -1026,7 +1051,8 @@ pub(super) fn page_relay_sends(
         .map_err(super::index)?;
     let mut sends = BTreeMap::<usize, Vec<_>>::new();
     while let Some(row) = rows.next().map_err(super::index)? {
-        let index: usize = row.get(0).map_err(super::index)?;
+        let index =
+            usize::try_from(row.get::<_, i64>(0).map_err(super::index)?).map_err(super::index)?;
         let target = row.get::<_, Option<String>>(4).map_err(super::index)?;
         sends.entry(index).or_default().push(Send {
             address: component.records[index].address.clone(),
@@ -1034,6 +1060,7 @@ pub(super) fn page_relay_sends(
             recipient: target.clone().unwrap_or(row.get(2).map_err(super::index)?),
             at: row.get(3).map_err(super::index)?,
             untyped_delivery: target.is_some(),
+            correlated: row.get(5).map_err(super::index)?,
         });
     }
     Ok(sends)
@@ -1065,7 +1092,10 @@ fn relay_sends(
            WHERE t.source=s.source AND t.call_id=s.call_id AND t.call_pos=s.pos AND t.call_block=s.block
              AND t.pos<?5 AND NOT t.failed AND t.flags & ?7<>0 AND t.correlation IS NULL
            HAVING count(DISTINCT t.target)=1
-         ) FROM member m
+         ), EXISTS (SELECT 1 FROM fact_relay_result t INDEXED BY relay_result_call
+             WHERE t.source=s.source AND t.call_id=s.call_id AND t.call_pos=s.pos AND t.call_block=s.block
+               AND t.pos>s.pos AND t.pos<?5 AND NOT t.failed AND t.correlation IS NOT NULL)
+         FROM member m
          CROSS JOIN fact_relay_send s ON s.source=m.source AND s.pos>=?4 AND s.pos<?5
          CROSS JOIN fact_record r ON r.source=s.source AND r.pos=s.pos AND r.block=0 AND NOT r.gap
          WHERE s.ts>=?6 ORDER BY s.pos,s.block,s.occurrence LIMIT 17",
@@ -1110,6 +1140,7 @@ fn relay_sends(
                 },
                 block: row.get(2).map_err(super::index)?,
                 untyped_delivery: untyped.is_some(),
+                correlated: row.get(6).map_err(super::index)?,
                 recipient: untyped.unwrap_or(row.get(3).map_err(super::index)?),
                 at: row.get(4).map_err(super::index)?,
             });
@@ -1162,6 +1193,7 @@ pub(super) fn retained_relays(
         recipient,
         at: sent_at,
         untyped_delivery,
+        correlated,
     } in sends
     {
         if !exact {
@@ -1182,6 +1214,7 @@ pub(super) fn retained_relays(
                             target: recipient,
                             at: sent_at,
                             reason: error.to_string(),
+                            reason_code: "delivery_unverified",
                             qualified: false,
                         });
                     }
@@ -1197,7 +1230,7 @@ pub(super) fn retained_relays(
                 continue;
             }
         }
-        if untyped_delivery {
+        if untyped_delivery || !correlated {
             refusals.push(untyped_refusal(send, block, recipient, sent_at));
             continue;
         }
@@ -1318,6 +1351,7 @@ pub(super) fn retained_relays(
                     target: label.into(),
                     at: sent_at,
                     reason,
+                    reason_code: "delivery_unverified",
                     qualified: qualified_target.is_some(),
                 });
             }
@@ -1347,6 +1381,7 @@ pub(super) fn current_relays(
         at: sent_at,
         recipient,
         untyped_delivery,
+        correlated,
     } in sends
     {
         if !exact {
@@ -1361,7 +1396,7 @@ pub(super) fn current_relays(
                 continue;
             }
         }
-        if untyped_delivery {
+        if untyped_delivery || !correlated {
             refusals.push(untyped_refusal(call, block, recipient, sent_at));
             continue;
         }
@@ -1369,6 +1404,7 @@ pub(super) fn current_relays(
         call.block = i64::from(block);
         let mut reason = "No receipt could be matched to this relay in the selected prefixes.";
         let mut qualified_target = None;
+        let mut reason_code = "delivery_unverified";
         let mut read = || -> Result<Option<Relay>, ReadError> {
             let Some(results) = selected::trace_results(view, source, key, &call)? else {
                 return Ok(None);
@@ -1377,6 +1413,7 @@ pub(super) fn current_relays(
                 .records
                 .into_iter()
                 .flat_map(|record| record.relay_receipts)
+                .filter(|receipt| receipt.typed)
                 .map(|receipt| (receipt.path, receipt.offset, receipt.block))
                 .collect::<BTreeSet<_>>();
             let (carrier, offset, _) = match receipts.len() {
@@ -1384,6 +1421,7 @@ pub(super) fn current_relays(
                 1 => receipts.into_iter().next().expect("one receipt"),
                 _ => {
                     reason = "More than one receipt matches this relay in the selected prefixes.";
+                    reason_code = "ambiguous_delivery";
                     return Ok(None);
                 }
             };
@@ -1500,6 +1538,7 @@ pub(super) fn current_relays(
                     target: qualified_target.unwrap_or(recipient),
                     at: sent_at,
                     reason: reason.into(),
+                    reason_code,
                     qualified,
                 });
             }
@@ -1520,7 +1559,8 @@ fn untyped_refusal(
         send: (address, block),
         target,
         at,
-        reason: "The recorded delivery names a subagent but has no correlated receipt.".into(),
+        reason: "The native relay has no correlated receipt.".into(),
+        reason_code: "legacy_relay",
         qualified: false,
     }
 }
@@ -1593,12 +1633,19 @@ pub(super) fn launch_location(
     child: &str,
     peer: Option<selected::PeerBinding<'_>>,
     provider: Option<&dyn SessionSourceReader>,
+    visible: &BTreeSet<&str>,
 ) -> Result<Option<(selected::Address, u32, bool)>, ReadError> {
     match peer {
-        Some(peer) => {
-            selected::retained_launch_between(view, source, peer, child, parent, provider)
-                .map(|(address, block, _, unique)| Some((address, block, unique)))
-        }
+        Some(peer) => selected::retained_launch_between(
+            view,
+            source,
+            peer,
+            child,
+            parent,
+            provider,
+            Some(visible),
+        )
+        .map(|(address, block, _, unique)| Some((address, block, unique))),
         None => current_launch_location(view, source, child, parent)
             .map(|location| location.map(|(address, block)| (address, block, true))),
     }
@@ -1706,20 +1753,26 @@ fn current_launch_location(
     {
         return Ok(None);
     }
-    let marker = edge.method == "marker";
     let codex = child_harness == "codex" && harness == "codex" && edge.method == "native";
-    let call = edge.call;
+    let call = if child_harness == "claude" && harness == "claude" {
+        tx.query_row(
+            "SELECT min(a.call_id),min(p.source) FROM maintenance_cursor c
+             CROSS JOIN fact_agent_observation a ON a.source=c.source AND a.revision=c.sidecar_revision
+             CROSS JOIN dim_session p ON p.harness='claude' AND p.native_id=a.storage_parent
+             CROSS JOIN bridge_session_owner b ON b.source=p.source AND b.owner=?2
+             WHERE c.source=?1 AND a.call_id IS NOT NULL HAVING count(*)=1",
+            params![child, parent], |row| Ok((row.get::<_, String>(0)?, Some(row.get::<_, i64>(1)?))),
+        ).optional().map_err(super::index)?
+    } else if codex {
+        Some((String::new(), None))
+    } else {
+        None
+    };
+    let Some((call, storage_parent)) = call else {
+        return Ok(None);
+    };
     drop(graph);
     drop(tx);
-    let call = match call {
-        Some(call) => call,
-        None if marker => match selected::launch_call(view, source, child_key)? {
-            Some(call) => call.id,
-            None => return Ok(None),
-        },
-        None if codex => String::new(),
-        None => return Ok(None),
-    };
     let tx = view.lock()?;
     let mut query = tx.prepare_cached(
             "SELECT s.carrier,c.pos,r.occurrence,c.block
@@ -1727,7 +1780,7 @@ fn current_launch_location(
              CROSS JOIN warehouse_source s ON s.source=m.source AND s.origin=?2
              CROSS JOIN warehouse_current w ON w.source=s.source AND w.path=s.carrier
              CROSS JOIN fact_tool_call c ON c.source=s.source AND (
-                 (?3<>'' AND c.call_id=?3) OR (?3='' AND c.tool IN ('spawn_agent','collaboration.spawn_agent')
+                 (?3<>'' AND c.source=?6 AND c.call_id=?3 AND c.tool IN ('Agent','Task')) OR (?3='' AND c.tool IN ('spawn_agent','collaboration.spawn_agent')
                    AND EXISTS (SELECT 1 FROM bridge_spawn_placement p JOIN dim_session d ON d.source=?5
                        WHERE p.child=?4 AND p.parent_source=c.source AND p.pos=c.pos AND d.nickname=c.task_name)))
              CROSS JOIN fact_record r ON r.source=s.source AND r.pos=c.pos AND r.block=0 AND NOT r.gap
@@ -1739,7 +1792,8 @@ fn current_launch_location(
             source.namespace.binding(),
             call,
             native_id,
-            child
+            child,
+            storage_parent
         ])
         .map_err(super::index)?;
     let Some(row) = rows.next().map_err(super::index)? else {

@@ -8,14 +8,12 @@ WITH origin AS MATERIALIZED (
 ), send AS MATERIALIZED (
   SELECT s.source,s.call_id,s.pos,s.block,o.end FROM origin o
   CROSS JOIN fact_relay_send s ON s.source=o.source AND s.pos=?2 AND s.block=?5
-  WHERE s.call_id IS NOT NULL
+  WHERE s.call_id IS NOT NULL AND (s.target IN (SELECT value FROM json_each(?8)) OR (s.target='main' AND ?9))
 ), delivery AS MATERIALIZED (
   SELECT DISTINCT r.correlation FROM send s
   CROSS JOIN fact_relay_result r INDEXED BY relay_result_call
-    ON r.source=s.source AND r.call_id=s.call_id AND r.pos<s.end
-    AND ((r.call_pos IS NULL AND (SELECT count(*) FROM fact_tool_call unique_call
-            WHERE unique_call.source=s.source AND unique_call.call_id=s.call_id AND unique_call.pos<s.end)=1)
-       OR (r.call_pos=s.pos AND r.call_block=s.block))
+    ON r.source=s.source AND r.call_id=s.call_id AND r.pos>s.pos AND r.pos<s.end
+    AND r.call_pos=s.pos AND r.call_block=s.block
   WHERE NOT r.failed AND r.correlation IS NOT NULL AND (SELECT count(*) FROM send)=1
   LIMIT 2
 ), owners AS MATERIALIZED (
@@ -34,4 +32,5 @@ CROSS JOIN fact_relay_receipt r INDEXED BY relay_receipt_correlation
   ON r.correlation=d.correlation AND r.source=CAST(m.key AS INTEGER) AND r.pos<m.value
 CROSS JOIN fact_record f ON f.source=r.source AND f.pos=r.pos AND f.block=0 AND NOT f.gap
 WHERE (SELECT count(*) FROM delivery)=1 AND (SELECT count(*) FROM owners)=1
+  AND EXISTS (SELECT 1 FROM owners o JOIN send s ON (o.source,o.pos,o.block)=(s.source,s.pos,s.block))
 LIMIT 2;

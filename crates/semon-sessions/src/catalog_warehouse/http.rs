@@ -1289,7 +1289,6 @@ fn read_transcript(
                     witness: &peer.witness,
                 }),
                 retained_provider,
-                address.is_some(),
             )
             .map_err(read_error)?,
         )
@@ -1370,7 +1369,6 @@ fn read_transcript(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn relationship_context(
     view: &selected::ReadView<'_>,
     source: &Source<'_>,
@@ -1379,7 +1377,6 @@ fn relationship_context(
     entries: &mut Vec<Value>,
     origin: Option<selected::PeerBinding<'_>>,
     provider: Option<&dyn crate::SessionSourceReader>,
-    addressed: bool,
 ) -> Result<Value, ReadError> {
     use super::trace::{self, available_relationship};
     use std::collections::{BTreeMap, BTreeSet};
@@ -1483,7 +1480,7 @@ fn relationship_context(
                 }
             }
         }
-        let sends = if addressed && boundary {
+        let sends = if boundary {
             None
         } else if let Some(sends) = page_sends.remove(&index) {
             Some(sends)
@@ -1535,7 +1532,7 @@ fn relationship_context(
             handoffs.entry(relay.id.clone()).or_insert_with(|| {
                 json!({
                     "id":relay.id,"kind":"relay","from":key,"to":relay.target,"at":relay.at,
-                    "status":"off","declined":false,"source_turn":turn.id,"reason":relay.reason,
+                    "status":"off","declined":false,"source_turn":turn.id,"reason":relay.reason_code,
                 })
             });
         }
@@ -1543,13 +1540,25 @@ fn relationship_context(
 
     // Launches use the parent matcher in both scopes. A retained read only
     // considers peers that were observed when the original component froze.
+    let has_visible_boundary = component.records.iter().any(|record| {
+        record.causal.turn.as_ref().is_some_and(|turn| {
+            turn.address == record.address && turns.contains_key(turn.id.as_str())
+        })
+    });
     if !turns.is_empty() {
         let children = trace::child_keys(view, source, key, peer)?;
         let mut matched = 0;
         for child in children {
-            let Some(Some((address, block, unique))) = available_relationship(
-                trace::launch_location(view, source, key, &child, peer, provider),
-            )?
+            let Some(Some((address, block, unique))) =
+                available_relationship(trace::launch_location(
+                    view,
+                    source,
+                    key,
+                    &child,
+                    peer,
+                    provider,
+                    &turns.keys().copied().collect(),
+                ))?
             else {
                 continue;
             };
@@ -1561,6 +1570,20 @@ fn relationship_context(
             {
                 (component, record)
             } else {
+                if !has_visible_boundary {
+                    continue;
+                }
+                if peer.is_none()
+                    && !selected::current_launch_turn(
+                        view,
+                        source,
+                        component,
+                        &address,
+                        &turns.keys().copied().collect(),
+                    )?
+                {
+                    continue;
+                }
                 let parent = match peer {
                     None => selected::trace_record(view, source, key, &address),
                     Some(peer) => selected::retained_peer_trace_window(
@@ -1636,12 +1659,37 @@ fn relationship_context(
             } else {
                 json!({"id":trace::unavailable_spawn_id(&address, block, &child),
                     "kind":"spawn","from":key,"to":child,"at":at,"status":"off","declined":false,
-                    "source_turn":turn.id,"reason":if unique {"The launch has no qualified child turn in the selected prefixes."}
-                        else {"More than one certified child claims the launch."}})
+                    "source_turn":turn.id,"reason":"spawn_unverified"})
             };
             let id = edge["id"].as_str().expect("launch edge id").to_owned();
             placements.push(((address, block), id.clone()));
             handoffs.insert(id, edge);
+        }
+    }
+
+    for record in &component.records {
+        let Some((turn, at)) = record.causal.turn.as_ref().zip(record.at) else {
+            continue;
+        };
+        for call in record.causal.calls.iter().filter(|call| {
+            matches!(
+                call.tool.as_str(),
+                "Agent" | "Task" | "spawn_agent" | "collaboration.spawn_agent"
+            )
+        }) {
+            if placements
+                .iter()
+                .any(|((address, block), _)| *address == record.address && *block == call.block)
+            {
+                continue;
+            }
+            let id = trace::unavailable_spawn_id(&record.address, call.block, "");
+            placements.push(((record.address.clone(), call.block), id.clone()));
+            handoffs.insert(
+                id.clone(),
+                json!({"id":id,"kind":"spawn","from":key,"to":null,"at":at,
+                "status":"off","declined":false,"source_turn":turn.id,"reason":"spawn_unverified"}),
+            );
         }
     }
 
