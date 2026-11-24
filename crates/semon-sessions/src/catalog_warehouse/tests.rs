@@ -3886,11 +3886,17 @@ fn warehouse_transcript_observation_tracks_committed_entries_without_body_text()
             "timestamp":"2026-09-24T00:00:01Z",
             "message":{"role":"assistant","content":[{"type":"text","text":private}]}}),
     );
+    let unpublished = observe();
+    // Live runtime status may change before the Index publishes the append.
     assert_eq!(
-        observe(),
-        before,
-        "uncommitted suffix does not change the observation"
+        unpublished["transcript"]["generation"],
+        before["transcript"]["generation"]
     );
+    assert_eq!(
+        unpublished["transcript"]["total"],
+        before["transcript"]["total"]
+    );
+    assert!(!unpublished.to_string().contains(private));
     scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
     let after = observe();
     let page = http::transcript(&configured, "sid=native", None, None);
