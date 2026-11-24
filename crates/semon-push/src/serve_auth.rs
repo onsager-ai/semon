@@ -30,6 +30,16 @@ impl RegistryAuthenticator {
     ) -> Result<(), enrollment::Error> {
         crate::simple_pair::unpair_token(&self.dir, authorization, now)
     }
+    pub(super) fn snapshot_identity(&self, authorization: Option<&str>) -> Option<(String, bool)> {
+        crate::read_token::identify(
+            &self.dir,
+            authorization?.strip_prefix("Bearer ")?,
+            crate::read_token::Scope::Snapshot,
+        )
+    }
+    pub(super) fn dir(&self) -> &Path {
+        &self.dir
+    }
     pub(super) fn authenticate(&self, authorization: Option<&str>) -> Option<String> {
         enrollment::refuse_legacy_tokens(&self.dir).ok()?;
         let registry = Registry::read_current(&self.dir).ok()?;

@@ -33,6 +33,7 @@ test('failed JSON reads release an unread body while retaining actionable HTTP s
       ok: false,
       status: 403,
       statusText: 'Forbidden',
+      headers: new Headers(),
       body: {
         cancel() {
           return Promise.reject(Error('Already retired'));

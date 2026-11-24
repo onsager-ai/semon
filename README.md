@@ -159,9 +159,28 @@ only an owner read token. Open the printed `/?t=TOKEN` URL; it sets an
 `HttpOnly; SameSite=Lax` session cookie and redirects without the token. Lax cookies are withheld on cross-site POSTs; cookie-authenticated POSTs still require the receiver's exact admitted Origin.
 HTTPS public URLs add `Secure`. API clients may send `Authorization: Bearer TOKEN`.
 Read tokens are stored only as hashes, survive restarts, and read all received
-history until revoked. `semon token --dir DIR --list` prints IDs and creation
+history until revoked. `semon token --dir DIR --list` prints IDs, scopes and creation
 times, never secrets; `semon token --dir DIR --revoke ID` invalidates the token
 and its cookies on the next request. Creation and revocation are audited.
+
+### Owner management dashboard
+
+Open `/manage` on the receiver after signing in with an owner read token. It
+shows decisions waiting on the owner, spend, lane health, decisions made today,
+and host health with live Catalog stalled sessions. Today follows Asia/Shanghai.
+
+Mint a write-only snapshot bearer with `semon token --dir DIR --snapshot` and
+issue it to the Chief PM. The command prints the bearer once. Use
+`semon token --dir DIR --list` to find its ID and `--revoke ID` to revoke it.
+The token authorizes only `POST /v1/manage/snapshot` and grants no Viewer access.
+
+Post a complete version 1 snapshot as uncompressed UTF-8 `application/json`
+with `Content-Length` and `Authorization: Bearer TOKEN`. The request limit is
+256 KiB. Success returns `204` with an empty body after durable append. Invalid
+snapshots, including credential-like values, are rejected without storing them.
+Accepted records stay in the private `DIR/manage-snapshots` directory until an
+operator explicitly deletes them. Use HTTPS outside loopback. See the
+[snapshot schema and validation rules](docs/design/manage-dashboard.md).
 
 Deploy behind any HTTPS proxy, including Cloudflare Tunnel, forwarding the
 original Host. The listener uses plain HTTP; `--public-url https://HOST` admits

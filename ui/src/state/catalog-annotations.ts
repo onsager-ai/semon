@@ -40,7 +40,9 @@ export function parseCatalogAnnotations(value: unknown): CatalogAnnotations {
     !/^[a-f0-9]{64}$/.test(generation) ||
     entries.some((entry, index) => {
       const previous = entries[index - 1];
-      return 'slot' in entry && previous && 'slot' in previous && entry.slot <= previous.slot;
+      return (
+        entry.slot !== undefined && previous?.slot !== undefined && entry.slot <= previous.slot
+      );
     })
   )
     throw Error('Annotation response exceeds its bound');

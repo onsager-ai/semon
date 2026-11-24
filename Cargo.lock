@@ -1926,10 +1926,12 @@ dependencies = [
 name = "semon-push"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "getrandom 0.3.4",
  "hex",
  "httpdate",
  "libc",
+ "percent-encoding",
  "reqwest",
  "semon-sessions",
  "serde",

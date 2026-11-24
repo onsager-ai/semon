@@ -248,6 +248,10 @@ pub trait ViewerAccess: Send + Sync {
     fn resolve(&self, secret: &str) -> Option<String>;
     /// Issue a one-time machine pairing code under the receiver's read authority.
     fn issue_pairing_code(&self) -> Result<Value, String>;
+    /// Receiver-local management data. No session or analytics source receives it.
+    fn management_snapshot(&self) -> io::Result<Option<Value>> {
+        Ok(None)
+    }
 }
 
 impl Viewer {
@@ -616,6 +620,23 @@ fn respond(request: Request, reply: ViewerReply, cookie: Option<&str>) {
     let _ = request.respond(response);
 }
 
+fn receiver_page(mut reply: ViewerReply) -> ViewerReply {
+    if reply.status == 200
+        && reply.body == PAGE.as_bytes()
+        && reply.content_type.starts_with("text/html")
+    {
+        reply.body = PAGE
+            .replacen(
+                "</head>",
+                "<meta name=\"semon-receiver\" content=\"1\">\n</head>",
+                1,
+            )
+            .into_bytes();
+        reply.etag = None;
+    }
+    reply
+}
+
 fn request_header<'a>(request: &'a Request, name: &'static str) -> Option<&'a str> {
     request
         .headers()
@@ -924,6 +945,42 @@ impl Viewer {
                 Some(None) => {}
             }
         }
+        if let Some(access) = &self.receive {
+            if path == "/api/viewer/manage" {
+                let reply = if request.method() == &Method::Get {
+                    let now = crate::model::now_ms();
+                    let snapshot = access.management_snapshot();
+                    json_reply(
+                        200,
+                        json!({
+                            "now": now,
+                            "snapshot_unavailable": snapshot.is_err(),
+                            "snapshot": snapshot.ok().flatten(),
+                            "stalls": self.core.management_stalls(now),
+                        }),
+                    )
+                } else {
+                    json_reply(405, json!({"error": "Method not allowed"}))
+                };
+                respond(request, reply, None);
+                return;
+            }
+            if path == "/manage" {
+                let reply = if request.method() == &Method::Get {
+                    receiver_page(ViewerReply {
+                        status: 200,
+                        content_type: "text/html; charset=utf-8",
+                        body: PAGE.as_bytes().to_vec(),
+                        etag: None,
+                        extra_headers: Vec::new(),
+                    })
+                } else {
+                    json_reply(405, json!({"error": "Method not allowed"}))
+                };
+                respond(request, reply, None);
+                return;
+            }
+        }
         if path == "/api/viewer/receiver-storage" && self.receive.is_some() {
             let reply = if request.method() == &Method::Get {
                 json_reply(200, self.receiver_storage())
@@ -1063,6 +1120,11 @@ impl Viewer {
         } else {
             self.core
                 .respond("GET", path, query, if_none_match.as_deref())
+        };
+        let reply = if self.receive.is_some() {
+            receiver_page(reply)
+        } else {
+            reply
         };
         respond(request, reply, set_cookie.then_some(&self.token));
     }

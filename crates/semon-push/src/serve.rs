@@ -564,6 +564,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
@@ -572,6 +573,7 @@ fn reason(status: u16) -> &'static str {
         409 => "Conflict",
         411 => "Length Required",
         413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         417 => "Expectation Failed",
         431 => "Request Header Fields Too Large",
         503 => "Service Unavailable",
@@ -728,6 +730,7 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
         if head.target != "/v1/pair"
             && head.target != "/v1/unpair"
             && !head.target.starts_with("/v1/push/")
+            && !head.target.starts_with("/v1/manage/")
             && let Some(viewer) = &shared.viewer
         {
             if !slot.admit_viewer() {
@@ -740,7 +743,9 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
             Next::Continue if !head.close => {}
             Next::Continue | Next::Close => return connection.close(),
             Next::Refuse(status, message, headers) => {
-                log_refusal(&head, status);
+                if head.target != crate::manage::ROUTE {
+                    log_refusal(&head, status);
+                }
                 return connection.refuse(status, message, headers);
             }
         }
@@ -866,9 +871,110 @@ fn answer_pair(shared: &Shared, slot: &mut Slot, connection: &mut Connection, he
 
 /// Checks a request in order (endpoint, framing, token, method, size) and,
 /// only once all pass, reads its body and answers it.
+fn answer_snapshot(
+    shared: &Shared,
+    slot: &mut Slot,
+    connection: &mut Connection,
+    head: &Head,
+) -> Next {
+    let registry = shared.tokens.registry();
+    let identity = registry.snapshot_identity(head.authorization.as_deref());
+    let id = identity.as_ref().map_or("unknown", |(id, _)| id.as_str());
+    let audit = |status| {
+        eprintln!(
+            "semon receive: endpoint={} snapshot_credential_id={id} status={status}",
+            crate::manage::ROUTE
+        );
+    };
+    let mut ingest = || {
+        if !matches!(identity.as_ref(), Some((_, false))) {
+            return authority_refusal();
+        }
+        if head.method != "POST" {
+            return Next::Refuse(
+                405,
+                "the snapshot endpoint is POST only",
+                &[("Allow", "POST")],
+            );
+        }
+        if head.transfer_encoding
+            || !head.content_type.as_deref().is_some_and(|media| {
+                let mut parts = media.split(';').map(str::trim);
+                parts
+                    .next()
+                    .is_some_and(|part| part.eq_ignore_ascii_case("application/json"))
+                    && parts
+                        .next()
+                        .is_none_or(|part| part.eq_ignore_ascii_case("charset=utf-8"))
+                    && parts.next().is_none()
+            })
+            || head.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("content-encoding")
+                    && !value.eq_ignore_ascii_case("identity")
+            })
+        {
+            return Next::Refuse(
+                415,
+                "expected uncompressed application/json with Content-Length",
+                &[],
+            );
+        }
+        let Some(length) = head.content_length else {
+            return Next::Refuse(411, "a Content-Length is required", &[]);
+        };
+        if length > crate::manage::LIMIT as u64 {
+            return Next::Refuse(413, "the body is over the 256 KiB limit", &[]);
+        }
+        if head.expect_other {
+            return Next::Refuse(417, "only Expect: 100-continue is understood", &[]);
+        }
+        slot.authenticated();
+        if head.expect_continue && connection.send(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+            return Next::Close;
+        }
+        let body = match connection.read_body(length as usize) {
+            Ok(body) => zeroize::Zeroizing::new(body),
+            Err(error) if is_timeout(&error) => {
+                return Next::Refuse(408, "the request took too long", &[]);
+            }
+            Err(_) => return Next::Close,
+        };
+        let now = crate::manage::now();
+        let Ok((generation, snapshot)) = crate::manage::validate(&body, now) else {
+            return Next::Refuse(400, "invalid snapshot", &[]);
+        };
+        if crate::manage::append(registry.dir(), id.to_owned(), now, generation, snapshot).is_err()
+        {
+            return Next::Refuse(503, "snapshot storage unavailable", &[]);
+        }
+        audit(204);
+        let close = if head.close {
+            "Connection: close\r\n"
+        } else {
+            ""
+        };
+        let response = format!(
+            "HTTP/1.1 204 {}\r\nCache-Control: no-store\r\n{close}\r\n",
+            reason(204)
+        );
+        if connection.send(response.as_bytes()).is_err() {
+            return Next::Close;
+        }
+        Next::Continue
+    };
+    let result = ingest();
+    if let Next::Refuse(status, _, _) = result {
+        audit(status);
+    }
+    result
+}
+
 fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
     if head.target == "/v1/pair" || head.target == "/v1/unpair" {
         return answer_pair(shared, slot, connection, head);
+    }
+    if head.target == crate::manage::ROUTE {
+        return answer_snapshot(shared, slot, connection, head);
     }
     let Some(endpoint) = Endpoint::from_path(&head.target) else {
         return Next::Refuse(404, "unknown endpoint", &[]);
