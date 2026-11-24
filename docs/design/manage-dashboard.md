@@ -236,7 +236,7 @@ the infra lane's `Thermal` reading and its observation time.
   `status.Lane` values, agent IDs and host names within their respective lists.
   A breakdown row must name a lane, an agent, or both. These names must resolve
   to the snapshot's entries and, when both are present, identify the same lane.
-  Require a host in decision links and disallow URL credentials. Treat all
+  Require a host in decision links and disallow URL credentials and percent encoding. Treat all
   supplied text as plain text. Snapshots must contain no secrets. Screen every
   text value for credential assignments, bearer markers, common token prefixes,
   private keys, and high-entropy strings. A 40-character hex Git SHA in the

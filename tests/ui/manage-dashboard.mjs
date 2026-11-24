@@ -16,8 +16,13 @@ try {
   page.on('pageerror', (error) => errors.push(error.message));
   assert.equal((await page.request.get(ENV.base + '/manage')).status(), 403);
   assert.equal((await page.request.get(ENV.base + api)).status(), 403);
+  const pairing = page.waitForResponse((response) =>
+    response.url().endsWith('/api/viewer/pairing'),
+  );
   await page.goto(`${ENV.base}/manage?t=${ENV.token}`);
+  await pairing;
   await page.getByText('No snapshot received.').waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Pair a machine' }).count(), 0);
   assert.equal(new URL(page.url()).pathname, '/manage');
   assert.equal(new URL(page.url()).search, '');
   const post = async (data) => {

@@ -1201,10 +1201,18 @@ fn management_snapshot_write_scope_validation_and_append_order() {
     for (pointer, value) in [
         ("/version", json!(2)),
         ("/generated_at", json!("2026-02-31T12:00:00Z")),
-        ("/generated_at", json!("2016-12-31T23:59:60Z")),
+        ("/hosts/0/observed_at", json!("2016-12-31T23:59:60Z")),
         (
             "/decisions_today/0/link",
             json!("https://example.com/?%70assword=fixture"),
+        ),
+        (
+            "/decisions_today/0/link",
+            json!("https://example.com/#%70assword=fixture"),
+        ),
+        (
+            "/decisions_today/0/link",
+            json!("https://example.com/%70assword=fixture"),
         ),
         (
             "/hosts/0",

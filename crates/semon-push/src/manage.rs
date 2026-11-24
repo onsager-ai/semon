@@ -317,11 +317,7 @@ pub(crate) fn validate(body: &[u8], now: DateTime<Utc>) -> Result<(DateTime<Utc>
             || url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
-            || url.query_pairs().any(|(name, value)| {
-                looks_secret(&format!("{name}={value}"))
-                    || looks_secret(&name)
-                    || looks_secret(&value)
-            })
+            || link.0.contains('%')
             || authority
                 .split(['/', '?', '#'])
                 .next()

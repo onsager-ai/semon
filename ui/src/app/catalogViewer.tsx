@@ -1693,7 +1693,11 @@ export function createCatalogViewer(
         titleSlot: content && !active?.findOpen && !active?.errorMode ? content.titleSlot : title,
         mode: (active?.findOpen || active?.errorMode) && content ? [content.mode] : undefined,
         actions: [
-          ...(pairingAvailable && !active && route !== 'trace' && !emptyReceiver
+          ...(pairingAvailable &&
+          !active &&
+          route !== 'trace' &&
+          !(route === 'host' && hostRoute?.nav === 'manage') &&
+          !emptyReceiver
             ? [pairButton]
             : []),
           ...(route === 'analytics'
