@@ -124,8 +124,9 @@ P4.1 stages a runtime-free native admission entry point and a warehouse input
 adapter. Each drain opens one SQLite read snapshot after admission and pages
 whole sessions with the existing input budgets. The snapshot pins membership,
 ledgers, prefixes and facts for the whole drain. Appends or replacements that
-commit after it opens appear on the next drain. A restart takes a fresh
-inventory and uses the existing checkpoint representation. The adapter has no
+commit after it opens appear on the next drain. A restart takes a fresh read snapshot. It can resume an interrupted inventory
+when the existing checkpoint still matches the Index incarnation, prefix
+revision and inventory bound. The adapter has no
 persisted change feed or checkpoint format of its own.
 
 The scan revisits the namespace on every drain. Measure that cost against the
@@ -147,7 +148,7 @@ Infra runs this procedure with a CI-built candidate that exposes the P4.2
 materialize path and ASI SQL. Use a private, freshly created scratch directory
 on the host. Stage a fixed, authorized copy of the three native home trees there
 and keep their paths and contents stable until the watch append. Stage the
-matching pricing facts file if the timer uses one. Record the capture time and
+matching recorder facts file if the timer uses one. Record the capture time and
 file and byte totals per harness. Use an empty runtime fixture. Leave the live
 state, timer, and native homes alone. Compare against the pre-cutover binary on
 the same corpus and quota if a paired estimate is needed. Give each binary a
@@ -156,7 +157,7 @@ private Index and Analytics Store. Leave the OS page cache alone.
 
 In a Bash shell, set `BIN` to the absolute path of the candidate executable and
 `RUN` to the absolute path of the prepared scratch directory. The staged homes
-are `$RUN/claude`, `$RUN/codex` and `$RUN/copilot`. If the timer uses a pricing
+are `$RUN/claude`, `$RUN/codex` and `$RUN/copilot`. If the timer uses a recorder
 facts override, append `--facts "$RUN/facts.json"` to `opts` in the block below.
 Run one case at a time and take a fresh thermal reading before each case.
 

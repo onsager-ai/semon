@@ -95,7 +95,8 @@ pub fn admit_warehouse(options: &Options, cancelled: impl Fn() -> bool) -> io::R
 }
 
 /// One full inventory over a stable SQLite read snapshot. Open a fresh input
-/// for each one-shot or watch drain. A process restart restarts inventory.
+/// for each one-shot or watch drain. An interrupted inventory may resume at
+/// a matching warehouse boundary.
 pub struct WarehouseAnalyticsInput {
     connection: Connection,
     namespace: String,
@@ -103,8 +104,6 @@ pub struct WarehouseAnalyticsInput {
     incarnation: String,
     revision: i64,
     through: i64,
-    after: i64,
-    last_checkpoint: Option<String>,
     table: Arc<crate::pricing::EffectiveTable>,
     options: Options,
     machine: MachineFacts,
@@ -150,8 +149,6 @@ impl WarehouseAnalyticsInput {
             incarnation,
             revision,
             through,
-            after: 0,
-            last_checkpoint: None,
             table: crate::pricing::snapshot(),
             options: options.clone(),
             machine,
@@ -194,29 +191,49 @@ impl AnalyticsInput for WarehouseAnalyticsInput {
         checkpoint: Option<&str>,
         budget: InputBudget,
     ) -> rusqlite::Result<AdmittedBatch> {
-        if budget.max_sessions == 0
-            || budget.max_steps == 0
-            || self
-                .last_checkpoint
-                .as_deref()
-                .is_some_and(|previous| Some(previous) != checkpoint)
-            || checkpoint
-                .map(decode_checkpoint)
-                .transpose()?
-                .is_some_and(|saved| saved.namespace != self.namespace)
+        if budget.max_sessions == 0 || budget.max_steps == 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let saved = checkpoint.map(decode_checkpoint).transpose()?;
+        if saved
+            .as_ref()
+            .is_some_and(|saved| saved.namespace != self.namespace)
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        let through = format!("warehouse-source/{:020}", self.through);
+        let start = match saved {
+            Some(Checkpoint {
+                incarnation,
+                cursor:
+                    Cursor::Inventory {
+                        snapshot,
+                        through: end,
+                        after,
+                    },
+                ..
+            }) if incarnation == self.incarnation
+                && snapshot == self.revision
+                && end == through =>
+            {
+                after
+                    .strip_prefix("warehouse-source/")
+                    .and_then(|key| key.parse::<i64>().ok())
+                    .filter(|&offset| offset > 0 && offset < self.through)
+                    .ok_or(rusqlite::Error::InvalidQuery)?
+            }
+            _ => 0,
+        };
         let limit =
             i64::try_from(budget.max_sessions).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let mut changes = Vec::new();
-        let mut after = self.after;
+        let mut after = start;
         let mut steps = 0usize;
         for owner in self.inventory(after, limit)? {
             let uid = owner.uid(&self.namespace);
             match self.read_session(&owner, uid.clone())? {
                 Some(session) => {
-                    if after != self.after
+                    if after != start
                         && session.steps.len() > budget.max_steps.saturating_sub(steps)
                     {
                         break;
@@ -252,8 +269,8 @@ impl AnalyticsInput for WarehouseAnalyticsInput {
             (
                 Cursor::Inventory {
                     snapshot: self.revision,
-                    through: format!("{:020}", self.through),
-                    after: format!("{after:020}"),
+                    through,
+                    after: format!("warehouse-source/{after:020}"),
                 },
                 Reconciliation::Incremental,
             )
@@ -263,8 +280,6 @@ impl AnalyticsInput for WarehouseAnalyticsInput {
             incarnation: self.incarnation.clone(),
             cursor,
         })?;
-        self.after = after;
-        self.last_checkpoint = Some(checkpoint.clone());
         Ok(AdmittedBatch {
             namespace: self.namespace.clone(),
             checkpoint,

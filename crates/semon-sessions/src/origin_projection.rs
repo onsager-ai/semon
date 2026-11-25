@@ -677,17 +677,21 @@ fn admitted(
     else {
         return Ok(None);
     };
-    project_session(SessionEvidence {
+    let mut projected = project_session(SessionEvidence {
         session_uid: session_uid.clone(),
         session: session_input(tx, namespace, &session_uid, &row, repo)?,
-        sources: &witness.sources,
+        sources: &row.sources,
         price_version,
         generation,
         steps,
         facts: facts.into_iter().map(|(_, id, fact)| (id, fact)).collect(),
         compactions,
         prices,
-    })
+    })?;
+    if let Some(session) = &mut projected {
+        session.source_witness = indexed_source_witness(&witness.sources)?;
+    }
+    Ok(projected)
 }
 
 struct SessionEvidence<'a> {

@@ -67,6 +67,29 @@ impl Fixture {
         path
     }
 
+    fn seed_codex(&self) {
+        let path = self
+            .options
+            .codex_home
+            .join("sessions/rollout-codex-fixture.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let records = [
+            json!({"type":"session_meta", "timestamp":"2026-11-24T00:00:00Z", "payload":{
+                "id":"codex-fixture", "cwd":"/work/synthetic", "originator":"codex_exec", "thread_source":"user"
+            }}),
+            json!({"type":"turn_context", "timestamp":"2026-11-24T00:00:01Z", "payload":{"model":"gpt-6-sol"}}),
+            json!({"type":"token_usage_record", "timestamp":"2026-11-24T00:01:00Z", "payload":{
+                "thread_id":"codex-fixture", "session_id":"session", "turn_id":"turn", "response_id":"response",
+                "usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7,"cached_input_tokens":0,
+                         "cache_write_input_tokens":0,"reasoning_output_tokens":0}
+            }}),
+        ];
+        let mut file = fs::File::create(path).unwrap();
+        for record in records {
+            writeln!(file, "{record}").unwrap();
+        }
+    }
+
     fn admit(&self) {
         admit_warehouse(&self.options, || false).unwrap();
     }
@@ -145,7 +168,7 @@ fn logical_rows(
 fn cold_start_warehouse_matches_semantic_origin() {
     let fixture = Fixture::new("cold");
     fixture.seed("a");
-    fixture.seed("b");
+    fixture.seed_codex();
     let capture = crate::test_hooks::register(&fixture.options.cache, |point| {
         assert_ne!(
             point, "runtime_captured",
@@ -168,6 +191,7 @@ fn cold_start_warehouse_matches_semantic_origin() {
 
     let actual = drain(&mut fixture.open());
     assert_eq!(actual.len(), 2);
+    assert_eq!(actual["fixture/codex/codex-fixture"].steps.len(), 1);
     assert!(actual.values().all(|session| session.steps.len() == 1));
     // Exercise the real writer and its manifest checkpoint through several batches.
     let mut input = fixture.open();
@@ -212,6 +236,7 @@ fn watch_rescan_pins_a_drain_and_sees_next_append() {
     let mut input = fixture.open();
     let first = input.read_admitted(None, BUDGET).unwrap();
     assert!(!first.complete);
+    assert_eq!(input.read_admitted(None, BUDGET).unwrap(), first);
     append(&path, "b", 2);
     fixture.admit();
     let pinned = input
