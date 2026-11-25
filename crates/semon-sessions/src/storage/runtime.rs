@@ -298,7 +298,7 @@ impl RuntimeStore {
                 ))
                 .map_err(|_| crate::CatalogIdentityError::Unavailable);
         }
-        crate::native_resolution::sqlite_resolve_native(
+        crate::catalog::warehouse::host_resolve_native(
             &self.options,
             key,
             harness,
