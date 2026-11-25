@@ -269,7 +269,7 @@ fn emit_catalog_publish_attempt(
 // v60: native operation tool labels for selected call totals.
 // v61: source-relative image ranges and scalar checkpoints for selected reads.
 // v62: assistant result positions for warehouse Home metadata and hydration.
-pub(crate) const SCHEMA_VERSION: i64 = 62;
+pub(crate) const SCHEMA_VERSION: i64 = 63;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.

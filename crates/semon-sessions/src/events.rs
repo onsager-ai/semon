@@ -29,6 +29,7 @@ pub(crate) mod session_activity;
 pub(crate) mod store;
 mod usage;
 pub(crate) mod warehouse;
+mod worker_outcome;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 pub use usage::ModelTokens;
@@ -3976,6 +3977,12 @@ fn parse(
                             phase: turn.phase.clone(),
                         },
                     );
+                    if turn.phase == crate::codex_lifecycle::TurnPhase::Completed
+                        && let Some(outcome) = field(&record["payload"], "last_agent_message")
+                            .and_then(worker_outcome::Outcome::parse)
+                    {
+                        batch.push(line_offset, 0, Fact::WorkerOutcome(outcome));
+                    }
                 }
             }
             summary.observe_counted(record.as_ref().ok(), harness, !known.tree);
@@ -4034,6 +4041,11 @@ fn parse(
                     copilot(index, &record, line_offset);
                     false
                 } else if harness == "claude" {
+                    if crate::native_sidecar::agent_path(path)
+                        && let Some((block, outcome)) = worker_outcome::claude(&record)
+                    {
+                        index.warehouse_fact(line_offset, block, || Fact::WorkerOutcome(outcome));
+                    }
                     claude(index, &record, line_offset);
                     false
                 } else if !known.model {

@@ -2032,13 +2032,10 @@ impl SqliteStore {
                     ));
                 }
                 let parent = parents.into_iter().next();
-                let task = endpoint
-                    .paths
-                    .first()
-                    .and_then(|path| path.rsplit('/').next())
-                    .filter(|task| !task.is_empty())
-                    .map(str::to_owned)
-                    .or_else(|| endpoint.nickname.clone());
+                let task = crate::model::codex_dispatch_name(
+                    endpoint.paths.first().map(String::as_str),
+                    endpoint.nickname.as_deref(),
+                );
                 tx.execute("INSERT INTO catalog_semantic_endpoints(session_key,harness,parent_native,parent_native_harness,parent_key,task,nickname,cost,metadata) VALUES(?1,?2,?3,?9,?4,?5,?6,?7,?8) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata,parent_native=excluded.parent_native,parent_native_harness=excluded.parent_native_harness,parent_key=excluded.parent_key,task=excluded.task,nickname=excluded.nickname,cost=excluded.cost",params![endpoint.row.key,endpoint.row.harness,parent.as_ref().map(|p|&p.1),endpoint.parent,task,endpoint.nickname,endpoint.row.cost.usd,encoded,parent.as_ref().map(|p|&p.0)]).map_err(failure)?;
                 for id in &endpoint.row.native_ids {
                     tx.execute(

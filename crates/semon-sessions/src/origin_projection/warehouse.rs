@@ -221,12 +221,15 @@ impl WarehouseAnalyticsInput {
 
     fn inventory(&self, after: i64, limit: i64) -> rusqlite::Result<Vec<Owner>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT d.source,d.harness,d.native_id,d.lineage,d.parent_id
+            "SELECT d.source,d.harness,d.native_id,d.lineage,d.parent_id,
+                    coalesce(json_extract(header.metadata,'$.guardian_review'),0)
              FROM dim_session d
              CROSS JOIN warehouse_current c ON c.source=d.source
              CROSS JOIN warehouse_source s ON s.source=d.source AND s.origin=?1
              CROSS JOIN lineage_member m ON m.source=d.source
              CROSS JOIN lineage_group g ON g.id=m.component AND g.owner=d.source
+             LEFT JOIN fact_session_observation header ON header.source=d.source
+                 AND header.pos=-1 AND header.block=0 AND header.kind='header' AND header.occurrence=0
              WHERE d.source>?2 AND d.source<=?3
              ORDER BY d.source LIMIT ?4",
         )?;
@@ -240,6 +243,7 @@ impl WarehouseAnalyticsInput {
                         native_id: row.get(2)?,
                         lineage: row.get(3)?,
                         parent_id: row.get(4)?,
+                        guardian: row.get(5)?,
                     })
                 },
             )?
@@ -365,6 +369,7 @@ struct Owner {
     native_id: String,
     lineage: bool,
     parent_id: Option<String>,
+    guardian: bool,
 }
 
 impl Owner {
@@ -552,7 +557,9 @@ impl WarehouseAnalyticsInput {
             machine: self.namespace.clone(),
             harness: owner.harness.clone(),
             native_session_id: owner.native_id.clone(),
-            role: if (owner.harness == "claude" && !owner.lineage) || parent.is_some() {
+            role: if owner.guardian {
+                Role::Reviewer
+            } else if (owner.harness == "claude" && !owner.lineage) || parent.is_some() {
                 Role::Worker
             } else {
                 Role::Solo
