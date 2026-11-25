@@ -953,8 +953,12 @@ fn lane_health_reports_published_agent_lineage_in_cli_and_mcp() {
             human("manager", ts(6, 0), private),
             reply("manager", 0, spawn("child-call")),
             copied.clone(),
+            // A native prompt separates independent compactions. Consecutive
+            // boundaries at one event position normalize to a single signal.
             compact(2, "auto", 1000),
+            human("manager", ts(6, 2), private),
             compact(3, "manual", 1000),
+            human("manager", ts(6, 3), private),
             compact(4, "auto", 2000),
             reply("manager", 5, text()),
         ],
