@@ -12,6 +12,43 @@ renders that evidence into the CLI and MCP response fields. Runtime liveness
 and run IDs come from the current authorized process and lock observations.
 The Index and its private body rows remain origin-local.
 
+## Root-scoped lane health
+
+With `asi-query`, `semon query lane_health ROOT_SESSION_UID` and the local
+stdio MCP tool `lane_health` with `{"root_session_uid":"ROOT_SESSION_UID"}`
+return the same JSON contract. Use the full ASI UID from `dim_session`.
+Materialize local analytics first. An unpublished root returns `unknown_session`.
+
+- `root_session_uid`, `snapshot` and `asi_schema_version` identify the report
+  and its pinned ASI snapshot. The `members` array is ordered by UID and follows
+  published native parent edges within the origin. Each member has a
+  `parent_session_uid`, a `compaction_count`, and a `compactions` array. Events
+  include `uid`, `timestamp` (UTC milliseconds), nullable `trigger`,
+  `pre_tokens` and `post_refill_tokens`, and boolean `early` and `storm`.
+  Context growth and lane health use the same per-session calculations.
+- `manager_tool_mix` groups the root's calls by `tool_key` and nullable
+  `command_tag`. `observed_children` lists its direct published child UIDs.
+- `usage` has one row per `usage_owner` (`exclusive` and `copied`). It includes
+  `steps`, `priced_steps`, `unpriced_steps`, nullable `priced_usd_est`, input,
+  output and cache token sums, `unknown_cache_split_steps`,
+  `known_reasoning_tokens` and `steps_with_reasoning`. An empty bucket has
+  zero step counts and null sums. Copied rows describe repeated observations
+  and stay separate from exclusive spend. Deduplicated shared usage is deferred.
+- `runtime` adds `now`, `observed_at` and `window_start` (UTC milliseconds) from
+  the native query. For a cached native cohort, `observed_at` can precede `now`.
+  The live fields per member are `state`, nullable `alive`, and `last_activity`
+  (UTC milliseconds). A missing observation leaves `live` null. A native read
+  failure leaves the analytics intact and adds a closed `runtime.error_code`.
+  Native home and window flags affect this read independently of the ASI snapshot.
+
+The report carries metadata and counters only. The ASI roster can omit
+marker-only and process-only descendants until ASI publishes those edges.
+Per-task attribution and Worker dispositions are deferred. Large reports can
+hit the existing ASI query budget and are refused as a whole. See the
+[lane health guide](../../../../docs/guides/lane-health-recipe.md).
+
+## Native source reads
+
 Ordinary local calls retry the complete query once only for the typed
 `source_changed` failure (a physical change during source verification/read with
 an unchanged captured prefix). The failed cohort and in-memory preparation are

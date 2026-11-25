@@ -1384,6 +1384,54 @@ impl Query {
         Ok(answer)
     }
 
+    /// Match origin-local ASI member identities against one qualified native read.
+    /// Only state, liveness and activity time leave the native query layer.
+    pub fn lane_runtime(&self, member_uids: &BTreeSet<&str>) -> Result<Value, QueryError> {
+        let [(_, source)] = self.sources.machines.as_slice() else {
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "A local source is required",
+            ));
+        };
+        if self.embedded || source.storage.is_postgres() {
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "A local SQLite source is required",
+            ));
+        }
+        let now = now_ms();
+        let data = source
+            .warehouse_query_at(now, None, false)
+            .map_err(|error| QueryError::io(&error))?;
+        let window_start = data.window_start;
+        let observed_at = data.observed_at;
+        let read = QueryRead::new(vec![(String::new(), data.clone())], usize::MAX);
+        let view = View::native(&read, observed_at, ReadShape::Summaries, None)?;
+        let mut sessions = serde_json::Map::new();
+        for ((harness, id), key) in &data.native_keys {
+            let identity = format!("{harness}/{}", semon_asi::input::encode_component(id));
+            if !member_uids.contains(identity.as_str()) {
+                continue;
+            }
+            if let Some(session) = view.session(key) {
+                let facts = view.facts.get(key);
+                let mut row = json!({
+                    "state": view.state(key, session).name(),
+                    "alive": facts.and_then(|facts| facts.alive),
+                    "last_activity": facts.and_then(|facts| facts.last),
+                });
+                qualify_summary_state(
+                    &mut row,
+                    facts.is_some_and(|facts| facts.recorded_status.as_deref() == Some("busy")),
+                );
+                sessions.insert(identity, row);
+            }
+        }
+        Ok(
+            json!({"now":now,"observed_at":observed_at,"window_start":window_start,"sessions":sessions}),
+        )
+    }
+
     /// Configured presentation labels, including duplicate-hostname aliases.
     /// This reads machine identity metadata without preparing native sources.
     pub fn source_labels(&self) -> Vec<(String, String)> {
