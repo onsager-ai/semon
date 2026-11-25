@@ -271,8 +271,15 @@ fn both_harnesses_preserve_evidence_turns_and_usage() {
     let expected = drain(&mut SqliteAnalyticsInput::open(&path, NAMESPACE).unwrap());
     assert_eq!(actual.len(), 4);
     assert_eq!(logical_rows(&actual), logical_rows(&expected));
+    let repeated = drain(&mut fixture.open());
     for (uid, session) in &actual {
-        assert_eq!(session.source_witness, expected[uid].source_witness);
+        // The semantic digest includes Catalog role metadata. Compare the
+        // portable source evidence, and check the warehouse digest separately.
+        assert_eq!(
+            session.source_witness.sources,
+            expected[uid].source_witness.sources
+        );
+        assert_eq!(session.source_witness, repeated[uid].source_witness);
         assert_eq!(session.steps, expected[uid].steps);
         assert_eq!(session.compactions, expected[uid].compactions);
     }

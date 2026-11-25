@@ -2511,7 +2511,7 @@ fn usage() -> String {
          \n\
          Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
          Explicitly admits native logs and materializes local-only analytics from the Event Index warehouse. Nothing starts this writer by default.\n\
-         Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
+         Batch limits default to 64 sessions and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
          \n\
          Usage: semon analytics coverage [--cache PATH] [--json]\n\
          Read-only coverage from one published live-row analytics snapshot. It does not report native pending/failed/frozen derivation state.\n\

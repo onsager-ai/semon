@@ -443,6 +443,20 @@ impl WarehouseAnalyticsInput {
             return Ok(None);
         };
         let parent = self.native_parent(owner)?;
+        let repo = self.repo(
+            members
+                .iter()
+                .rev()
+                .find_map(|member| member.cwd.as_deref()),
+        )?;
+        let branch = (repo.key != UNKNOWN_REPO_KEY)
+            .then(|| {
+                members
+                    .iter()
+                    .rev()
+                    .find_map(|member| member.branch.clone())
+            })
+            .flatten();
         let session = Session {
             machine: self.namespace.clone(),
             harness: owner.harness.clone(),
@@ -460,16 +474,8 @@ impl WarehouseAnalyticsInput {
             parent_session_uid: parent
                 .map(|id| session_uid(&self.namespace, &(owner.harness.clone(), id))),
             lane_root_uid: None,
-            repo: self.repo(
-                members
-                    .iter()
-                    .rev()
-                    .find_map(|member| member.cwd.as_deref()),
-            )?,
-            branch: members
-                .iter()
-                .rev()
-                .find_map(|member| member.branch.clone()),
+            repo,
+            branch,
             status: Status::Unknown,
             started_at: members.iter().filter_map(|member| member.start).min(),
             ended_at: None,
