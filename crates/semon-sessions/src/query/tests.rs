@@ -6076,14 +6076,17 @@ fn activity_step_transcript_anchor_reads_exact_record() {
 }
 
 #[test]
-fn activity_step_transcript_anchor_refuses_in_memory_fallback() {
+fn warehouse_transcript_anchor_rejects_a_stale_activity_generation() {
     let home = activity_fixture();
     let mut query = home.query();
     let activity = call(&mut query, "get_session_activity", json!({"id":"activity"}));
     let args = json!({"id":"activity", "step": {
-        "generation": activity["generation"], "ordinal": 0, "id": activity["items"][0]["id"]
+        "generation": "stale", "ordinal": 0, "id": activity["items"][0]["id"]
     }});
-    assert!(query.read_transcript(&args, NOW, None).is_err());
+    assert_eq!(
+        failure(&mut query, "read_transcript", args),
+        "stale_projection"
+    );
 }
 
 #[test]
@@ -6628,15 +6631,14 @@ fn activity_cold_direct_call_does_not_prepare_unrelated_sources() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(projections, 1);
+        assert_eq!(projections, 0, "native queries do not publish activity");
     }
 }
 
 #[test]
 fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
-    // A fresh activity process must read only the selected projection from a
-    // listing-created index. Unrelated native preparation exceeds the smaller
-    // control, even though the selected twelve-step session fits comfortably.
+    // A fresh activity process must derive only the selected session from a
+    // listing-created Index. The smaller control excludes workspace derivation.
     let home = Home::new("activity-batches");
     for n in 0..144 {
         let sid = format!("session-{n:03}");
@@ -6694,7 +6696,7 @@ fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(current, 1, "only the selected session may be published");
+        assert_eq!(current, 0, "native queries do not publish activity");
         let next = call(
             &mut Query::new(options),
             "get_session_activity",

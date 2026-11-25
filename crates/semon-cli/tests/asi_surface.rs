@@ -566,6 +566,10 @@ fn content(reply: &Value) -> (Value, bool) {
 fn cli_and_mcp_search_and_view_native_fixture_text() {
     let home = fixture::Fixture::new();
     home.write("configured-claude/projects/fixture/00000000-0000-4000-8000-000000000001.jsonl", b"{\"type\":\"user\",\"uuid\":\"prompt\",\"sessionId\":\"00000000-0000-4000-8000-000000000001\",\"timestamp\":\"2026-11-10T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"uniqueftsneedle\"}}\n");
+    home.write(
+        "configured-codex/sessions/2026/11/10/rollout-fixture.jsonl",
+        b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"body-search-codex\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"codexftsneedle\"}]}}\n",
+    );
     let output = home
         .command(env!("CARGO_BIN_EXE_semon"))
         .args(["analytics", "materialize", "--all", "--proc-root"])
@@ -619,11 +623,27 @@ fn cli_and_mcp_search_and_view_native_fixture_text() {
         "uniqueftsneedle"
     );
     assert!(headers.contains("Cache-Control: no-store"));
-    let mut server = Server::start(cache);
-    let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"uniqueftsneedle"}}}));
-    let (result, failed) = content(&reply);
-    assert!(!failed);
-    assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+    let mut server = Server::start(cache.clone());
+    for (id, harness, needle) in [
+        (1, "claude", "uniqueftsneedle"),
+        (2, "codex", "codexftsneedle"),
+    ] {
+        let output = cli(
+            &["query", "search", needle, "--harness", harness],
+            cache.clone(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(expected["hits"].as_array().unwrap().len(), 1, "{harness}");
+        let reply = server.request(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"search","arguments":{"query":needle,"harness":harness}}}));
+        let (result, failed) = content(&reply);
+        assert!(!failed, "{result}");
+        assert_eq!(result, expected, "{harness}");
+    }
 }
 
 fn context_fixture(

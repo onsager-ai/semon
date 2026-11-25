@@ -5,6 +5,7 @@
 //! source cohort, rules, and pricing admission is enforced.
 
 mod warehouse;
+pub(crate) use warehouse::admit_namespace;
 pub use warehouse::{WarehouseAnalyticsInput, admit_warehouse};
 
 use std::{collections::BTreeMap, path::Path};

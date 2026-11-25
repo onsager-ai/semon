@@ -33,16 +33,26 @@ pub fn admit_warehouse(options: &Options, cancelled: impl Fn() -> bool) -> io::R
         ..options.clone()
     };
     let namespace = Namespace::new("local").map_err(io::Error::other)?;
+    admit_namespace(&options, &namespace, None, |_, _| Ok(true), cancelled)
+}
+
+pub(crate) fn admit_namespace(
+    options: &Options,
+    namespace: &Namespace,
+    cutoff: Option<i64>,
+    include: impl Fn(&crate::Input, &std::path::Path) -> io::Result<bool>,
+    cancelled: impl Fn() -> bool,
+) -> io::Result<()> {
     let _facts_fence = options
         .facts
         .as_ref()
-        .map(|_| crate::source_change::SourceLock::acquire(&options, "facts", false))
+        .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
         .transpose()?;
     let machine = match &options.facts {
         Some(path) => MachineFacts::Recorded(Box::new(crate::facts::read_facts(path)?)),
         None => MachineFacts::Local,
     };
-    let mut cache = sqlite::open_index(&options, &namespace).map_err(io::Error::other)?;
+    let mut cache = sqlite::open_index(options, namespace).map_err(io::Error::other)?;
     let mut discovery = crate::inputs::Discovery::current_native();
     let projects = options.claude_home.join("projects");
     loop {
@@ -52,12 +62,21 @@ pub fn admit_warehouse(options: &Options, cancelled: impl Fn() -> bool) -> io::R
                 "Index admission cancelled",
             ));
         }
-        let page = discovery.next(&options, 64, 512)?;
+        let page = discovery.next(options, 64, 512)?;
         let mut seen = BTreeSet::new();
         for input in page.inputs {
-            let path = input.full_path(&options);
+            let path = input.full_path(options);
+            if cutoff.is_some_and(|cutoff| {
+                std::fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .is_some_and(|time| time.as_millis() < u128::try_from(cutoff).unwrap_or(0))
+            }) {
+                continue;
+            }
             if input.root == crate::InputRoot::Codex
-                && !machine.codex_rollout_is_current(&options, &path)
+                && !machine.codex_rollout_is_current(options, &path)
             {
                 continue;
             }
@@ -65,6 +84,9 @@ pub fn admit_warehouse(options: &Options, cancelled: impl Fn() -> bool) -> io::R
                 && path.parent().and_then(std::path::Path::parent) != Some(projects.as_path())
                 && !crate::native_sidecar::agent_path(&path)
             {
+                continue;
+            }
+            if !include(&input, &path)? {
                 continue;
             }
             match events::scan_file(&path, input.root.as_str(), &mut cache, &mut false) {
@@ -85,7 +107,7 @@ pub fn admit_warehouse(options: &Options, cancelled: impl Fn() -> bool) -> io::R
         }
         if options.facts.is_none() {
             cache.clear_chain_admissions(&seen);
-            cache.archive_consumed(&options, &seen);
+            cache.archive_consumed(options, &seen);
         }
         cache.release_published_indexes();
         if page.complete {

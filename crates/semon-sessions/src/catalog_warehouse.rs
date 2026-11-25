@@ -512,6 +512,8 @@ impl std::fmt::Display for ReadError {
     }
 }
 
+impl std::error::Error for ReadError {}
+
 fn index(error: impl std::fmt::Display) -> ReadError {
     ReadError::Index(error.to_string())
 }
@@ -1623,6 +1625,161 @@ pub(crate) fn after_list_snapshot(hook: impl FnOnce() + 'static) {
 #[cfg(test)]
 pub(crate) fn after_transcript_body(hook: impl FnOnce(usize) + 'static) {
     selected::AFTER_BODY.with(|slot| slot.replace(Some(Box::new(hook))));
+}
+
+/// Native query wire fields still use the shared session model. Select the
+/// model's inputs in the same warehouse snapshot as the Viewer's list.
+pub(crate) fn native_query(
+    options: &crate::Options,
+    namespace: &Namespace,
+    now: i64,
+    activity: Option<&str>,
+) -> std::io::Result<crate::model::QueryData> {
+    use crate::events::EventCache;
+    use crate::model::{catalog_source_in_window, scan_cutoff};
+
+    let cutoff = scan_cutoff(options, now);
+    let path = EventCache::path(&options.cache);
+    let mut prior_paths = BTreeSet::new();
+    if let Some(key) = activity
+        && path.try_exists()?
+    {
+        let source = Source::focused(namespace.clone(), &path, options, None)
+            .map_err(std::io::Error::other)?;
+        if let Ok(view) = selected::ReadView::open(&source) {
+            let tx = view.lock().map_err(std::io::Error::other)?;
+            if let Some((owner, _, _)) =
+                current_identity(&tx, &source, key, None).map_err(std::io::Error::other)?
+            {
+                let owners = encode(&[owner]).map_err(std::io::Error::other)?;
+                prior_paths.extend(
+                    selected_related_paths(&tx, &source, &owners, true)
+                        .map_err(std::io::Error::other)?,
+                );
+            }
+        }
+    }
+    crate::origin_projection::admit_namespace(
+        options,
+        namespace,
+        cutoff,
+        |input, path| {
+            let Some(key) = activity else { return Ok(true) };
+            if path.to_str().is_some_and(|path| prior_paths.contains(path)) {
+                return Ok(true);
+            }
+            let name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            let matches = |id: &str| {
+                key == id
+                    || key
+                        .trim_start_matches(':')
+                        .split_once(':')
+                        .is_some_and(|(harness, own)| harness == input.root.as_str() && own == id)
+            };
+            match input.root {
+                crate::InputRoot::Claude => Ok(matches(
+                    name.strip_prefix("agent-")
+                        .filter(|_| crate::native_sidecar::agent_path(path))
+                        .unwrap_or(name),
+                )),
+                crate::InputRoot::Codex => {
+                    let found = std::fs::metadata(path)
+                        .and_then(|stat| crate::codex_native_id_prefix(path, stat.len()));
+                    match found {
+                        Ok(found) => Ok(found.as_deref().is_some_and(matches)),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                        Err(error) => Err(error),
+                    }
+                }
+                crate::InputRoot::Copilot => Ok(false),
+            }
+        },
+        || crate::selected_read::check().is_err(),
+    )?;
+    let source =
+        Source::discover(namespace.clone(), &path, options).map_err(std::io::Error::other)?;
+    let view = selected::ReadView::open(&source).map_err(std::io::Error::other)?;
+    let db = view.lock().map_err(std::io::Error::other)?;
+    let snapshot = Snapshot::read(&db, &source).map_err(std::io::Error::other)?;
+    let selected_paths = if let Some(key) = activity {
+        let Some((owner, _, _)) = current_identity(&db, &source, key, Some(&snapshot.paths))
+            .map_err(std::io::Error::other)?
+        else {
+            return Ok(crate::model::QueryData::identity(options, now));
+        };
+        let owners = encode(&[owner]).map_err(std::io::Error::other)?;
+        Some(
+            encode(
+                &selected_related_paths(&db, &source, &owners, true)
+                    .map_err(std::io::Error::other)?,
+            )
+            .map_err(std::io::Error::other)?,
+        )
+    } else {
+        None
+    };
+    let mut records = db
+        .prepare(
+            "SELECT s.harness,c.path,s.ledger,d.native_id
+         FROM json_each(?1) admitted JOIN warehouse_current c ON c.path=admitted.value
+         JOIN warehouse_source s ON s.source=c.source AND s.carrier=c.path AND s.origin=?2
+         JOIN dim_session d ON d.source=c.source
+         WHERE (?3 IS NULL OR c.path IN (SELECT value FROM json_each(?3)))
+         ORDER BY s.harness,c.path",
+        )
+        .map_err(std::io::Error::other)?;
+    let mut rows = records
+        .query(params![snapshot.paths, namespace.binding(), selected_paths])
+        .map_err(std::io::Error::other)?;
+    let mut sources = Vec::new();
+    let mut ids = BTreeSet::new();
+    let mut usage = BTreeMap::new();
+    let mut skipped = BTreeSet::new();
+    for (path, availability) in &source.inventory {
+        if let (Some(cutoff), Availability::Expected(Some(stat))) = (cutoff, availability)
+            && stat.modified_ns / 1_000_000 < u128::try_from(cutoff).unwrap_or(0)
+            && let Some(relative) = selected::relative(options, "claude", path)
+            && relative.split('/').count() == 3
+            && let Some(id) = std::path::Path::new(relative)
+                .file_stem()
+                .and_then(|id| id.to_str())
+        {
+            skipped.insert(id.to_owned());
+        }
+    }
+    while let Some(row) = rows.next().map_err(std::io::Error::other)? {
+        let harness: String = row.get(0).map_err(std::io::Error::other)?;
+        let path: String = row.get(1).map_err(std::io::Error::other)?;
+        let ledger: Ledger =
+            serde_json::from_str(&row.get::<_, String>(2).map_err(std::io::Error::other)?)
+                .map_err(std::io::Error::other)?;
+        let native_id: String = row.get(3).map_err(std::io::Error::other)?;
+        let member = ledger.source(std::path::Path::new(&path), &native_id);
+        if !catalog_source_in_window(&member, cutoff) {
+            continue;
+        }
+        if harness == "codex"
+            && crate::events::store::warehouse_has_codex_usage(&db, &path, &ledger)
+                .map_err(std::io::Error::other)?
+        {
+            let steps = crate::events::store::warehouse_codex_activity(&db, &path, &ledger)
+                .map_err(std::io::Error::other)?;
+            usage.insert(member.path.clone(), steps);
+        }
+        ids.insert(native_id);
+        sources.push((harness, member));
+    }
+    let members: Vec<_> = sources.iter().map(|(_, member)| member.clone()).collect();
+    let mut cache =
+        EventCache::from_selected(&db, &members, &ids).map_err(std::io::Error::other)?;
+    let data = crate::model::query_warehouse(
+        options, &mut cache, sources, skipped, &usage, now, activity,
+    )?;
+    source.validate_authority().map_err(std::io::Error::other)?;
+    Ok(data)
 }
 
 pub(super) fn read_list(

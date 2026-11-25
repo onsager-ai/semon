@@ -6244,6 +6244,14 @@ fn read_message_usage(
     Ok(usage_by_id)
 }
 
+pub(crate) fn warehouse_codex_activity(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Vec<super::session_activity::UsageStep>> {
+    session_activity::accepted_codex(connection, path, ledger)
+}
+
 /// Native Codex can have a qualified usage cohort with zero accepted steps.
 pub(crate) fn warehouse_has_codex_usage(
     connection: &Connection,

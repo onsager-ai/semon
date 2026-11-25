@@ -352,6 +352,17 @@ fn expected(model: &Value) -> Vec<(&'static str, Value, Vec<&'static str>, Value
     );
     let mut stalled = summary["asker"].clone();
     stalled["stall_reason"] = json!("waiting-question");
+    let mut codex_session = summary["cx"].clone();
+    codex_session["busy"] = json!([]);
+    codex_session["turns"] = json!(
+        model["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|turn| turn["sid"] == "cx")
+            .collect::<Vec<_>>()
+    );
+    codex_session["handoffs"] = json!([]);
     vec![
         (
             "list_sessions",
@@ -370,6 +381,18 @@ fn expected(model: &Value) -> Vec<(&'static str, Value, Vec<&'static str>, Value
             json!({"id": "done"}),
             vec!["done"],
             json!({"session": session}),
+        ),
+        (
+            "list_sessions",
+            json!({"harness": "codex"}),
+            vec!["--harness", "codex"],
+            json!({"total": 1, "truncated": false, "sessions": [summary["cx"]]}),
+        ),
+        (
+            "get_session",
+            json!({"id": "cx"}),
+            vec!["cx"],
+            json!({"session": codex_session}),
         ),
         (
             "read_transcript",

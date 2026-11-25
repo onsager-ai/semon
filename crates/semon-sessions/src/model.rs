@@ -355,6 +355,16 @@ pub(crate) struct QueryData {
     pub(crate) pids: Vec<u32>,
     pub(crate) window_start: Option<i64>,
     pub(crate) sources: crate::query_source::Sources,
+    pub(crate) warehouse_activity: Option<WarehouseActivity>,
+}
+
+type NativeQueryUsage = BTreeMap<PathBuf, Vec<events::session_activity::UsageStep>>;
+
+pub(crate) struct WarehouseActivity {
+    pub(crate) key: String,
+    pub(crate) generation: String,
+    pub(crate) native_ids: Vec<String>,
+    pub(crate) projection: events::session_activity::SessionActivity,
 }
 
 impl QueryData {
@@ -376,6 +386,7 @@ impl QueryData {
                 now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
             }),
             sources: crate::query_source::Sources::new(options),
+            warehouse_activity: None,
         }
     }
 }
@@ -2616,6 +2627,7 @@ impl<'a> Builder<'a> {
     fn session_activity(
         &self,
         session: &Sess,
+        codex_usage: Option<&NativeQueryUsage>,
     ) -> io::Result<Option<events::store::session_activity::Projection>> {
         if !matches!(
             session.kind,
@@ -2642,9 +2654,19 @@ impl<'a> Builder<'a> {
                 self.copied.contains(&(*position, at))
             });
             if file.summary.has_native_usage() {
-                inputs
-                    .usage
-                    .extend(self.cache.activity_codex_steps(&summary::source(file))?);
+                if let Some(committed) = codex_usage {
+                    inputs.usage.extend(
+                        committed
+                            .get(&file.path)
+                            .ok_or_else(|| io::Error::other("Missing committed Codex usage"))?
+                            .iter()
+                            .cloned(),
+                    );
+                } else {
+                    inputs
+                        .usage
+                        .extend(self.cache.activity_codex_steps(&summary::source(file))?);
+                }
             }
         }
         let shared = self
@@ -6973,6 +6995,109 @@ pub(crate) fn build_query(
     }
 }
 
+/// Render the native Query contract from a warehouse-qualified read snapshot.
+/// The evidence cache is request-local. It has no Catalog publisher or writer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn query_warehouse(
+    options: &Options,
+    cache: &mut EventCache,
+    sources: Vec<(String, summary::CatalogSource)>,
+    skipped: BTreeSet<String>,
+    codex_usage: &NativeQueryUsage,
+    now: i64,
+    activity: Option<&str>,
+) -> io::Result<QueryData> {
+    let mut files = Vec::with_capacity(sources.len());
+    for (harness, source) in sources {
+        let index = cache
+            .selected_index(&source.path)
+            .ok_or_else(|| io::Error::other("Missing committed native source"))?;
+        let parent = source.path.parent();
+        let role = match harness.as_str() {
+            "claude" if crate::native_sidecar::agent_path(&source.path) => {
+                let metadata = index
+                    .claude_sidecar
+                    .as_ref()
+                    .map(|sidecar| sidecar.metadata.clone())
+                    .unwrap_or_default();
+                Role::Agent(AgentMeta {
+                    parent: parent
+                        .and_then(Path::parent)
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    tool_use_id: metadata.tool_use_id,
+                    label: metadata.label,
+                    model: metadata.model,
+                    cwd: metadata.cwd,
+                    branch: metadata.branch,
+                })
+            }
+            "claude" => Role::Top {
+                slug: parent
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+            },
+            "codex" => {
+                let header = index
+                    .codex_header
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("Missing committed Codex header"))?;
+                Role::Codex(header.metadata.clone())
+            }
+            "copilot" => Role::Copilot,
+            _ => return Err(io::Error::other("Invalid warehouse native source")),
+        };
+        files.push(SourceFile {
+            archived: false,
+            revision: (
+                source.dev,
+                source.ino,
+                source.offset,
+                source.prefix_sha256,
+                source.tail_sha256,
+                source.changed_ns,
+            ),
+            stamp: Stamp {
+                dev: source.dev,
+                ino: source.ino,
+                size: source.size,
+                modified_ns: source.modified_ns,
+                changed_ns: source.changed_ns,
+            },
+            first: index.first,
+            last: index.last,
+            marker: None,
+            path: source.path,
+            id: source.native_id,
+            role,
+            summary: index,
+        });
+    }
+    match build_sources_inner(
+        options,
+        cache,
+        &mut false,
+        &mut Texts::default(),
+        now,
+        BuildSelection::Warehouse {
+            files,
+            skipped,
+            codex_usage,
+            activity,
+        },
+        BuildTarget::Query,
+    )? {
+        BuildOutput::Query(data) => Ok(*data),
+        _ => Err(io::Error::other(
+            "Warehouse reader did not build native query evidence",
+        )),
+    }
+}
+
 /// Reconcile native metadata and transcript slots. Complete observation still
 /// discovers all sources.
 #[cfg(test)]
@@ -7344,6 +7469,12 @@ fn prepare_sources_selected(
 }
 
 enum BuildSelection<'a> {
+    Warehouse {
+        files: Vec<SourceFile>,
+        skipped: BTreeSet<String>,
+        codex_usage: &'a NativeQueryUsage,
+        activity: Option<&'a str>,
+    },
     Identity {
         inputs: &'a [crate::inputs::Input],
         relationships: &'a relation_stage::Context,
@@ -7656,43 +7787,72 @@ fn build_sources_inner(
         _ => Vec::new(),
     };
     measurements.record("source_locks", started, _source_locks.len());
+    let warehouse = match &selection {
+        BuildSelection::Warehouse {
+            codex_usage,
+            activity,
+            ..
+        } => Some((*codex_usage, *activity)),
+        _ => None,
+    };
     let local_runtime = cache.local_refresh_runtime.clone();
     let query_runtime = measured!(
         "runtime_fingerprint",
         1,
         match &local_runtime {
             Some(runtime) => runtime.generation.clone(),
+            None if warehouse.is_some() => String::new(),
             None => crate::native_evidence::query_runtime_generation(options)?,
         }
     );
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if let Some(runtime) = &local_runtime {
-            crate::native_evidence::RuntimeObservations::from_local_capture(
-                options,
-                runtime,
-                &mut measurements,
+        if warehouse.is_some() {
+            None
+        } else if let Some(runtime) = &local_runtime {
+            Some(
+                crate::native_evidence::RuntimeObservations::from_local_capture(
+                    options,
+                    runtime,
+                    &mut measurements,
+                )
+                .into_scoped(),
             )
-            .into_scoped()
         } else if cache.projection_only() {
-            crate::native_evidence::RuntimeObservations::projection_publication_measured(
-                options,
-                &query_runtime,
-                &mut measurements,
+            Some(
+                crate::native_evidence::RuntimeObservations::projection_publication_measured(
+                    options,
+                    &query_runtime,
+                    &mut measurements,
+                ),
             )
         } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
-            crate::native_evidence::RuntimeObservations::for_publication_measured(
-                options,
-                &query_runtime,
-                &mut measurements,
+            Some(
+                crate::native_evidence::RuntimeObservations::for_publication_measured(
+                    options,
+                    &query_runtime,
+                    &mut measurements,
+                ),
             )
         } else {
-            crate::native_evidence::RuntimeObservations::new_measured(options, &mut measurements)
-                .into_scoped()
+            Some(
+                crate::native_evidence::RuntimeObservations::new_measured(
+                    options,
+                    &mut measurements,
+                )
+                .into_scoped(),
+            )
         }
     );
-    let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
+    let catalog_base = measured!(
+        "catalog_base",
+        1,
+        warehouse
+            .is_none()
+            .then(|| cache.session_catalog_generation())
+            .flatten()
+    );
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "runtime_captured");
     let mut timings = Vec::with_capacity(18);
@@ -7733,6 +7893,13 @@ fn build_sources_inner(
         _ => None,
     };
     let (selected, history_records, mut files, skipped, index_clone) = match selection {
+        BuildSelection::Warehouse { files, skipped, .. } => (
+            Some([].as_slice()),
+            None,
+            files,
+            skipped,
+            std::time::Duration::ZERO,
+        ),
         BuildSelection::Current(selected) => {
             let (files, skipped, duration) = timed!(
                 "scan",
@@ -7986,9 +8153,10 @@ fn build_sources_inner(
             // Claude usage is part of the qualified FileIndex even in a
             // request-owned history read. Codex needs its accepted store facts.
             let projection = if session.kind != SessKind::Codex
+                || warehouse.is_some()
                 || (history_records.is_none() && builder.cache.has_activity_store())
             {
-                builder.session_activity(session)?
+                builder.session_activity(session, warehouse.map(|(usage, _)| usage))?
             } else {
                 None
             };
@@ -8018,6 +8186,47 @@ fn build_sources_inner(
     for session in &mut builder.sessions {
         session.out.activity_analytics = summaries.get(&session.key).cloned();
     }
+    let warehouse_activity = warehouse
+        .and_then(|(_, requested)| requested)
+        .and_then(|requested| {
+            builder.sessions.iter().find(|session| {
+                session.key == requested
+                    || session
+                        .files
+                        .iter()
+                        .any(|&file| files[file].id == requested)
+            })
+        })
+        .and_then(|session| Some((session, activity_projections.get(&session.key)?.as_ref()?)))
+        .map(|(session, projection)| {
+            use sha2::{Digest, Sha256};
+            let members: Vec<_> = session
+                .files
+                .iter()
+                .map(|&file| summary::source(&files[file]))
+                .collect();
+            let source_generation = crate::retention::source_generation(&members)?;
+            let generation = format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&(&source_generation, &projection.activity))
+                        .map_err(io::Error::other)?
+                )
+            );
+            let native_ids = members
+                .into_iter()
+                .map(|source| source.native_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Ok::<_, io::Error>(WarehouseActivity {
+                key: session.key.clone(),
+                generation,
+                native_ids,
+                projection: projection.activity.clone(),
+            })
+        })
+        .transpose()?;
     let post_started = std::time::Instant::now();
     let started = measurements.start();
     let mut handoffs: Vec<Handoff> = builder
@@ -8240,7 +8449,10 @@ fn build_sources_inner(
                 let runtime = measured!(
                     "projection_runtime_scope",
                     1,
-                    runtime_observations.scope(row)?
+                    runtime_observations
+                        .as_ref()
+                        .expect("Catalog runtime sampled")
+                        .scope(row)?
                 );
                 row.query.as_mut().expect("query captured")["runtime"] =
                     serde_json::Value::String(runtime);
@@ -8588,6 +8800,7 @@ fn build_sources_inner(
     cache.publish_session_descriptions();
     Ok(BuildOutput::Query(Box::new(QueryData {
         sources: source_proofs,
+        warehouse_activity,
         sessions,
         handoffs,
         ask_briefs,
