@@ -156,8 +156,9 @@ impl Home {
         let output = self.semon(&all);
         assert!(
             output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "{args:?}: {}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
         );
         let text = String::from_utf8(output.stdout).unwrap();
         assert_eq!(text.lines().count(), 1, "--json is one line: {text}");
@@ -764,6 +765,7 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "stalls",
         "sql",
         "context_growth",
+        "lane_health",
         "search",
         "view",
         "schema",
@@ -922,5 +924,231 @@ fn the_window_is_30_days_unless_widened_and_since_stays_inside_it() {
         content(&server.call(3, "stalls", json!({"idle_minutes": 5, "since": "31d"})));
     assert!(failed);
     assert_eq!(error["error"]["code"], "outside_window");
+    server.finish();
+}
+
+#[cfg(feature = "asi-query")]
+#[test]
+fn lane_health_reports_published_agent_lineage_in_cli_and_mcp() {
+    let home = Home::new();
+    let private = "PRIVATE-LANE-FIXTURE-BODY";
+    let reply = |id, minute, content| {
+        let mut row = assistant(id, ts(6, minute), content);
+        row["message"]["model"] = json!("claude-sonnet-4-5");
+        row["uuid"] = json!(format!("{id}-reply-{minute}"));
+        row
+    };
+    let spawn = |id| json!([{"type":"tool_use","id":id,"name":"Agent","input":{"prompt":private}}]);
+    let text = || json!([{"type":"text","text":private}]);
+    let compact = |minute, trigger, pre_tokens| {
+        json!({
+            "type":"system", "subtype":"compact_boundary", "uuid":format!("compact-{minute}"),
+            "sessionId":"manager", "timestamp":ts(6, minute), "compactMetadata":{"trigger":trigger,"preTokens":pre_tokens}
+        })
+    };
+    let copied = reply("manager", 1, text());
+    home.lines(
+        "claude/projects/-work-proj/manager.jsonl",
+        &[
+            human("manager", ts(6, 0), private),
+            reply("manager", 0, spawn("child-call")),
+            copied.clone(),
+            // A native prompt separates independent compactions. Consecutive
+            // boundaries at one event position normalize to a single signal.
+            compact(2, "auto", 1000),
+            human("manager", ts(6, 2), private),
+            compact(3, "manual", 1000),
+            human("manager", ts(6, 3), private),
+            compact(4, "auto", 2000),
+            reply("manager", 5, text()),
+        ],
+    );
+    let mut child_copy = copied;
+    child_copy["sessionId"] = json!("lane-child");
+    let mut child_reply = reply("lane-child", 4, spawn("grandchild-call"));
+    child_reply["message"]["usage"]["input_tokens"] = json!(20000);
+    child_reply["message"]["model"] = json!("unknown-fixture-model");
+    let agents = "claude/projects/-work-proj/manager/subagents";
+    home.lines(
+        &format!("{agents}/agent-lane-child.jsonl"),
+        &[
+            human("lane-child", ts(6, 1), private),
+            child_copy,
+            child_reply,
+        ],
+    );
+    home.write(
+        &format!("{agents}/agent-lane-child.meta.json"),
+        r#"{"toolUseId":"child-call"}"#,
+    );
+    home.lines(
+        &format!("{agents}/agent-lane-grandchild.jsonl"),
+        &[
+            human("lane-grandchild", ts(6, 5), private),
+            reply("lane-grandchild", 6, text()),
+        ],
+    );
+    home.write(
+        &format!("{agents}/agent-lane-grandchild.meta.json"),
+        r#"{"toolUseId":"grandchild-call"}"#,
+    );
+
+    let published = home.semon(&["analytics", "materialize"]);
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let namespace = semon_sessions::read_analytics_namespace(&home.root.join("state"))
+        .unwrap()
+        .unwrap();
+    let uid = |id| format!("{namespace}/claude/{id}");
+    let root = uid("manager");
+    let child = uid("lane-child");
+    let grandchild = uid("lane-grandchild");
+    let mut report = home.query(&["query", "lane_health", &root]);
+    assert!(!report.to_string().contains(private));
+    assert_eq!(report["asi_schema_version"], 5);
+    let manifest = semon_asi::read_manifest(&home.root.join("state/analytics-store"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(report["snapshot"], manifest.generation.to_string());
+    assert_eq!(report["root_session_uid"], root);
+    assert_eq!(report["observed_children"], json!([child]));
+    let members = report["members"].as_array().unwrap();
+    assert_eq!(members.len(), 3);
+    let member = |uid: &str| {
+        members
+            .iter()
+            .find(|member| member["session_uid"] == uid)
+            .unwrap()
+    };
+    assert_eq!(member(&grandchild)["parent_session_uid"], child);
+    assert_eq!(member(&child)["parent_session_uid"], root);
+    assert_eq!(member(&child)["compactions"], json!([]));
+    assert_eq!(member(&root)["compaction_count"], 3);
+    let compactions = member(&root)["compactions"].as_array().unwrap();
+    assert_eq!(compactions[0]["trigger"], "auto");
+    assert_eq!(compactions[0]["pre_tokens"], 1000);
+    assert_eq!(compactions[0]["post_refill_tokens"], 3000);
+    assert_eq!(compactions[0]["early"], true);
+    assert_eq!(compactions[1]["early"], false);
+    assert_eq!(compactions[2]["early"], false);
+    assert!(
+        compactions
+            .iter()
+            .all(|compaction| compaction["storm"] == true)
+    );
+    let tools = report["manager_tool_mix"].as_array().unwrap();
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["calls"], 1);
+    let usage = report["usage"].as_array().unwrap();
+    let bucket = |owner: &str| {
+        usage
+            .iter()
+            .find(|row| row["usage_owner"] == owner)
+            .unwrap()
+    };
+    assert_eq!(bucket("exclusive")["steps"], 4);
+    assert_eq!(bucket("exclusive")["priced_steps"], 3);
+    assert_eq!(bucket("exclusive")["unpriced_steps"], 1);
+    assert_eq!(bucket("copied")["steps"], 2);
+    assert!(report["runtime"]["observed_at"].is_number(), "{report}");
+    assert!(
+        members
+            .iter()
+            .all(|member| member["live"]["last_activity"].is_number()),
+        "{report}"
+    );
+    assert!(member(&child)["live"]["alive"].is_null());
+
+    let mut server = Server::start(&home);
+    let response = server.call(1, "lane_health", json!({"root_session_uid": root}));
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let mut mcp: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    for key in ["now", "observed_at"] {
+        report["runtime"][key] = Value::Null;
+        mcp["runtime"][key] = Value::Null;
+    }
+    assert_eq!(mcp, report);
+    server.finish();
+}
+
+#[cfg(feature = "asi-query")]
+#[test]
+fn lane_health_matches_active_continuation_and_discovers_first_publication() {
+    let mut home = Home::new();
+    let original = "claude/projects/-work-proj/resume-root.jsonl";
+    home.lines(
+        original,
+        &[
+            human("resume-root", ts(7, 0), "Original prompt"),
+            assistant("resume-root", ts(7, 1), json!([{"type":"text","text":"Original reply"}])),
+            json!({"type":"continued-in", "sessionId":"resume-root", "continuedInSessionId":"resume-active"}),
+        ],
+    );
+    fs::File::options()
+        .write(true)
+        .open(home.root.join(original))
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1)),
+        )
+        .unwrap();
+    home.lines(
+        "claude/projects/-work-proj/resume-active.jsonl",
+        &[human("resume-active", ts(8, 0), "Resumed prompt")],
+    );
+    home.write(
+        "claude/sessions/31.json",
+        &json!({"pid":31, "sessionId":"resume-active", "procStart":777, "status":"busy", "updatedAt":at(8, 0)}).to_string(),
+    );
+
+    home.window = vec!["--since", "1d"];
+    let mut server = Server::start(&home);
+    let (error, failed) = content(&server.call(
+        1,
+        "lane_health",
+        json!({"root_session_uid":"origin/claude/resume-root"}),
+    ));
+    assert!(failed);
+    assert_eq!(error["error"]["code"], "store_unavailable");
+
+    home.window = vec!["--all"];
+    let published = home.semon(&["analytics", "materialize"]);
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    home.window = vec!["--since", "1d"];
+    let namespace = semon_sessions::read_analytics_namespace(&home.root.join("state"))
+        .unwrap()
+        .unwrap();
+    let uid = format!("{namespace}/claude/resume-root");
+    let native = home.query(&["query", "list_sessions"]);
+    let sessions = native["sessions"].as_array().unwrap();
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session["id"] == "resume-root")
+    );
+    let active = sessions
+        .iter()
+        .find(|session| session["id"] == "resume-active")
+        .unwrap();
+    assert_eq!(active["alive"], true);
+    assert_eq!(active["state"], "working");
+    let expected =
+        json!({"state":active["state"],"alive":true,"last_activity":active["last_activity"]});
+    let (mcp, failed) = content(&server.call(2, "lane_health", json!({"root_session_uid":uid})));
+    assert!(!failed, "{mcp}");
+    let cli = home.query(&["query", "lane_health", &uid]);
+    for report in [&cli, &mcp] {
+        assert_eq!(report["members"].as_array().unwrap().len(), 1);
+        assert_eq!(report["members"][0]["session_uid"], uid);
+        assert_eq!(report["members"][0]["live"], expected);
+    }
     server.finish();
 }

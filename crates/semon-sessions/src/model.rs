@@ -342,6 +342,9 @@ pub(crate) struct SessionFacts {
 /// Native Query evidence and source offsets. Catalog and selected producers
 /// share these relationships and window rules; bodies remain source-backed.
 pub(crate) struct QueryData {
+    pub(crate) observed_at: i64,
+    /// Exact harness/native ID to presentation key, including continuation aliases.
+    pub(crate) native_keys: HashMap<(&'static str, String), String>,
     pub(crate) sessions: BTreeMap<String, Session>,
     pub(crate) handoffs: Vec<Handoff>,
     /// Human prompt bodies are read only by the requesting session/search.
@@ -373,6 +376,8 @@ impl QueryData {
     pub(crate) fn identity(options: &Options, now: i64) -> Self {
         let facts = MachineFacts::of(options);
         Self {
+            observed_at: now,
+            native_keys: HashMap::new(),
             sessions: BTreeMap::new(),
             handoffs: Vec::new(),
             ask_briefs: BTreeMap::new(),
@@ -8811,6 +8816,12 @@ fn build_sources_inner(
         verify_sidecars(&files, options)?;
         source_records.finish()?;
     }
+    let native_keys = builder
+        .by_native
+        .iter()
+        .filter(|&(_, &index)| sessions.contains_key(&builder.sessions[index].key))
+        .map(|(id, &index)| (id.clone(), builder.sessions[index].key.clone()))
+        .collect();
     drop(source_records);
     if let Some(catalog) = catalog {
         cache.publish_session_projection(
@@ -8823,6 +8834,8 @@ fn build_sources_inner(
     }
     cache.publish_session_descriptions();
     Ok(BuildOutput::Query(Box::new(QueryData {
+        observed_at: now,
+        native_keys,
         sources: source_proofs,
         warehouse_activity,
         sessions,

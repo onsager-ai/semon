@@ -28,7 +28,12 @@ pub trait McpExtension {
 
     /// Handles an additional tool, returning `None` when it does not own `name`.
     /// Errors are already public error envelopes.
-    fn call(&mut self, name: &str, arguments: &Value) -> Option<Result<Value, Value>>;
+    fn call(
+        &mut self,
+        query: &Query,
+        name: &str,
+        arguments: &Value,
+    ) -> Option<Result<Value, Value>>;
 
     /// Additional MCP resources.
     fn resources(&self) -> Vec<Value> {
@@ -46,7 +51,7 @@ impl McpExtension for NoExtension {
         Vec::new()
     }
 
-    fn call(&mut self, _: &str, _: &Value) -> Option<Result<Value, Value>> {
+    fn call(&mut self, _: &Query, _: &str, _: &Value) -> Option<Result<Value, Value>> {
         None
     }
 
@@ -215,7 +220,7 @@ fn call_with_extension(
             Ok(value) => (value, false),
             Err(error) => (error.to_json(), true),
         }
-    } else if let Some(result) = extension.call(name, &arguments) {
+    } else if let Some(result) = extension.call(query, name, &arguments) {
         match result {
             Ok(value) => (value, false),
             Err(error) => (error, true),

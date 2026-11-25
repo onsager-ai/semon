@@ -10,8 +10,8 @@ Agent Workbench.
 
 Use a `semon` binary with `asi-query`. Linux release binaries have included it
 since [#733](https://github.com/onsager-ai/semon/pull/733). Check the installed
-binary with `semon query --help` and look for `sql`, `schema`, and
-`context_growth` in the usage output. The shell examples use `jq` to build
+binary with `semon query --help` and look for `sql`, `schema`,
+`context_growth`, and `lane_health` in the usage output. The shell examples use `jq` to build
 JSON parameters and select fields from responses.
 
 On `hp-code-2`, every materialization must run under a systemd `CPUQuota` of
@@ -36,6 +36,47 @@ materialization time tells you when the last drain finished, even if there was
 nothing new to publish. New native activity may arrive after the drained
 endpoint. Coverage reports published cohorts and source-missing UIDs. Check it
 for gaps and use the native read below for current activity.
+
+## Run the root-scoped report
+
+After materialization, pass the Manager's full, machine-qualified ASI UID.
+Use step 2 below to find it from a native session ID. The report walks the
+published family and reads its analytics from one snapshot generation.
+
+```sh
+manager_uid='REPLACE_WITH_FULL_MANAGER_UID'
+semon query lane_health "$manager_uid"
+```
+
+For MCP over local stdio, call `lane_health` with
+`{"root_session_uid":"FULL_MANAGER_UID"}`. Configure the same native homes
+and cache for CLI and MCP. Native `--since` and `--all` options affect the live
+read window. Compare `snapshot` with the generation from `analytics coverage`.
+
+- `members` lists the root and its published descendants with parent UIDs,
+  compaction counts and events. Each event carries the trigger, pre-tokens,
+  first measured refill, and the same `early` and `storm` flags as context growth.
+- `manager_tool_mix` counts the root's tools and command tags.
+  `observed_children` lists the root's direct published children. A recorded
+  call alone cannot establish that a Worker launched.
+- `usage` reports exclusive and copied observations in separate buckets with
+  token counters, priced USD estimates and priced/unpriced step coverage. Use
+  exclusive usage for spend. Copied observations can repeat and must stay
+  separate from spend totals. Deduplicated shared usage remains a follow-up.
+- `runtime` gives the answer time, native observation time and native window
+  start in UTC milliseconds. Each member's `live` object carries state,
+  liveness and last activity. A current continuation can supply live state for
+  the published root even when the root log falls outside the native window.
+  A null `live` means the native read found no
+  matching observation in its window or was unavailable. Check
+  `runtime.error_code` for a native read failure. A quiet or missing row leaves
+  Worker disposition unknown.
+
+Descendants linked only by marker or process evidence appear once ASI
+publishes those edges. Review `analytics coverage` for gaps and use the native
+reads below to investigate other observed sessions. Per-task attribution and
+Worker dispositions remain follow-up work. Use Agent Workbench for PR, head
+and check status.
 
 ## Find the Manager and Worker UIDs
 
@@ -125,16 +166,11 @@ ORDER BY s.session_uid, ts_ms NULLS LAST, c.compaction_uid
 
 ### Context growth and compaction flags
 
-Run the shipped [context growth SQL](../../crates/semon-cli/src/context_growth.sql)
-from a Semon checkout matching the installed binary. Pass the same full UID twice
-and `null` for each unbounded time limit. Repeat for the Manager or other Worker
-UIDs. Without the checkout, use the same query through
-`semon query context_growth "$worker_uid"`. That command also accepts
-`--since` and `--until` as inclusive UTC milliseconds.
+Run the per-session command for a closer look at the Manager or a Worker.
+It also accepts `--since` and `--until` as inclusive UTC milliseconds.
 
 ```sh
-semon query sql "$(cat crates/semon-cli/src/context_growth.sql)" \
-  --params "$(jq -cn --arg uid "$worker_uid" '[$uid, $uid, null, null]')"
+semon query context_growth "$worker_uid"
 ```
 
 Step points show `context_tokens`, which includes uncached input, cache reads,
