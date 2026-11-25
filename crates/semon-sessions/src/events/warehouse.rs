@@ -155,6 +155,7 @@ pub(crate) enum Fact {
         turn_id: String,
         phase: crate::codex_lifecycle::TurnPhase,
     },
+    WorkerOutcome(super::worker_outcome::Outcome),
     Compact {
         time: Option<i64>,
         trigger: Option<String>,

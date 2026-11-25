@@ -222,6 +222,15 @@ CREATE TABLE fact_codex_turn (
   thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, phase TEXT NOT NULL,
   PRIMARY KEY(source,pos,block,occurrence)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_worker_outcome (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  disposition TEXT NOT NULL CHECK(disposition IN ('completed','blocked','cancelled')),
+  pr_url TEXT, head_sha TEXT,
+  checks_state TEXT CHECK(checks_state IN ('none','red','running','green')),
+  CHECK ((pr_url IS NULL AND head_sha IS NULL AND checks_state IS NULL) OR
+         (pr_url IS NOT NULL AND head_sha IS NOT NULL AND checks_state IS NOT NULL)),
+  PRIMARY KEY(source,pos,block)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE maintenance_cursor (
   source INTEGER PRIMARY KEY, pos INTEGER NOT NULL, sidecar_revision INTEGER NOT NULL, eof_witness TEXT
 ) STRICT;

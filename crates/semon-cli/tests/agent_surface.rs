@@ -1152,3 +1152,215 @@ fn lane_health_matches_active_continuation_and_discovers_first_publication() {
     }
     server.finish();
 }
+
+#[cfg(feature = "asi-query")]
+#[test]
+fn lane_health_reports_worker_dispositions_and_keeps_guardian_in_family() {
+    let home = Home::new();
+    let private = "PRIVATE-WORKER-OUTCOME-FIXTURE";
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let pr = "https://github.com/example/repo/pull/1";
+    let blocked = format!("Outcome: blocked · PR {pr} · head {sha} · checks red");
+    let cases = [
+        ("completed", "Outcome: completed", "completed", false),
+        ("blocked", blocked.as_str(), "blocked", false),
+        ("cancelled", "Outcome: cancelled", "cancelled", false),
+        (
+            "malformed",
+            "Outcome: blocked · PR https://github.com/example/repo/pull/1",
+            "unknown",
+            false,
+        ),
+        ("missing", "", "unknown", false),
+        ("failed", "", "unknown", true),
+        ("unlinked", "Outcome: completed", "unknown", false),
+        ("reused", "Outcome: completed", "unknown", false),
+    ];
+    let project = "claude/projects/-work-proj";
+    let mut claude_parent = vec![human("lane-manager", ts(6, 0), private)];
+    let mut codex_parent = Vec::new();
+    let codex = |kind, payload| json!({"type":kind,"timestamp":ts(6, 1),"payload":payload});
+    let codex_prefix = |id: &str, header| {
+        vec![
+            codex("session_meta", header),
+            codex("turn_context", json!({"model":"gpt-6-sol"})),
+            codex(
+                "token_usage_record",
+                json!({"thread_id":id,"session_id":"session","turn_id":"turn","response_id":"response", "usage":{
+                    "input_tokens":7,"output_tokens":0,"total_tokens":7,"cached_input_tokens":0,
+                    "cache_write_input_tokens":0,"reasoning_output_tokens":0
+                }}),
+            ),
+        ]
+    };
+    codex_parent.extend(codex_prefix(
+        "lane-manager",
+        json!({"id":"lane-manager","thread_source":"user"}),
+    ));
+    for (i, (worker, line, _, failed)) in cases.iter().enumerate() {
+        let call = format!("spawn-{worker}");
+        let text = format!("{private}\n{line}");
+        if *worker != "unlinked" {
+            claude_parent.push(assistant(
+                "lane-manager",
+                ts(6, i as i64 + 1),
+                json!([
+                    {"type":"tool_use","id":call,"name":"Agent","input":{"prompt":private}}
+                ]),
+            ));
+            home.write(
+                &format!("{project}/lane-manager/subagents/agent-{worker}.meta.json"),
+                &json!({"toolUseId":call}).to_string(),
+            );
+            codex_parent.push(codex("response_item", json!({"type":"function_call","name":"spawn_agent",
+                "call_id":call, "arguments":json!({"task_name":worker,"prompt":private}).to_string()})));
+        }
+        let mut final_reply = assistant(
+            worker,
+            ts(6, 15),
+            json!([
+                {"type":"text","text":"Earlier block ends with a decoy\nOutcome: completed"},
+                {"type":"text","text":text}
+            ]),
+        );
+        final_reply["message"]["stop_reason"] = json!("end_turn");
+        let mut claude_child = vec![human(worker, ts(6, 10), "Outcome: completed"), final_reply];
+        if *worker == "reused" {
+            claude_child.push(human(worker, ts(6, 16), private));
+        }
+        home.lines(
+            &format!("{project}/lane-manager/subagents/agent-{worker}.jsonl"),
+            &claude_child,
+        );
+        if *failed {
+            claude_parent.push(json!({"type":"user","timestamp":ts(6, 16),"sessionId":"lane-manager",
+                "origin":{"kind":"task-notification"},"message":{"role":"user","content":format!(
+                    "<task-notification><tool-use-id>{call}</tool-use-id><status>failed</status><result>{private}</result></task-notification>"
+                )}}));
+        }
+        let mut records = codex_prefix(
+            worker,
+            json!({"id":worker,"thread_source":"subagent",
+            "parent_thread_id":"lane-manager","agent_nickname":worker}),
+        );
+        records.push(codex(
+            "event_msg",
+            json!({"type":"task_started","turn_id":"turn"}),
+        ));
+        records.push(codex("event_msg", json!({"type":"task_complete","turn_id":"unowned","last_agent_message":"Outcome: completed"})));
+        let terminal = if *worker == "cancelled" {
+            "turn_complete"
+        } else {
+            "task_complete"
+        };
+        let mut completion = json!({"type":terminal,"turn_id":"turn","last_agent_message":text});
+        if *failed {
+            completion["error"] = json!({"message":private});
+            completion["last_agent_message"] = json!("Outcome: completed");
+        }
+        records.push(codex("event_msg", completion));
+        if *worker == "reused" {
+            records.push(codex(
+                "event_msg",
+                json!({"type":"turn_started","turn_id":"second"}),
+            ));
+        }
+        home.lines(
+            &format!("codex/sessions/2026/09/24/rollout-{worker}.jsonl"),
+            &records,
+        );
+    }
+    home.lines(&format!("{project}/lane-manager.jsonl"), &claude_parent);
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-lane-manager.jsonl",
+        &codex_parent,
+    );
+    home.lines("codex/sessions/2026/09/24/rollout-guardian.jsonl", &codex_prefix("guardian", json!({
+        "id":"guardian", "thread_source":"guardian_review", "parent_thread_id":"lane-manager",
+        // A matching name would otherwise compete for the Worker's dispatch.
+        "agent_nickname":"completed"
+    })));
+
+    let published = home.semon(&["analytics", "materialize"]);
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let state = home.root.join("state");
+    let namespace = semon_sessions::read_analytics_namespace(&state)
+        .unwrap()
+        .unwrap();
+    for harness in ["claude", "codex"] {
+        let root = format!("{namespace}/{harness}/lane-manager");
+        let report = home.query(&["query", "lane_health", &root]);
+        assert!(!report.to_string().contains(private));
+        assert_eq!(
+            report["worker_stops"],
+            json!({"completed":1,"blocked":1,"cancelled":1,
+            "unknown":5,"stops_without_blocker":1,"harness_failed":1})
+        );
+        let tasks = report["worker_tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), cases.len());
+        for (worker, _, disposition, failed) in cases {
+            let task = tasks
+                .iter()
+                .find(|task| task["session_uid"] == format!("{namespace}/{harness}/{worker}"))
+                .unwrap();
+            assert_eq!(task["disposition"], disposition, "{task}");
+            assert_eq!(task["harness_failed"], failed);
+            if worker == "unlinked" {
+                assert!(task["dispatch_call_id"].is_null());
+            } else {
+                assert_eq!(task["dispatch_call_id"], format!("spawn-{worker}"));
+            }
+            if worker == "blocked" {
+                assert_eq!(task["pr_url"], pr);
+                assert_eq!(task["head_sha"], sha);
+                assert_eq!(task["checks_state"], "red");
+            } else {
+                assert!(task["pr_url"].is_null());
+            }
+        }
+        if harness == "codex" {
+            let guardian = report["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|member| member["session_uid"] == format!("{namespace}/codex/guardian"))
+                .unwrap();
+            assert_eq!(guardian["parent_session_uid"], root);
+            assert_eq!(guardian["role"], "reviewer");
+        }
+    }
+    let index = semon_sessions::analytics_index_path(&state.join("index.json"));
+    let db =
+        rusqlite::Connection::open_with_flags(index, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut statement = db.prepare("SELECT s.harness,o.block,o.disposition,o.pr_url,o.head_sha,o.checks_state
+        FROM fact_worker_outcome o JOIN warehouse_source s USING(source) ORDER BY s.harness,o.disposition").unwrap();
+    let mut rows = statement.query([]).unwrap();
+    for (harness, position) in [("claude", 1), ("codex", 0)] {
+        for disposition in [
+            "blocked",
+            "cancelled",
+            "completed",
+            "completed",
+            "completed",
+        ] {
+            let row = rows.next().unwrap().unwrap();
+            assert_eq!(row.get::<_, String>(0).unwrap(), harness);
+            assert_eq!(row.get::<_, i64>(1).unwrap(), position);
+            assert_eq!(row.get::<_, String>(2).unwrap(), disposition);
+            let expected = if disposition == "blocked" {
+                [Some(pr), Some(sha), Some("red")]
+            } else {
+                [None; 3]
+            };
+            for (i, value) in (3..6).zip(expected) {
+                assert_eq!(row.get::<_, Option<String>>(i).unwrap().as_deref(), value);
+            }
+        }
+    }
+    assert!(rows.next().unwrap().is_none());
+}

@@ -106,6 +106,39 @@ pub(super) fn report(
             .and_then(|identity| sessions.as_ref()?.get(identity));
         member["live"] = live.cloned().unwrap_or(Value::Null);
     }
+    let pairs: Vec<_> = members
+        .iter()
+        .filter_map(|member| {
+            let worker = member["session_uid"].as_str()?;
+            (worker != uid && member["role"] == "worker")
+                .then_some((worker, member["parent_session_uid"].as_str()?))
+        })
+        .collect();
+    let outcomes = semon_sessions::origin_projection::worker_tasks(&extension.index, &pairs)
+        .map_err(|_| {
+            asi_error(
+                "store_unavailable",
+                "Worker outcome evidence unavailable",
+                "index",
+            )
+        })?;
+    let mut counts = json!({"completed":0, "blocked":0, "cancelled":0, "unknown":0,
+        "stops_without_blocker":0, "harness_failed":0});
+    let mut tasks = Vec::with_capacity(outcomes.len());
+    for ((worker, parent), outcome) in pairs.into_iter().zip(outcomes) {
+        let count = &mut counts[&outcome.disposition];
+        *count = json!(count.as_u64().expect("known disposition") + 1);
+        if outcome.harness_failed {
+            counts["harness_failed"] = json!(counts["harness_failed"].as_u64().unwrap() + 1);
+        }
+        let mut task = json!(outcome);
+        task["session_uid"] = json!(worker);
+        task["parent_session_uid"] = json!(parent);
+        tasks.push(task);
+    }
+    counts["stops_without_blocker"] = counts["completed"].clone();
+    report.insert("worker_tasks".into(), json!(tasks));
+    report.insert("worker_stops".into(), counts);
     report.insert("runtime".into(), runtime);
     report.insert("snapshot".into(), json!(result.snapshot));
     report.insert(

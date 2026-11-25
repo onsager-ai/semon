@@ -58,25 +58,36 @@ read window. Compare `snapshot` with the generation from `analytics coverage`.
   first measured refill, and the same `early` and `storm` flags as context growth.
 - `manager_tool_mix` counts the root's tools and command tags.
   `observed_children` lists the root's direct published children. A recorded
-  call alone cannot establish that a Worker launched.
+  call alone cannot establish that a Worker launched. Guardian and review
+  sessions can appear in the family with the `reviewer` role.
 - `usage` reports exclusive and copied observations in separate buckets with
   token counters, priced USD estimates and priced/unpriced step coverage. Use
   exclusive usage for spend. Copied observations can repeat and must stay
   separate from spend totals. Deduplicated shared usage remains a follow-up.
+- `worker_tasks` lists the published Worker descendants and their parent UIDs.
+  Each item has a dispatch call ID when the Index can establish the link, a
+  disposition, optional PR fields from the final report, and a `harness_failed`
+  flag. The dispatch and stop evidence comes from one committed read of the
+  origin-local Index and can be newer than the published family roster.
+- `worker_stops` counts `completed`, `blocked`, `cancelled` and `unknown`
+  dispositions. `stops_without_blocker` repeats the `completed` count.
+  `harness_failed` counts separately observed failures. A harness failure
+  can leave the report disposition `unknown`.
 - `runtime` gives the answer time, native observation time and native window
   start in UTC milliseconds. Each member's `live` object carries state,
   liveness and last activity. A current continuation can supply live state for
   the published root even when the root log falls outside the native window.
   A null `live` means the native read found no
   matching observation in its window or was unavailable. Check
-  `runtime.error_code` for a native read failure. A quiet or missing row leaves
-  Worker disposition unknown.
+  `runtime.error_code` for a native read failure. Use the indexed final report to determine Worker disposition.
 
 Descendants linked only by marker or process evidence appear once ASI
 publishes those edges. Review `analytics coverage` for gaps and use the native
-reads below to investigate other observed sessions. Per-task attribution and
-Worker dispositions remain follow-up work. Use Agent Workbench for PR, head
-and check status.
+reads below to investigate other observed sessions. Unlinked dispatches and
+sessions with evidence of reuse have unknown disposition, as do sessions with
+missing or malformed final evidence. Workers absent from the published family
+are outside these counts. Use Agent Workbench for current PR, head and check
+status. The optional PR fields capture what the Worker reported when it stopped.
 
 ## Find the Manager and Worker UIDs
 
@@ -116,9 +127,8 @@ and check status.
    currently null. `parent_session_uid` covers only admitted native parent
    evidence, so the published family can be partial. Keep an explicit list of
    UIDs and record missing or unconfirmed members. Identify the Manager from
-   your lane records because the published `role` does not identify it. Worker
-   outcome is `unknown` in this pilot. Semon does not yet publish the Worker
-   disposition from the final report.
+   your lane records because the published `role` does not identify it. Read
+   dispositions and stop counts with `lane_health`.
 
    ```sh
    manager_uid='REPLACE_WITH_FULL_MANAGER_UID'
@@ -268,6 +278,7 @@ Analytics snapshot <generation> | materialization finished <UTC> | coverage gaps
 Compactions <counts by session, trigger and pre-tokens> | early <events> | storms <events>
 Manager calls <top tool_key/command_tag counts>
 Exclusive usage <input/output/cache counters> | priced estimate <USD or unknown> | <priced>/<exclusive> priced, <unpriced> unpriced
-Native state as of <UTC> | stalls <IDs, idle time, reasons> | Worker outcome unknown
+Native state as of <UTC> | stalls <IDs, idle time, reasons>
+Worker stops <completed, blocked, cancelled, unknown> | harness failures <count>
 PR/head/checks <Agent Workbench status>
 ```

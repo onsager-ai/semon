@@ -189,7 +189,11 @@ fn refresh_spawns(tx: &Transaction<'_>, keys: SpawnKeys) -> rusqlite::Result<()>
                  SELECT min(source) source FROM dim_session WHERE harness='codex' AND native_id=?1
                  HAVING count(*)=1
              ), child AS (
-                 SELECT min(native_id) id FROM dim_session WHERE harness='codex' AND parent_id=?1 AND nickname=?2
+                 SELECT min(d.native_id) id FROM dim_session d
+                 LEFT JOIN fact_session_observation header ON header.source=d.source
+                   AND header.pos=-1 AND header.block=0 AND header.kind='header' AND header.occurrence=0
+                 WHERE d.harness='codex' AND d.parent_id=?1 AND d.nickname=?2
+                   AND NOT coalesce(json_extract(header.metadata,'$.guardian_review'),0)
                  HAVING count(*)=1
              ), call AS (
                  SELECT min(c.source) source,min(c.pos) pos,min(c.ts) ts FROM parent p

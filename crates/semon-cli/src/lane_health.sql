@@ -7,7 +7,7 @@ compactions_by_session AS (
         } ORDER BY ts_ms NULLS LAST, uid) AS compactions
     FROM context_points WHERE kind = 'compaction' GROUP BY session_uid
 ), members AS (
-    SELECT d.session_uid, d.parent_session_uid,
+    SELECT d.session_uid, d.parent_session_uid, d.role,
         COALESCE(c.compaction_count, 0) AS compaction_count, COALESCE(c.compactions, []) AS compactions
     FROM family f JOIN dim_session d USING (session_uid)
     LEFT JOIN compactions_by_session c USING (session_uid)
@@ -36,7 +36,7 @@ compactions_by_session AS (
 )
 SELECT r.session_uid AS root_session_uid,
     (SELECT list({
-        'session_uid': session_uid, 'parent_session_uid': parent_session_uid,
+        'session_uid': session_uid, 'parent_session_uid': parent_session_uid, 'role': role,
         'compaction_count': compaction_count, 'compactions': compactions
     } ORDER BY session_uid) FROM members) AS members,
     (SELECT COALESCE(list(session_uid ORDER BY session_uid), []) FROM observed_children) AS observed_children,

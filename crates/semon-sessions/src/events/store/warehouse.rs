@@ -411,17 +411,8 @@ fn session(
 ) -> rusqlite::Result<()> {
     let metadata = meta.map(json).transpose()?;
     let attr = |key| meta?.get(key)?.as_str();
-    let parent_id = if meta
-        .and_then(|m| m.get("guardian_review"))
-        .and_then(|v| v.as_bool())
-        == Some(true)
-    {
-        None
-    } else {
-        attr("parent_thread")
-    };
     fact!(tx, fact_session_observation, [source=>source,pos=>pos,block=>0,kind=>kind,
-        occurrence=>occurrence,ordinal=>ordinal,native_id=>native_id,parent_id=>parent_id,
+        occurrence=>occurrence,ordinal=>ordinal,native_id=>native_id,parent_id=>attr("parent_thread"),
         nickname=>attr("nickname"),agent_path=>attr("path"),metadata=>metadata])
 }
 
@@ -568,6 +559,11 @@ fn write_fact(
                 TurnPhase::Errored => "errored",
             };
             at!(fact_codex_turn,thread_id=>thread_id,turn_id=>turn_id,phase=>phase)
+        }
+        Fact::WorkerOutcome(outcome) => {
+            fact!(tx,fact_worker_outcome,[source=>source,pos=>pos,block=>block,
+            disposition=>outcome.disposition,pr_url=>outcome.pr_url,head_sha=>outcome.head_sha,
+            checks_state=>outcome.checks_state])
         }
         Fact::Compact {
             time,
