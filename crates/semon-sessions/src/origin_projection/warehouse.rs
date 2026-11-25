@@ -602,8 +602,8 @@ impl WarehouseAnalyticsInput {
                 display_name: "remote repository".into(),
             });
         }
-        if let Some(RepoId::Path(path)) = &id {
-            if let Some(key) = self
+        if let Some(RepoId::Path(path)) = &id
+            && let Some(key) = self
                 .connection
                 .query_row(
                     "SELECT repo_key FROM silver_repo_identity WHERE repo_path=?1",
@@ -611,14 +611,13 @@ impl WarehouseAnalyticsInput {
                     |row| row.get(0),
                 )
                 .optional()?
-            {
-                return Ok(Repo {
-                    key,
-                    repo_id: None,
-                    local_path: Some(path.clone()),
-                    display_name: "local".into(),
-                });
-            }
+        {
+            return Ok(Repo {
+                key,
+                repo_id: None,
+                local_path: Some(path.clone()),
+                display_name: "local".into(),
+            });
         }
         Ok(Repo {
             key: UNKNOWN_REPO_KEY.into(),
