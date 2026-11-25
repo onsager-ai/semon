@@ -10,7 +10,7 @@ use crate::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, io, sync::Arc};
+use std::{collections::BTreeMap, io, sync::Arc, time::Instant};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_overview (
@@ -870,7 +870,24 @@ pub fn session_overview_reply(
     query: &str,
     now: i64,
 ) -> io::Result<ViewerReply> {
-    overview_reply(sources, page, query, now, page == "home")
+    session_overview_reply_with_deadline(sources, page, query, now, None)
+}
+
+pub(crate) fn session_overview_reply_with_deadline(
+    sources: &[OverviewSource],
+    page: &str,
+    query: &str,
+    now: i64,
+    deadline: Option<Instant>,
+) -> io::Result<ViewerReply> {
+    overview_reply(sources, page, query, now, page == "home", deadline)
+}
+
+pub(crate) fn check_home_deadline(deadline: Option<Instant>) -> io::Result<()> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "Home read expired"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -880,7 +897,7 @@ pub(crate) fn slot_overview_reply(
     query: &str,
     now: i64,
 ) -> io::Result<ViewerReply> {
-    overview_reply(sources, page, query, now, false)
+    overview_reply(sources, page, query, now, false, None)
 }
 
 fn overview_reply(
@@ -889,7 +906,9 @@ fn overview_reply(
     query: &str,
     now: i64,
     warehouse_home: bool,
+    deadline: Option<Instant>,
 ) -> io::Result<ViewerReply> {
+    check_home_deadline(deadline)?;
     if !query.is_empty() && query.split('&').any(str::is_empty) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1039,10 +1058,11 @@ fn overview_reply(
     let since = now.saturating_sub(analytics::KEEP_MS);
     for source in &sources {
         let observation = if warehouse_home {
-            crate::catalog::warehouse::home_feed::read(source, since)
+            crate::catalog::warehouse::home_feed::read(source, since, deadline)
         } else {
             read(source, since, page == "analytics")
         };
+        check_home_deadline(deadline)?;
         match observation {
             Ok((rows, complete, generation)) => {
                 versions.push(json!([source.key, generation, source.up]));
@@ -1147,6 +1167,7 @@ fn overview_reply(
     let mut working = Vec::new();
     let mut answered = Vec::new();
     for row in &records {
+        check_home_deadline(deadline)?;
         let home = &row.summary.home;
         let mut preview = home.clone();
         preview.as_object_mut().unwrap().remove("events");
@@ -1234,7 +1255,7 @@ mod tests {
         query: &str,
         now: i64,
     ) -> io::Result<ViewerReply> {
-        overview_reply(sources, page, query, now, false)
+        overview_reply(sources, page, query, now, false, None)
     }
 
     #[test]

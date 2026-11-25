@@ -3,6 +3,7 @@ use super::{ReadError, Snapshot, Source, index, selected};
 use crate::overview::{OverviewSource, Saved, Summary};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 const RECENT: &str = concat!(
     include_str!("../events/store/warehouse_list.sql"),
@@ -15,20 +16,33 @@ const RECENT: &str = concat!(
 pub(crate) fn read(
     configured: &OverviewSource,
     since: i64,
+    deadline: Option<Instant>,
 ) -> std::io::Result<(Vec<Saved>, bool, String)> {
-    read_source(configured, since).map_err(|err| std::io::Error::other(err.to_string()))
+    read_source(configured, since, deadline).map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 fn read_source(
     configured: &OverviewSource,
     since: i64,
+    deadline: Option<Instant>,
 ) -> Result<(Vec<Saved>, bool, String), ReadError> {
+    crate::overview::check_home_deadline(deadline).map_err(index)?;
     let path = crate::events::EventCache::path(&configured.options.cache);
     let namespace = crate::storage::Namespace::new(&configured.key).map_err(index)?;
     let source = Source::discover(namespace, &path, &configured.options)?;
     let view = selected::ReadView::open(&source)?;
     let (mut rows, complete, revision) = {
         let tx = view.lock()?;
+        if let Some(deadline) = deadline {
+            tx.busy_timeout(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(100)),
+            )
+            .map_err(index)?;
+            tx.progress_handler(1000, Some(move || Instant::now() >= deadline))
+                .map_err(index)?;
+        }
         super::list_functions(&tx).map_err(index)?;
         let snapshot = Snapshot::read(&tx, &source)?;
         let mut statement = tx.prepare_cached(RECENT).map_err(index)?;
@@ -68,6 +82,7 @@ fn read_source(
     };
     let mut saved = Vec::with_capacity(rows.len());
     for row in &mut rows {
+        crate::overview::check_home_deadline(deadline).map_err(index)?;
         row.resolve_title(&view, &source)?;
         let key = row.position.key.as_str();
         let state = row.status.filter(|_| configured.up).unwrap_or("off");

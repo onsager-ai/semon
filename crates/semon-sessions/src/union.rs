@@ -28,6 +28,8 @@ use crate::{
 };
 
 const INITIAL_CATALOG_WAIT: Duration = Duration::from_secs(20);
+// Leave time to deliver a retryable response before the browser's 15s abort.
+const HOME_READ_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Copy)]
 struct CatalogReadContext {
@@ -1211,6 +1213,8 @@ impl ViewerCore {
         if method != "GET" {
             return text(405, "Method not allowed");
         }
+        let home_deadline =
+            (path == "/api/viewer/home").then(|| deadline.min(Instant::now() + HOME_READ_TIMEOUT));
         let Some(_entered) = self.open.enter() else {
             return text(404, "Not found");
         };
@@ -1297,7 +1301,7 @@ impl ViewerCore {
                     }
                 })
                 .collect();
-            return crate::session_overview_reply(
+            let overview = crate::overview::session_overview_reply_with_deadline(
                 &sources,
                 if path.ends_with("analytics") {
                     "analytics"
@@ -1306,8 +1310,20 @@ impl ViewerCore {
                 },
                 query,
                 crate::model::now_ms(),
-            )
-            .unwrap_or_else(|error| failed(&error));
+                home_deadline,
+            );
+            return match overview {
+                Ok(reply) => reply,
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    retryable(crate::catalog::error(
+                        503,
+                        "home_read_timeout",
+                        "Home took too long to read. Try again or select a machine.",
+                        true,
+                    ))
+                }
+                Err(error) => failed(&error),
+            };
         }
         if matches!(
             path,
@@ -2008,6 +2024,24 @@ impl ViewerCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_home_read_is_retryable() {
+        let core = ViewerCore::with_machines(Vec::new());
+        let reply = core.respond_with_deadline(
+            &Extras::default(),
+            "GET",
+            "/api/viewer/home",
+            "",
+            None,
+            Instant::now(),
+        );
+        assert_eq!(reply.status, 503);
+        assert!(reply.extra_headers.contains(&("Retry-After", "1".into())));
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["error"]["code"], "home_read_timeout");
+        assert_eq!(body["error"]["retryable"], true);
+    }
 
     #[test]
     fn native_id_redirect_resolves_missing_and_cross_machine_ambiguity() {
