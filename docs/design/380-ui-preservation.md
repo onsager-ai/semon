@@ -182,7 +182,7 @@ button, drawer, Trace-removal or transcript redesign is implemented.
 List pages remain 60 rows, retaining at most 300 per source. Grouping and filter
 choices use loaded metadata; the source-qualified Machine field cannot imply a
 workspace union. Header counts say "sessions loaded" unless one accepted,
-complete, unpaged retained-history page proves the exact loaded key set for
+complete, unpaged current-scope page proves the exact loaded key set for
 the same source, generation and filters. Search also requires a complete native
 search receipt. That bounded result may say "sessions"; it is never a workspace
 census. Partial discovery, cursors, failed or ignored queries and retained extra

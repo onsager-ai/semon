@@ -47,7 +47,7 @@ export function completeCatalogCount({
     page.machine !== source ||
     witness.generation !== page.generation ||
     witness.filters !== filters ||
-    page.read_scope !== 'retained_history' ||
+    page.read_scope !== 'current' ||
     page.completeness.state !== 'complete' ||
     page.next_cursor !== null ||
     (searchRequested && page.search === null) ||
