@@ -67,19 +67,21 @@ impl Fixture {
         path
     }
 
-    fn seed_codex(&self) {
+    fn seed_codex(&self, id: &str, parent: Option<&str>) {
         let path = self
             .options
             .codex_home
-            .join("sessions/rollout-codex-fixture.jsonl");
+            .join(format!("sessions/rollout-{id}.jsonl"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let records = [
             json!({"type":"session_meta", "timestamp":"2026-11-24T00:00:00Z", "payload":{
-                "id":"codex-fixture", "cwd":"/work/synthetic", "originator":"codex_exec", "thread_source":"user"
+                "id":id, "cwd":"/work/synthetic", "originator":"codex_exec",
+                "thread_source":if parent.is_some() { "subagent" } else { "user" },
+                "parent_thread_id":parent, "agent_path":parent.map(|_| "root/worker")
             }}),
             json!({"type":"turn_context", "timestamp":"2026-11-24T00:00:01Z", "payload":{"model":"gpt-6-sol"}}),
             json!({"type":"token_usage_record", "timestamp":"2026-11-24T00:01:00Z", "payload":{
-                "thread_id":"codex-fixture", "session_id":"session", "turn_id":"turn", "response_id":"response",
+                "thread_id":id, "session_id":"session", "turn_id":"turn", "response_id":"response",
                 "usage":{"input_tokens":7,"output_tokens":0,"total_tokens":7,"cached_input_tokens":0,
                          "cache_write_input_tokens":0,"reasoning_output_tokens":0}
             }}),
@@ -168,7 +170,7 @@ fn logical_rows(
 fn cold_start_warehouse_matches_semantic_origin() {
     let fixture = Fixture::new("cold");
     fixture.seed("a");
-    fixture.seed_codex();
+    fixture.seed_codex("codex-fixture", None);
     let capture = crate::test_hooks::register(&fixture.options.cache, |point| {
         assert_ne!(
             point, "runtime_captured",
@@ -225,6 +227,94 @@ fn cold_start_warehouse_matches_semantic_origin() {
     crate::refresh_analytics_catalog(&fixture.options, || false).unwrap();
     let expected = drain(&mut SqliteAnalyticsInput::open(&path, NAMESPACE).unwrap());
     assert_eq!(projected, logical_rows(&expected));
+}
+
+#[test]
+fn both_harnesses_preserve_evidence_turns_and_usage() {
+    use semon_asi::input::UsageOwner::{Copied, Exclusive};
+
+    let fixture = Fixture::new("usage");
+    let first = fixture.seed("a");
+    let second = fixture.seed("b");
+    for (file, session) in [(&first, "a"), (&second, "b")] {
+        let mut file = OpenOptions::new().append(true).open(file).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type":"assistant", "uuid":"copy-uuid", "sessionId":session,
+                "timestamp":"2026-11-24T00:02:00Z", "message":{
+                    "id":"copied-message", "role":"assistant", "model":"claude-sonnet-4-5",
+                    "content":[{"type":"text","text":"PRIVATE-P4-FIXTURE"}],
+                    "usage":{"input_tokens":20,"output_tokens":5}
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type":"system", "subtype":"compact_boundary", "uuid":"compact-audit",
+                "sessionId":session, "timestamp":"2026-11-24T00:03:00Z",
+                "compactMetadata":{"trigger":"auto","preTokens":155000}
+            })
+        )
+        .unwrap();
+    }
+    fixture.seed_codex("codex-root", None);
+    fixture.seed_codex("codex-child", Some("codex-root"));
+    fixture.admit();
+    let actual = drain(&mut fixture.open());
+    crate::refresh_analytics_catalog(&fixture.options, || false).unwrap();
+    let path = crate::analytics_index_path(&fixture.options.cache);
+    let expected = drain(&mut SqliteAnalyticsInput::open(&path, NAMESPACE).unwrap());
+    assert_eq!(actual.len(), 4);
+    assert_eq!(logical_rows(&actual), logical_rows(&expected));
+    for (uid, session) in &actual {
+        assert_eq!(session.source_witness, expected[uid].source_witness);
+        assert_eq!(session.steps, expected[uid].steps);
+        assert_eq!(session.compactions, expected[uid].compactions);
+    }
+
+    let claude = &actual["fixture/claude/a"];
+    assert_eq!(claude.steps[0].usage_owner, Exclusive);
+    assert_eq!(claude.steps[1].usage_owner, Copied);
+    assert_eq!(claude.steps[0].turn_uid, "fixture/claude/a/t/a-prompt");
+    assert_eq!(claude.steps[1].turn_uid, claude.steps[0].turn_uid);
+    assert_eq!(claude.compactions.len(), 1);
+    let child = &actual["fixture/codex/codex-child"];
+    let root = &actual["fixture/codex/codex-root"];
+    assert_eq!(
+        child.session.parent_session_uid.as_deref(),
+        Some(root.session_uid.as_str())
+    );
+    assert_eq!(child.steps[0].turn_uid, "fixture/codex/codex-child/t/turn");
+    assert_eq!(child.steps[0].usage_owner, Exclusive);
+    let family_costs = |rows: &BTreeMap<String, semon_asi::AdmittedSession>| {
+        crate::causal_trace::family_costs(rows.values().map(|session| {
+            let cost = session
+                .steps
+                .iter()
+                .filter(|step| step.usage_owner == Exclusive)
+                .map(|step| step.cost.usd_est)
+                .sum::<Option<f64>>();
+            (
+                session.session_uid.as_str(),
+                session.session.parent_session_uid.as_deref(),
+                cost,
+            )
+        }))
+        .into_iter()
+        .map(|(uid, cost)| (uid.to_owned(), cost))
+        .collect::<BTreeMap<_, _>>()
+    };
+    let totals = family_costs(&actual);
+    assert_eq!(totals, family_costs(&expected));
+    assert_eq!(
+        totals[&root.session_uid],
+        Some(root.steps[0].cost.usd_est.unwrap() + child.steps[0].cost.usd_est.unwrap())
+    );
 }
 
 #[test]

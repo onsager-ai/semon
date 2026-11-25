@@ -1,7 +1,7 @@
 //! Local, explicitly-started origin analytics publication.
 //!
 //! This service has no host integration or default enablement. Its namespace is
-//! supplied by the caller, and each cycle opens a fresh read-only SQLite input.
+//! supplied by the caller, and each drain opens a read-only SQLite input.
 //! The store root derived by [`analytics_store_root`] is a sibling of the SQLite
 //! index, never a path inside the index file.
 //!
@@ -20,11 +20,16 @@ use std::{
 
 use rusqlite::{Error as SqliteError, ErrorCode};
 use semon_asi::{
-    Clock, CompactionPolicy, Error as StoreError, InputBudget, PublishError, Store, Versions,
-    WriterLock, publish_cycle,
+    AnalyticsInput, Clock, CompactionPolicy, Error as StoreError, InputBudget, PublishError, Store,
+    Versions, WriterLock, publish_cycle,
 };
 
-use crate::{SqliteAnalyticsInput, events::session_activity::ACTIVITY_RULES_VERSION};
+#[cfg(test)]
+use crate::SqliteAnalyticsInput;
+use crate::{Options, WarehouseAnalyticsInput, events::session_activity::ACTIVITY_RULES_VERSION};
+
+type ReplayCheck = fn(Option<&str>) -> rusqlite::Result<bool>;
+type LocalStore = Store<Arc<semon_asi::SystemClock>>;
 
 /// The minimum spacing between requested publication cycles by default.
 pub const DEFAULT_ANALYTICS_WRITER_INTERVAL: Duration = Duration::from_secs(2);
@@ -442,23 +447,29 @@ impl Drop for Handle {
     }
 }
 
-/// Starts a dedicated local analytics writer using the system clock.
-///
-/// This is intentionally an explicit lifecycle primitive: no Viewer, MCP,
-/// push/receive, or ordinary CLI read starts it. Materialize enables it explicitly.
-pub fn start(config: AnalyticsWriterConfig) -> Handle {
+// Keep the semantic adapter available to tests of the silver journal until
+// that stage is retired.
+#[cfg(test)]
+pub(crate) fn start(config: AnalyticsWriterConfig) -> Handle {
     start_with_clock(config, Arc::new(semon_asi::SystemClock))
 }
 
 /// Starts a writer with an injected clock for deterministic crate tests.
+#[cfg(test)]
 pub(crate) fn start_with_clock<C>(config: AnalyticsWriterConfig, clock: Arc<C>) -> Handle
 where
     C: Clock + Send + Sync + 'static,
 {
-    start_thread(config, clock, None)
+    start_thread(
+        config,
+        clock,
+        None,
+        open_semantic_input,
+        SqliteAnalyticsInput::resumes_replay,
+    )
 }
 
-/// Ownership acquired before namespace creation or native Catalog mutation.
+/// Ownership acquired before namespace creation or native Index admission.
 pub struct Owner {
     lock: WriterLock,
     clock: Arc<semon_asi::SystemClock>,
@@ -474,7 +485,8 @@ impl Owner {
 
     /// Validate existing SQLite bytes read-only before creating analytics state.
     /// Store opening takes its lock before touching the analytics directory.
-    pub fn acquire(index: &Path, root: &Path) -> Result<Self, String> {
+    #[cfg(test)]
+    fn acquire(index: &Path, root: &Path) -> Result<Self, String> {
         match std::fs::symlink_metadata(index) {
             Ok(_) => {
                 SqliteAnalyticsInput::open(index, "validation")
@@ -491,7 +503,46 @@ impl Owner {
         Ok(Self { lock, clock })
     }
 
-    pub fn start(self, config: AnalyticsWriterConfig) -> Result<Handle, String> {
+    #[cfg(test)]
+    pub(crate) fn start(self, config: AnalyticsWriterConfig) -> Result<Handle, String> {
+        let (clock, store) = self.bind(&config)?;
+        Ok(start_thread(
+            config,
+            clock,
+            Some(store),
+            open_semantic_input,
+            SqliteAnalyticsInput::resumes_replay,
+        ))
+    }
+
+    /// Start the local writer over the admitted warehouse. No read surface
+    /// starts publication implicitly.
+    pub fn start_warehouse(
+        self,
+        config: AnalyticsWriterConfig,
+        options: Options,
+    ) -> Result<Handle, String> {
+        if crate::analytics_index_path(&options.cache) != config.index_path {
+            return Err(crate::analytics::Error::new(
+                crate::analytics::ErrorKind::BindingMismatch,
+                crate::analytics::Stage::Ownership,
+            )
+            .to_string());
+        }
+        let (clock, store) = self.bind(&config)?;
+        Ok(start_thread(
+            config,
+            clock,
+            Some(store),
+            move |config| WarehouseAnalyticsInput::open(&options, &config.namespace),
+            |_| Ok(false),
+        ))
+    }
+
+    fn bind(
+        self,
+        config: &AnalyticsWriterConfig,
+    ) -> Result<(Arc<semon_asi::SystemClock>, LocalStore), String> {
         let identity = config
             .index_path
             .parent()
@@ -516,21 +567,41 @@ impl Owner {
                 .bind_origin(&identity.namespace, &identity.origin_incarnation)
                 .map_err(|error| error.to_string())?;
         }
-        Ok(start_thread(config, self.clock, Some(store)))
+        Ok((self.clock, store))
     }
 }
 
-fn start_thread<C: Clock + Send + Sync + 'static>(
+#[cfg(test)]
+fn open_semantic_input(config: &AnalyticsWriterConfig) -> rusqlite::Result<SqliteAnalyticsInput> {
+    SqliteAnalyticsInput::open(&config.index_path, &config.namespace)
+}
+
+fn start_thread<C, I>(
     config: AnalyticsWriterConfig,
     clock: Arc<C>,
     store: Option<Store<Arc<C>>>,
-) -> Handle {
+    open_input: impl Fn(&AnalyticsWriterConfig) -> rusqlite::Result<I> + Send + 'static,
+    resumes_replay: ReplayCheck,
+) -> Handle
+where
+    C: Clock + Send + Sync + 'static,
+    I: AnalyticsInput<Error = SqliteError>,
+{
     let shared = Arc::new(Shared::new());
     let worker_shared = Arc::clone(&shared);
     let thread = thread::Builder::new()
         // Rust's standard library has no portable thread-priority API.
         .name("semon-analytics-writer".into())
-        .spawn(move || run(config, clock, worker_shared, store))
+        .spawn(move || {
+            run(
+                config,
+                clock,
+                worker_shared,
+                store,
+                open_input,
+                resumes_replay,
+            )
+        })
         .expect("start analytics writer thread");
     Handle {
         shared,
@@ -901,14 +972,22 @@ impl Scheduler {
     }
 }
 
-fn run<C: Clock + Send + Sync + 'static>(
+fn run<C, I>(
     config: AnalyticsWriterConfig,
     clock: Arc<C>,
     shared: Arc<Shared>,
     mut store: Option<Store<Arc<C>>>,
-) {
+    open_input: impl Fn(&AnalyticsWriterConfig) -> rusqlite::Result<I>,
+    resumes_replay: ReplayCheck,
+) where
+    C: Clock,
+    I: AnalyticsInput<Error = SqliteError>,
+{
     let mut scheduler = Scheduler::new(clock.now_ms());
-    while let Some(operation) = next_operation(&shared, &clock, &mut scheduler, store.is_some()) {
+    let mut input = None;
+    while let Some(operation) =
+        next_operation(&shared, &clock, &mut scheduler, store.is_some(), &mut input)
+    {
         let (event, reason) = match operation {
             Operation::Open => match Store::open_with_clock(&config.store_root, Arc::clone(&clock))
             {
@@ -929,9 +1008,9 @@ fn run<C: Clock + Send + Sync + 'static>(
                 #[cfg(test)]
                 publish_started(&shared);
                 let result = (|| {
-                    let mut input =
-                        SqliteAnalyticsInput::open(&config.index_path, config.namespace.clone())
-                            .map_err(PublishError::Input)?;
+                    if input.is_none() {
+                        input = Some(open_input(&config).map_err(PublishError::Input)?);
+                    }
                     if scheduler
                         .active
                         .as_ref()
@@ -939,7 +1018,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                         .endpoint_origin
                         == EndpointOrigin::Uninspected
                     {
-                        let inherited = SqliteAnalyticsInput::resumes_replay(
+                        let inherited = resumes_replay(
                             store
                                 .as_ref()
                                 .expect("opened store")
@@ -953,7 +1032,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                     }
                     publish_cycle(
                         store.as_mut().expect("opened store"),
-                        &mut input,
+                        input.as_mut().expect("opened input"),
                         &config.namespace,
                         target_versions(),
                         config.input_budget,
@@ -962,6 +1041,9 @@ fn run<C: Clock + Send + Sync + 'static>(
                 scheduler.publication_attempted(clock.now_ms(), config.interval);
                 match result {
                     Ok(progress) => {
+                        if progress.complete {
+                            input = None;
+                        }
                         #[cfg(test)]
                         published(&shared);
                         (
@@ -1031,6 +1113,9 @@ fn run<C: Clock + Send + Sync + 'static>(
             },
         };
         let effect = scheduler.transition(event, clock.now_ms());
+        if matches!(effect, ChainEffect::Refused { .. }) {
+            input = None;
+        }
         apply_effect(&mut lock(&shared.state), effect, reason.as_deref());
         shared.changed.notify_all();
     }
@@ -1045,11 +1130,12 @@ fn target_versions() -> Versions {
     }
 }
 
-fn next_operation<C: Clock>(
+fn next_operation<C: Clock, I>(
     shared: &Shared,
     clock: &C,
     scheduler: &mut Scheduler,
     has_store: bool,
+    input: &mut Option<I>,
 ) -> Option<Operation> {
     let mut state = lock(&shared.state);
     loop {
@@ -1060,6 +1146,9 @@ fn next_operation<C: Clock>(
         }
         for generation in std::mem::take(&mut state.cancelled) {
             let effect = scheduler.transition(ChainEvent::Cancel { generation }, clock.now_ms());
+            if matches!(effect, ChainEffect::Cancelled(_)) {
+                *input = None;
+            }
             apply_effect(&mut state, effect, None);
         }
         let now = clock.now_ms();
@@ -1868,7 +1957,16 @@ mod tests {
             state.requests = BTreeMap::from([(1, None), (2, None)]);
         }
         let worker_shared = Arc::clone(&shared);
-        let thread = thread::spawn(move || run(config, clock, worker_shared, None));
+        let thread = thread::spawn(move || {
+            run(
+                config,
+                clock,
+                worker_shared,
+                None,
+                open_semantic_input,
+                SqliteAnalyticsInput::resumes_replay,
+            )
+        });
         Handle {
             shared,
             thread: Some(thread),

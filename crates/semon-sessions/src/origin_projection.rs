@@ -60,6 +60,7 @@ impl SqliteAnalyticsInput {
     /// chain. Finish it before starting a fresh drain for that request. The
     /// checkpoint format remains adapter-owned; actual reads validate anchors
     /// and restart inventory if the index incarnation changed.
+    #[cfg(test)]
     pub(crate) fn resumes_replay(checkpoint: Option<&str>) -> rusqlite::Result<bool> {
         Ok(checkpoint
             .map(decode_checkpoint)

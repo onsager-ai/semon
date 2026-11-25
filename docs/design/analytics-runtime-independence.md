@@ -1,13 +1,14 @@
 # Analytics without live runtime observation
 
 Chief PM approved the design on 2026-11-24. The owner approved D11 for P4.1.
-The staged adapter scans committed warehouse inputs in bounded batches. Infra
-runs the hp-code-2 measurement before P4.2 proceeds.
+P4.2 uses the staged adapter for one-shot and watch publication. ASI SQL and
+metadata export continue to read the published store. Infra owns the hp-code-2
+measurement and deployment.
 
 ## Problem
 
-`semon analytics materialize` refreshes the live Catalog before draining the
-analytics writer, on the first pass and every `--watch` pass.
+Before P4.2, `semon analytics materialize` refreshed the live Catalog before
+draining the analytics writer, on the first pass and every `--watch` pass.
 [#735](https://github.com/onsager-ai/semon/pull/735) made each refresh reuse
 one runtime capture so process churn would stop invalidating work in flight.
 An older capture can still publish a removed Codex name after a newer refresh
@@ -26,10 +27,9 @@ and two live producers could still restore a withdrawn name.
 
 Native evidence enters through the Index. Its admitted bytes support records,
 usage, tools and compactions, with source incarnations, committed prefixes and
-proofs for evidence links. The [current SQLite adapter](../../crates/semon-sessions/src/origin_projection.rs)
-joins Catalog identity and native lineage to matching activity and pricing
-projections in a read snapshot. Catalog and activity generations qualify
-those joins. `_gen` marks the separate analytics publication.
+proofs for evidence links. The [warehouse SQLite adapter](../../crates/semon-sessions/src/origin_projection/warehouse.rs)
+reads committed identity, native lineage, normalized activity metadata and
+usage in one snapshot per drain. `_gen` marks the separate analytics publication.
 
 | Output | Required inputs |
 | --- | --- |
@@ -139,10 +139,13 @@ These cases can remain visible until the other native producer reconciles them.
 The staged adapter derives activity from normalized Index rows bound to the
 same warehouse ledgers and uses the warehouse's committed identities, native
 parents and usage facts. Where no recorded repo identity is available it
-publishes an unknown repo. The next slice owns CLI materialize, ASI SQL and
-export cutover and the production timing gate.
+publishes an unknown repo. The first drain after the cutover inventories the
+warehouse using the existing checkpoint envelope and rematerializes the
+existing version-5 Parquet. It preserves the namespace and durable label
+assertions. The export receipt and bundle format are unchanged. No reset is
+needed.
 
-## hp-code-2 measurement before P4.2
+## hp-code-2 rollout measurement
 
 Infra runs this procedure with a CI-built candidate that exposes the P4.2
 materialize path and ASI SQL. Use a private, freshly created scratch directory
@@ -280,10 +283,9 @@ Chief PM approved both choices on 2026-11-24.
   preserves one-command cold start and fresh watch without a Viewer. A separately
   managed Index producer would give materialize a read-only process boundary and
   add setup and explicit stale-coverage handling.
-- **Cutover.** Switch in phase 4. An earlier adapter over native evidence and
-  committed identity and lineage would still need runtime-free admission and
-  fact parity, then be replaced in phase 4. Collect the cold and warm one-shot
-  timings and watch freshness measurements on hp-code-2 before implementation.
+- **Cutover.** Switch in phase 4. The staged adapter becomes the materializer's
+  input in P4.2. Measure cold and warm one-shot timings and watch freshness on
+  a scratch copy with the candidate build before rollout.
 
 Close [#736](https://github.com/onsager-ai/semon/issues/736) after verifying that
 neither materialize mode can capture or publish Codex names. Any stale-name

@@ -38,9 +38,6 @@ fn live_rows(root: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
     let live = semon_asi::read_live_map(root, &manifest).unwrap();
     let mut result = BTreeMap::new();
     for table in semon_asi::schema::TABLES {
-        if table.kind == semon_asi::schema::Kind::Append {
-            continue;
-        }
         let mut rows = Vec::new();
         for entry in manifest.files_of(table.name) {
             let file = fs::File::open(root.join("analytics").join(&entry.path)).unwrap();
@@ -243,6 +240,151 @@ fn materialize_publishes_once_and_reuses_its_namespace() {
 }
 
 #[test]
+fn warehouse_cutover_preserves_published_rows_and_export() {
+    let home = fixture::Fixture::new();
+    let state = home.root.join("state");
+    let store_root = state.join("analytics-store");
+    let options = semon_sessions::Options {
+        claude_home: home.claude.clone(),
+        claude_json: home.claude.join(".claude.json"),
+        codex_home: home.codex.clone(),
+        copilot_home: home.root.join("empty-home/.copilot"),
+        proc_root: home.root.join("empty-proc"),
+        cache: state.join("index.json"),
+        annotations: state.join("annotations.jsonl"),
+        all: true,
+        ..Default::default()
+    };
+    let index = semon_sessions::analytics_index_path(&options.cache);
+    let initialized = semon_sessions::analytics::initialize(&index, None, || false).unwrap();
+    let binding = initialized.binding.clone();
+    semon_sessions::refresh_analytics_catalog(&options, || false).unwrap();
+    drop(initialized); // Release ownership before opening the fixture's writers.
+
+    let target = format!(
+        "{}/claude/00000000-0000-4000-8000-000000000001",
+        binding.namespace
+    );
+    let step = format!("{target}/s/claude/fixture-msg-1");
+    let label = state.join("label.json");
+    fs::write(&label, serde_json::json!({
+        "target_type":"session", "target_uid":target, "field":"activity", "value":"coding",
+        "mechanism_text":"PRIVATE-LABEL-MECHANISM", "evidence_step_ids":serde_json::json!([step]).to_string(),
+        "labeler":"human:fixture", "taxonomy_version":7, "confidence":0.75, "created_at":1
+    }).to_string()).unwrap();
+    let output = home
+        .command(env!("CARGO_BIN_EXE_semon"))
+        .args(["asi", "add", "label", "--id", "parity", "--values"])
+        .arg(&label)
+        .arg("--cache")
+        .arg(&options.cache)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    {
+        let mut store = semon_asi::Store::open(&store_root).unwrap();
+        store
+            .bind_origin(&binding.namespace, &binding.origin_incarnation)
+            .unwrap();
+        let mut legacy =
+            semon_sessions::SqliteAnalyticsInput::open(&index, &binding.namespace).unwrap();
+        loop {
+            if semon_asi::publish_cycle(
+                &mut store,
+                &mut legacy,
+                &binding.namespace,
+                semon_asi::Versions::default(),
+                semon_asi::InputBudget::default(),
+            )
+            .unwrap()
+            .complete
+            {
+                break;
+            }
+        }
+    }
+    let expected = live_rows(&store_root);
+    assert_eq!(expected["fact_session"].len(), 2);
+    assert_eq!(expected["fact_label"].len(), 1);
+    assert!(expected["fact_label"][0].contains(&"human:fixture".to_owned()));
+    assert!(!format!("{expected:?}").contains("PRIVATE-LABEL-MECHANISM"));
+    #[cfg(feature = "asi-query")]
+    let sql_before = query_cutover_rows(&home, &options.cache);
+
+    let output = materialize_with(&home, &["--batch-sessions", "1"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(manifest.schema_version, 5);
+    assert_eq!(manifest.durable_revision, 1);
+    assert_eq!(live_rows(&store_root), expected);
+    #[cfg(feature = "asi-query")]
+    assert_eq!(query_cutover_rows(&home, &options.cache), sql_before);
+
+    let destination = home.root.join("metadata-export");
+    let output = home
+        .command(env!("CARGO_BIN_EXE_semon"))
+        .args(["analytics", "export"])
+        .arg(&destination)
+        .arg("--cache")
+        .arg(&options.cache)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = semon_asi::verify_export(&destination).unwrap();
+    assert_eq!(receipt.format_version, 1);
+    assert_eq!(receipt.manifest_generation, manifest.generation);
+    assert_eq!(receipt.source_namespace, binding.namespace);
+    assert_eq!(live_rows(&destination), expected);
+}
+
+#[cfg(feature = "asi-query")]
+fn query_cutover_rows(home: &fixture::Fixture, cache: &Path) -> serde_json::Value {
+    let output = home
+        .command(env!("CARGO_BIN_EXE_semon"))
+        .args([
+            "query",
+            "sql",
+            "SELECT s.step_uid, t.turn_uid, d.harness_key, l.labeller,
+                     l.taxonomy_version, l.revision FROM fact_step s
+                     JOIN fact_turn t USING (turn_uid, session_uid)
+                     JOIN dim_session d USING (session_uid)
+                     LEFT JOIN fact_label l ON l.target_uid = s.session_uid
+                     ORDER BY s.step_uid",
+            "--json",
+        ])
+        .arg("--cache")
+        .arg(cache)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["asi_schema_version"], 5);
+    let rows = value["rows"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row[2] == "claude" && row[3] == "human:fixture")
+    );
+    assert!(rows.iter().any(|row| row[2] == "codex" && row[3].is_null()));
+    value["rows"].clone()
+}
+
+#[test]
 fn materialize_tiny_budget_drains_several_chunks_and_matches_one_shot_rows() {
     let home = fixture::Fixture::new();
     for index in 3..=5 {
@@ -422,7 +564,7 @@ fn usage_lists_materialize() {
         "analytics materialize",
         "--batch-sessions N",
         "--batch-steps N",
-        "64 sessions/journal entries and 8192 steps",
+        "64 sessions and 8192 steps",
         "min(usize::MAX, i64::MAX)",
     ] {
         assert!(help.contains(expected), "missing {expected}: {help}");
@@ -658,7 +800,12 @@ fn analytics_input_validation_preserves_live_wal_entries_and_bytes() {
             .collect()
     };
     let before = snapshot();
-    let input = semon_sessions::SqliteAnalyticsInput::open(&index, "synthetic-validation").unwrap();
+    let options = semon_sessions::Options {
+        cache: state.join("index.json"),
+        ..Default::default()
+    };
+    let input =
+        semon_sessions::WarehouseAnalyticsInput::open(&options, "synthetic-validation").unwrap();
     drop(input);
     assert_eq!(snapshot(), before);
     connection.execute_batch("ROLLBACK").unwrap();

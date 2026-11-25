@@ -30,13 +30,13 @@ mod overview;
 mod overview_repair;
 pub use analytics_namespace::read_analytics_namespace;
 pub use analytics_writer::{
-    AnalyticsWriterConfig, AnalyticsWriterStatus, Handle, analytics_store_root, start,
+    AnalyticsWriterConfig, AnalyticsWriterStatus, Handle, analytics_store_root,
 };
 
 /// Refresh the complete local Catalog and activity through the native producer.
 /// The producer propagates Index and recovery failures. Local runtime is
 /// captured once for this refresh, including any resumable Catalog batches.
-/// The caller owns the analytics writer lock before invoking this operation.
+/// Kept for semantic Catalog consumers and the analytics fixture oracle.
 pub fn refresh_analytics_catalog(
     options: &Options,
     cancelled: impl Fn() -> bool,
@@ -79,8 +79,8 @@ pub fn refresh_analytics_catalog(
 
 /// The SQLite Event Index path for a configured cache stem.
 ///
-/// This is the same path the native Catalog producer owns. Analytics opens it
-/// read-only only after that producer has published current Catalog data.
+/// The Viewer and materializer use the same native admission transactions.
+/// The analytics writer reads the committed warehouse from this Index.
 pub fn analytics_index_path(cache: &Path) -> PathBuf {
     events::EventCache::path(cache)
 }

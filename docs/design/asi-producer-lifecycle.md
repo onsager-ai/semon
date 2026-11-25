@@ -111,8 +111,8 @@ job; rebuilds still require available authorized sources and custody proof.
 
 ## Callers and enrollment
 
-- `analytics materialize` calls initialize, then keeps its existing strict Catalog
-  refresh, bounded publication, compaction and optional watch semantics.
+- `analytics materialize` calls initialize, then admits native logs and publishes
+  the committed warehouse in bounded batches, with compaction and optional watch.
 - Analytics/body `connect` calls initialize before pairing begins. The replacement
   point is `connect::producer_admission(kinds, analytics_state_dir)` (#651, on
   `main`). That seam needs only a read-only function returning exactly those three

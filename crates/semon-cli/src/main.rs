@@ -1459,9 +1459,8 @@ fn publish_materialization(
     }
 }
 
-/// Materialize the local Analytics Store from the native Event Index. The
-/// Catalog refresh drains the strict native producer used by the Viewer;
-/// analytics only opens its successfully published SQLite result.
+/// Admit native sources and materialize the committed warehouse into the
+/// local Analytics Store.
 fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
     let options = semon_sessions::Options {
         since: args.home.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
@@ -1490,23 +1489,23 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
     if !args.watch {
         config.interval = std::time::Duration::ZERO;
     }
-    let writer = owner.start(config)?;
+    let writer = owner.start_warehouse(config, options.clone())?;
 
     let stop = semon_push::Stop::new();
     if args.watch {
         interrupt::stop_on_signal(&stop);
     }
     let result = (|| {
-        semon_sessions::refresh_analytics_catalog(&options, || stop.is_stopped())
-            .map_err(|error| format!("catalog refresh: {error}"))?;
+        semon_sessions::admit_warehouse(&options, || stop.is_stopped())
+            .map_err(|error| format!("Index admission: {error}"))?;
         publish_materialization(&writer, &stop)?;
         println!(
             "analytics materialized: namespace={namespace} store={} status=idle",
             store_root.display()
         );
         while args.watch && !stop.sleep(std::time::Duration::from_secs(2)) {
-            semon_sessions::refresh_analytics_catalog(&options, || stop.is_stopped())
-                .map_err(|error| format!("catalog refresh: {error}"))?;
+            semon_sessions::admit_warehouse(&options, || stop.is_stopped())
+                .map_err(|error| format!("Index admission: {error}"))?;
             publish_materialization(&writer, &stop)?;
         }
         Ok(())
@@ -2476,10 +2475,10 @@ fn query_usage() -> String {
 
 fn analytics_usage() -> String {
     "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
-     Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
-     Catalog refresh is complete; --since/--all do not bound analytics input.\n\
-     Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
-     One-shot finishes inherited replay, then drains immediately through a fresh endpoint; later changes belong to the next request.\n\
+     Admits native logs to the local Event Index, then materializes its committed warehouse.\n\
+     Native admission scans the configured homes in full. --since/--all do not bound analytics input.\n\
+     Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions and 8192 steps. An oversize session stays whole.\n\
+     One-shot drains one committed warehouse snapshot. Later commits belong to the next drain.\n\
      --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait.\n\
      \n\
      Usage: semon analytics coverage [--cache PATH] [--json]\n\
@@ -2511,7 +2510,7 @@ fn usage() -> String {
          The agent read surface over native session evidence. `semon query` alone lists each tool's arguments.\n\
          \n\
          Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
-         Explicitly refreshes the local native Catalog and materializes local-only analytics. Nothing starts this writer by default.\n\
+         Explicitly admits native logs and materializes local-only analytics from the Event Index warehouse. Nothing starts this writer by default.\n\
          Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
          \n\
          Usage: semon analytics coverage [--cache PATH] [--json]\n\
@@ -2553,7 +2552,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn materialize_publishes_when_a_process_exits_after_runtime_capture() {
+    fn materialize_publishes_without_observing_runtime() {
         let root = tempfile::tempdir().unwrap();
         let claude_home = root.path().join("claude");
         let projects = claude_home.join("projects/-work-proj");
@@ -2590,14 +2589,8 @@ mod tests {
         };
         let index = semon_sessions::analytics_index_path(&options.cache);
         let store = semon_sessions::analytics_store_root(&index).unwrap();
-        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let observed_exit = exited.clone();
-        let _hook = semon_sessions::test_hooks::register(&options.cache, move |point| {
-            if point == "runtime_captured"
-                && !observed_exit.swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
-                std::fs::remove_file(&process).unwrap();
-            }
+        let _hook = semon_sessions::test_hooks::register(&options.cache, |point| {
+            assert_ne!(point, "runtime_captured");
         });
         run_materialize(MaterializeArgs {
             home: HomeArgs {
@@ -2611,7 +2604,17 @@ mod tests {
             },
         })
         .unwrap();
-        assert!(exited.load(std::sync::atomic::Ordering::Relaxed));
+        let db = rusqlite::Connection::open(index).unwrap();
+        let (catalog, silver, runtime): (i64, i64, i64) = db
+            .query_row(
+                "SELECT (SELECT count(*) FROM session_catalog),
+                        (SELECT count(*) FROM silver_change),
+                        (SELECT count(*) FROM fact_process_observation)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((catalog, silver, runtime), (0, 0, 0));
         let manifest = semon_asi::read_manifest(&store).unwrap().unwrap();
         assert_eq!(
             semon_asi::read_live_map(&store, &manifest).unwrap().len(),
