@@ -7972,7 +7972,10 @@ fn build_sources_inner(
             hook();
         }
     }
-    if history_records.is_none() {
+    // Warehouse queries read committed sidecar metadata. Admission fences new
+    // observations, while a later sidecar change leaves that snapshot readable.
+    let verify_live_sidecars = history_records.is_none() && warehouse.is_none();
+    if verify_live_sidecars {
         measured!(
             "sidecars_before",
             files.len(),
@@ -8527,7 +8530,7 @@ fn build_sources_inner(
     }
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "runtime_checked");
-    if history_records.is_none() {
+    if verify_live_sidecars {
         measured!(
             "sidecars_after",
             files.len(),
@@ -8812,8 +8815,10 @@ fn build_sources_inner(
     if let Some(hook) = AFTER_QUERY_DERIVATION.with(|hook| hook.borrow_mut().take()) {
         hook();
     }
-    if history_records.is_none() {
+    if verify_live_sidecars {
         verify_sidecars(&files, options)?;
+    }
+    if history_records.is_none() {
         source_records.finish()?;
     }
     let native_keys = builder

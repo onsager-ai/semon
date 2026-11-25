@@ -3296,7 +3296,16 @@ pub(crate) fn scan_file(
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
-    scan_file_inner(path, harness, cache, dirty, None)
+    scan_file_inner(path, harness, cache, dirty, None, false)
+}
+
+pub(crate) fn scan_query_file(
+    path: &Path,
+    harness: &str,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+) -> io::Result<Arc<FileIndex>> {
+    scan_file_inner(path, harness, cache, dirty, None, true)
 }
 
 pub(crate) fn scan_rebuild_file(
@@ -3305,7 +3314,7 @@ pub(crate) fn scan_rebuild_file(
     cache: &mut EventCache,
     boundary: Stat,
 ) -> io::Result<()> {
-    scan_file_inner(path, harness, cache, &mut false, Some(boundary))?;
+    scan_file_inner(path, harness, cache, &mut false, Some(boundary), false)?;
     Ok(())
 }
 
@@ -3315,6 +3324,7 @@ fn scan_file_inner(
     cache: &mut EventCache,
     dirty: &mut bool,
     rebuild_boundary: Option<Stat>,
+    defer_sidecar_changes: bool,
 ) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
@@ -3449,6 +3459,9 @@ fn scan_file_inner(
             ) {
                 Ok(sidecar) => sidecar,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    if defer_sidecar_changes {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, error));
+                    }
                     if last {
                         None
                     } else {
@@ -3690,22 +3703,6 @@ fn scan_file_inner(
                 writable.warehouse_header(path, header.ends_with(b"\n"));
             }
         }
-        if writable
-            .claude_sidecar
-            .as_ref()
-            .is_some_and(|sidecar| !sidecar.current(path))
-        {
-            if last {
-                // Keep the native session under bounded sidecar churn, using
-                // its existing metadata fallback without an eviction proof.
-                writable.claude_sidecar = None;
-            } else {
-                continue;
-            }
-        }
-        if sidecar_changed {
-            writable.warehouse_sidecar();
-        }
         let ledger = Ledger {
             stat: if bounded {
                 Stat {
@@ -3772,6 +3769,28 @@ fn scan_file_inner(
             if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
                 hook();
             }
+        }
+        if writable
+            .claude_sidecar
+            .as_ref()
+            .is_some_and(|sidecar| !sidecar.current(path))
+        {
+            if defer_sidecar_changes {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Claude sidecar changed while indexing",
+                ));
+            }
+            if last {
+                // Keep the native session under bounded sidecar churn, using
+                // its existing metadata fallback without an eviction proof.
+                writable.claude_sidecar = None;
+            } else {
+                continue;
+            }
+        }
+        if sidecar_changed {
+            writable.warehouse_sidecar();
         }
         let stage_cold = cache.scan_byte_budget.is_some()
             && recorded.is_none()
