@@ -287,7 +287,14 @@ export function catalogTranscriptBlocks(
         );
       } else {
         label('Native action · related session context is incomplete');
-        if (native_action_text === undefined) label('Original action prompt is unavailable.');
+        if (native_action_text === undefined)
+          views.push({
+            kind: 'label',
+            key: entry_id,
+            entryKey: entry_id,
+            className: 'vnote',
+            text: 'Original action prompt is unavailable.',
+          });
         else
           views.push({
             kind: 'message',

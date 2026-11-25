@@ -3497,9 +3497,14 @@ export function createCatalogViewer(
             .closest('.tgroup')
             ?.querySelector<HTMLButtonElement>('.tgroup > button[aria-expanded="false"]')
             ?.click();
-          target.scrollIntoView({ block: 'center' });
+          const turn = target.closest('.turn');
+          turn?.classList.add('flash');
           target.classList.add('flash');
-          scope.timeout(() => target.classList.remove('flash'), 1200);
+          target.scrollIntoView({ block: 'center' });
+          scope.timeout(() => {
+            target.classList.remove('flash');
+            turn?.classList.remove('flash');
+          }, 1200);
         });
     } catch (error) {
       if (!current()) return;
