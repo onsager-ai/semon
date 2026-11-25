@@ -4411,6 +4411,52 @@ fn focused_native_identity_collision_context_refuses_an_overbound_closure() {
 }
 
 #[test]
+fn first_focused_query_after_index_recovery_reads_rebuilt_path() {
+    let mut home = Home::new("focused-index-recovery");
+    home.options.index_recovery = crate::IndexRecovery::Local;
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(1, 0), "recovery prompt"),
+            assistant("lead", ts(1, 1), vec![text("recovered answer")]),
+        ],
+    );
+    let path = crate::events::EventCache::path(&home.options.cache);
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
+    crate::events::scan_file(
+        &home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl"),
+        "claude",
+        &mut cache,
+        &mut false,
+    )
+    .unwrap();
+    drop(cache);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.pragma_update(
+        None,
+        "user_version",
+        crate::events::store::SCHEMA_VERSION - 1,
+    )
+    .unwrap();
+    drop(db);
+
+    let page = call(&mut home.query(), "read_transcript", json!({"id":"lead"}));
+    assert!(
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["text"] == "recovered answer")
+    );
+    assert_ne!(crate::events::EventCache::path(&home.options.cache), path);
+}
+
+#[test]
 fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads() {
     for all in [false, true] {
         for unrelated in [0, 256] {
@@ -4421,7 +4467,11 @@ fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads
                 let id = format!("unrelated-{n}");
                 home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
             }
-            let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            let mut cache = crate::storage::sqlite::open_index(
+                &home.options,
+                &crate::storage::Namespace::local(),
+            )
+            .unwrap();
             crate::model::observe_catalog(
                 &home.options,
                 &mut cache,
@@ -4442,6 +4492,17 @@ fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads
                 .iter()
                 .map(|(tool, args)| baseline.call_at(tool, args, NOW).unwrap())
                 .collect();
+            if unrelated > 0 {
+                let db = rusqlite::Connection::open(crate::events::EventCache::path(
+                    &home.options.cache,
+                ))
+                .unwrap();
+                db.execute(
+                    "UPDATE files SET pending='invalid-json' WHERE path LIKE '%/unrelated-0.jsonl'",
+                    [],
+                )
+                .unwrap();
+            }
             let mut query = home.query();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             for ((tool, args), expected) in tools.iter().zip(expected) {
@@ -5057,7 +5118,9 @@ fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
     let mut shipped = assistant("second", ts(1, 1), vec![text("Shipped.")]);
     shipped["session_id"] = json!("first");
     home.top("second", &[resumed, shipped]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -5090,6 +5153,13 @@ fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
                 .is_none()
         );
     }
+    let activity = call(
+        &mut home.query(),
+        "get_session_activity",
+        json!({"id":"second"}),
+    );
+    assert_eq!(activity["session"]["id"], "second");
+    assert_eq!(activity["items"].as_array().unwrap().len(), 1);
 }
 
 #[test]

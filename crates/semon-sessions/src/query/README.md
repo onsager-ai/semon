@@ -95,9 +95,10 @@ recipe metadata and content-free proof hashes each have a 4 MiB read budget.
 
 Standalone transcript pages use the same origin-local byte proofs over native
 slots derived from the warehouse-selected Index. Focused session detail and
-transcript pages can currently decode unrelated committed sessions while
-assembling handoffs. A selected activity page loads the owner and any
-qualified files that share its native usage evidence.
+transcript pages load the selected lineage and qualified relationship
+and shared-usage dependencies. A selected activity page loads the owner
+and qualified files that share its native usage evidence. The Viewer retained
+history surface serves archive-only sessions.
 
 The opt-in `selected_transcript_tail_scope_measurement` diagnostic grows one
 archived selected session while returning exactly one tail entry. It compares the

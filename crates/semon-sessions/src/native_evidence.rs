@@ -1968,25 +1968,28 @@ impl NativeEvidence {
     pub(crate) fn warehouse_query_at(
         &self,
         now: i64,
-        activity: Option<&str>,
+        focus: Option<&str>,
+        activity_only: bool,
     ) -> io::Result<Arc<model::QueryData>> {
-        if activity.is_none() {
+        if focus.is_none() {
             return self.query_at_with(now, true);
         }
         self.validate_configuration()?;
-        self.read_warehouse_query(now, activity).map(Arc::new)
+        self.read_warehouse_query(now, focus, activity_only)
+            .map(Arc::new)
     }
 
     fn read_warehouse_query(
         &self,
         now: i64,
-        activity: Option<&str>,
+        focus: Option<&str>,
+        activity_only: bool,
     ) -> io::Result<model::QueryData> {
         let namespace = self
             .storage
             .namespace()
             .ok_or_else(|| io::Error::other("Invalid native query namespace"))?;
-        crate::catalog::warehouse::native_query(&self.options, namespace, now, activity)
+        crate::catalog::warehouse::native_query(&self.options, namespace, now, focus, activity_only)
     }
 
     fn query_at_with(&self, now: i64, warehouse: bool) -> io::Result<Arc<model::QueryData>> {
@@ -2033,7 +2036,7 @@ impl NativeEvidence {
             self.validate_configuration()?;
             let snapshot =
                 Snapshot::capture_pids(&self.options, BTreeSet::new(), std::iter::empty());
-            (snapshot, self.read_warehouse_query(now, None)?)
+            (snapshot, self.read_warehouse_query(now, None, false)?)
         } else {
             self.prepare_events(&mut work, now)?;
             let work = &mut *work;

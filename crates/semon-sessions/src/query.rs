@@ -1045,18 +1045,14 @@ impl Query {
         args: &Value,
         now: i64,
     ) -> Result<Value, QueryError> {
-        let activity = if tool == "get_session_activity" || !args["step"].is_null() {
-            args["id"].as_str()
-        } else {
-            None
-        };
+        let focus = args["id"].as_str();
         let parts = self
             .sources
             .machines
             .iter()
             .map(|(key, source)| {
                 let data = source
-                    .warehouse_query_at(now, activity)
+                    .warehouse_query_at(now, focus, tool == "get_session_activity")
                     .map_err(|error| QueryError::io(&error))?;
                 Ok((key.clone(), data))
             })

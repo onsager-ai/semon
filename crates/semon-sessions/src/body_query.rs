@@ -232,7 +232,9 @@ fn search(indexes: &[Index], request: Search, deadline: Instant) -> Result<Value
                 1,
                 FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY,
                 move |context| {
-                    let cwd = context.get::<String>(0)?;
+                    let Some(cwd) = context.get::<Option<String>>(0)? else {
+                        return Ok(None);
+                    };
                     Ok(repos
                         .lock()
                         .map_err(|_| rusqlite::Error::InvalidQuery)?
@@ -268,7 +270,11 @@ fn search(indexes: &[Index], request: Search, deadline: Instant) -> Result<Value
                 JOIN warehouse_source committed ON committed.source=current.source
                     AND committed.origin=s.origin AND committed.carrier=current.path
                 JOIN files f ON f.path=current.path AND f.resume_at=json_extract(committed.ledger,'$.offset')
-                WHERE bs.body_uid=b.body_uid AND f.cwd IS NOT NULL AND semon_body_repo(f.cwd)=?2
+                LEFT JOIN maintenance_cursor cursor ON cursor.source=member.source
+                LEFT JOIN fact_agent_observation agent ON agent.source=cursor.source
+                    AND agent.revision=cursor.sidecar_revision AND agent.present
+                WHERE bs.body_uid=b.body_uid
+                    AND semon_body_repo(coalesce(agent.cwd,f.cwd))=?2
             )) AND (?3 IS NULL OR substr(b.session_uid,1,instr(b.session_uid,'/')-1)=?3)
                AND (?4 IS NULL OR b.part=?4) AND (?5 IS NULL OR b.ts>=?5) AND (?6 IS NULL OR b.ts<=?6)
             ORDER BY bm25(body_fts),b.body_uid LIMIT ?7";
