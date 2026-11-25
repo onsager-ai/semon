@@ -1962,6 +1962,34 @@ impl NativeEvidence {
     }
 
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
+        self.query_at_with(now, false)
+    }
+
+    pub(crate) fn warehouse_query_at(
+        &self,
+        now: i64,
+        activity: Option<&str>,
+    ) -> io::Result<Arc<model::QueryData>> {
+        if activity.is_none() {
+            return self.query_at_with(now, true);
+        }
+        self.validate_configuration()?;
+        self.read_warehouse_query(now, activity).map(Arc::new)
+    }
+
+    fn read_warehouse_query(
+        &self,
+        now: i64,
+        activity: Option<&str>,
+    ) -> io::Result<model::QueryData> {
+        let namespace = self
+            .storage
+            .namespace()
+            .ok_or_else(|| io::Error::other("Invalid native query namespace"))?;
+        crate::catalog::warehouse::native_query(&self.options, namespace, now, activity)
+    }
+
+    fn query_at_with(&self, now: i64, warehouse: bool) -> io::Result<Arc<model::QueryData>> {
         #[cfg(feature = "postgres")]
         if self.storage.is_postgres() {
             self.validate_configuration()?;
@@ -2001,11 +2029,19 @@ impl NativeEvidence {
         if let Some(query) = unchanged() {
             return Ok(query.data.clone());
         }
-        let work = &mut *work;
-        self.prepare_events(work, now)?;
-        let cache = work.events.as_mut().expect("event cache initialized");
-        let mut snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
-        let data = model::build_query(&self.options, cache, &mut false, &mut work.texts, now)?;
+        let (mut snapshot, data) = if warehouse {
+            self.validate_configuration()?;
+            let snapshot =
+                Snapshot::capture_pids(&self.options, BTreeSet::new(), std::iter::empty());
+            (snapshot, self.read_warehouse_query(now, None)?)
+        } else {
+            self.prepare_events(&mut work, now)?;
+            let work = &mut *work;
+            let cache = work.events.as_mut().expect("event cache initialized");
+            let snapshot = Snapshot::capture_pids(&self.options, BTreeSet::new(), cache.paths());
+            let data = model::build_query(&self.options, cache, &mut false, &mut work.texts, now)?;
+            (snapshot, data)
+        };
         if self.options.facts.is_none() {
             snapshot.pids = data
                 .pids

@@ -1045,13 +1045,6 @@ impl Query {
         args: &Value,
         now: i64,
     ) -> Result<Value, QueryError> {
-        self.start = self
-            .sources
-            .machines
-            .iter()
-            .filter_map(|(_, source)| crate::model::scan_cutoff(&source.options, now))
-            .max();
-        self.since(args, now)?;
         let activity = if tool == "get_session_activity" || !args["step"].is_null() {
             args["id"].as_str()
         } else {
@@ -1062,20 +1055,13 @@ impl Query {
             .machines
             .iter()
             .map(|(key, source)| {
-                let namespace = source
-                    .storage
-                    .namespace()
-                    .ok_or_else(|| QueryError::new("io", "Invalid native query namespace"))?;
-                let data = crate::catalog::warehouse::native_query(
-                    &source.options,
-                    namespace,
-                    now,
-                    activity,
-                )
-                .map_err(|error| QueryError::io(&error))?;
-                Ok((key.clone(), Arc::new(data)))
+                let data = source
+                    .warehouse_query_at(now, activity)
+                    .map_err(|error| QueryError::io(&error))?;
+                Ok((key.clone(), data))
             })
             .collect::<Result<Vec<_>, QueryError>>()?;
+        self.start = parts.iter().filter_map(|(_, data)| data.window_start).max();
         self.native = Some(QueryRead::new(parts, usize::MAX));
         let mut answer = match tool {
             "list_sessions" => self.list_sessions(args, now, None),

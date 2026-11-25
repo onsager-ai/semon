@@ -165,22 +165,6 @@ pub fn session_catalog_history_identity(
     )
 }
 
-/// Local multi-source Query must not infer absence or unique ownership from a
-/// provisional discovery. The completeness gate shares the lookup's snapshot.
-pub(crate) fn qualified_history_identity(
-    options: &Options,
-    source_key: &str,
-    key: &str,
-) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
-    catalog_identity(
-        options,
-        source_key,
-        key,
-        CatalogReadScope::RetainedHistory,
-        true,
-    )
-}
-
 pub(crate) fn catalog_identity(
     options: &Options,
     source_key: &str,
