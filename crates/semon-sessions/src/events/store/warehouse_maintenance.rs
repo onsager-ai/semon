@@ -10,7 +10,7 @@ use super::put;
 struct Session {
     id: String,
     parent: Option<String>,
-    nickname: Option<String>,
+    dispatch_name: Option<String>,
     first: Option<i64>,
     continued: bool,
     lineage: bool,
@@ -18,9 +18,9 @@ struct Session {
 
 fn dimension(tx: &Transaction<'_>, source: i64) -> rusqlite::Result<Option<Session>> {
     tx.prepare_cached(
-        "SELECT native_id,parent_id,nickname,first_ts,continued,lineage FROM dim_session WHERE source=?1",
+        "SELECT native_id,parent_id,dispatch_name,first_ts,continued,lineage FROM dim_session WHERE source=?1",
     )?.query_row([source], |r| Ok(Session {
-        id:r.get(0)?, parent:r.get(1)?, nickname:r.get(2)?,
+        id:r.get(0)?, parent:r.get(1)?, dispatch_name:r.get(2)?,
         first:r.get(3)?, continued:r.get(4)?, lineage:r.get(5)?,
     })).optional()
 }
@@ -64,13 +64,14 @@ pub(super) fn maintain(
         && (old.is_none() || harness == "codex")
     {
         put(tx,
-            "INSERT INTO dim_session(source,harness,native_id,parent_id,nickname,agent_path,continued,lineage)
-             SELECT source,?2,native_id,parent_id,nickname,agent_path,0,?4
+            "INSERT INTO dim_session(source,harness,native_id,parent_id,nickname,agent_path,dispatch_name,continued,lineage)
+             SELECT source,?2,native_id,parent_id,nickname,agent_path,dispatch_name,0,?4
              FROM fact_session_observation WHERE source=?1 AND pos=?5 AND block=0 AND kind=?3
              ON CONFLICT(source) DO UPDATE SET native_id=excluded.native_id,parent_id=excluded.parent_id,
-               nickname=excluded.nickname,agent_path=excluded.agent_path
+               nickname=excluded.nickname,agent_path=excluded.agent_path,dispatch_name=excluded.dispatch_name
              WHERE dim_session.native_id IS NOT excluded.native_id OR dim_session.parent_id IS NOT excluded.parent_id
-                OR dim_session.nickname IS NOT excluded.nickname OR dim_session.agent_path IS NOT excluded.agent_path",
+                OR dim_session.nickname IS NOT excluded.nickname OR dim_session.agent_path IS NOT excluded.agent_path
+                OR dim_session.dispatch_name IS NOT excluded.dispatch_name",
             params![source,harness,kind,lineage,identity_pos],
         )?;
     }
@@ -131,8 +132,8 @@ pub(super) fn maintain(
     if harness == "codex" {
         if old.as_ref() != Some(&session)
             && old.as_ref().is_none_or(|old| {
-                (&old.id, &old.parent, &old.nickname)
-                    != (&session.id, &session.parent, &session.nickname)
+                (&old.id, &old.parent, &old.dispatch_name)
+                    != (&session.id, &session.parent, &session.dispatch_name)
             })
         {
             if let Some(old) = &old {
@@ -159,11 +160,11 @@ fn spawn_session_keys(
     session: &Session,
     keys: &mut SpawnKeys,
 ) -> rusqlite::Result<()> {
-    if let (Some(parent), Some(name)) = (&session.parent, &session.nickname) {
+    if let (Some(parent), Some(name)) = (&session.parent, &session.dispatch_name) {
         keys.insert((parent.clone(), name.clone()));
     }
     let mut children = tx.prepare_cached(
-        "SELECT DISTINCT nickname FROM dim_session WHERE harness='codex' AND parent_id=?1 AND nickname IS NOT NULL",
+        "SELECT DISTINCT dispatch_name FROM dim_session WHERE harness='codex' AND parent_id=?1 AND dispatch_name IS NOT NULL",
     )?;
     for row in children.query_map([&session.id], |r| r.get::<_, String>(0))? {
         keys.insert((session.id.clone(), row?));
@@ -181,7 +182,7 @@ fn refresh_spawns(tx: &Transaction<'_>, keys: SpawnKeys) -> rusqlite::Result<()>
     for (id, name) in keys {
         put(tx,
             "DELETE FROM bridge_spawn_placement WHERE child IN (
-                SELECT native_id FROM dim_session WHERE harness='codex' AND parent_id=?1 AND nickname=?2
+                SELECT native_id FROM dim_session WHERE harness='codex' AND parent_id=?1 AND dispatch_name=?2
              )", params![id,name],
         )?;
         put(tx,
@@ -189,11 +190,8 @@ fn refresh_spawns(tx: &Transaction<'_>, keys: SpawnKeys) -> rusqlite::Result<()>
                  SELECT min(source) source FROM dim_session WHERE harness='codex' AND native_id=?1
                  HAVING count(*)=1
              ), child AS (
-                 SELECT min(d.native_id) id FROM dim_session d
-                 LEFT JOIN fact_session_observation header ON header.source=d.source
-                   AND header.pos=-1 AND header.block=0 AND header.kind='header' AND header.occurrence=0
-                 WHERE d.harness='codex' AND d.parent_id=?1 AND d.nickname=?2
-                   AND NOT coalesce(json_extract(header.metadata,'$.guardian_review'),0)
+                 SELECT min(native_id) id FROM dim_session
+                 WHERE harness='codex' AND parent_id=?1 AND dispatch_name=?2
                  HAVING count(*)=1
              ), call AS (
                  SELECT min(c.source) source,min(c.pos) pos,min(c.ts) ts FROM parent p

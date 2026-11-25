@@ -68,7 +68,7 @@ CREATE INDEX warehouse_identity_member_native ON warehouse_identity_member(json_
 CREATE TABLE fact_session_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER,
-  native_id TEXT NOT NULL, parent_id TEXT, nickname TEXT, agent_path TEXT, metadata TEXT,
+  native_id TEXT NOT NULL, parent_id TEXT, nickname TEXT, agent_path TEXT, dispatch_name TEXT, metadata TEXT,
   PRIMARY KEY(source,pos,block,kind,occurrence)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_record (
@@ -236,7 +236,7 @@ CREATE TABLE maintenance_cursor (
 ) STRICT;
 CREATE TABLE dim_session (
   source INTEGER PRIMARY KEY, harness TEXT NOT NULL, native_id TEXT NOT NULL,
-  parent_id TEXT, nickname TEXT, agent_path TEXT,
+  parent_id TEXT, nickname TEXT, agent_path TEXT, dispatch_name TEXT,
   first_ts INTEGER, last_ts INTEGER, title_pos INTEGER, model TEXT,
   model_pos INTEGER, prompt_pos INTEGER, effort TEXT, continued INTEGER NOT NULL,
   lineage INTEGER NOT NULL
@@ -256,7 +256,7 @@ CREATE INDEX spawn_parent ON bridge_spawn_placement(parent_source);
 CREATE INDEX relation_endpoint ON fact_relation_observation(target,kind,source);
 CREATE INDEX session_native ON dim_session(harness,native_id);
 CREATE INDEX session_native_key ON dim_session(native_id,harness,source);
-CREATE INDEX session_parent_name ON dim_session(harness,parent_id,nickname);
+CREATE INDEX session_parent_name ON dim_session(harness,parent_id,dispatch_name);
 CREATE INDEX spawn_call_name ON fact_tool_call(source,tool,task_name);
 CREATE INDEX record_uuid ON fact_record(source,uuid);
 CREATE INDEX record_timed_offset ON fact_record(source,pos) WHERE ts IS NOT NULL AND NOT gap;

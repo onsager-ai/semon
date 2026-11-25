@@ -99,7 +99,7 @@ pub(super) fn report(
     let sessions = runtime
         .as_object_mut()
         .and_then(|value| value.remove("sessions"));
-    for member in members {
+    for member in members.iter_mut() {
         let live = member["session_uid"]
             .as_str()
             .and_then(native_identity)

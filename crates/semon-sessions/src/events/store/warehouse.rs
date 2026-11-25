@@ -411,9 +411,18 @@ fn session(
 ) -> rusqlite::Result<()> {
     let metadata = meta.map(json).transpose()?;
     let attr = |key| meta?.get(key)?.as_str();
+    let guardian = meta
+        .and_then(|m| m.get("guardian_review"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let dispatch_name = if guardian {
+        None
+    } else {
+        crate::model::codex_dispatch_name(attr("path"), attr("nickname"))
+    };
     fact!(tx, fact_session_observation, [source=>source,pos=>pos,block=>0,kind=>kind,
         occurrence=>occurrence,ordinal=>ordinal,native_id=>native_id,parent_id=>attr("parent_thread"),
-        nickname=>attr("nickname"),agent_path=>attr("path"),metadata=>metadata])
+        nickname=>attr("nickname"),agent_path=>attr("path"),dispatch_name=>dispatch_name,metadata=>metadata])
 }
 
 fn write_sidecar(

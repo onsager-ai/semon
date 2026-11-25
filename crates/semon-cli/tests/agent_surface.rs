@@ -1212,8 +1212,13 @@ fn lane_health_reports_worker_dispositions_and_keeps_guardian_in_family() {
                 &format!("{project}/lane-manager/subagents/agent-{worker}.meta.json"),
                 &json!({"toolUseId":call}).to_string(),
             );
+            let task = if *worker == "completed" {
+                "audit_parser"
+            } else {
+                worker
+            };
             codex_parent.push(codex("response_item", json!({"type":"function_call","name":"spawn_agent",
-                "call_id":call, "arguments":json!({"task_name":worker,"prompt":private}).to_string()})));
+                "call_id":call, "arguments":json!({"task_name":task,"prompt":private}).to_string()})));
         }
         let mut final_reply = assistant(
             worker,
@@ -1238,11 +1243,18 @@ fn lane_health_reports_worker_dispositions_and_keeps_guardian_in_family() {
                     "<task-notification><tool-use-id>{call}</tool-use-id><status>failed</status><result>{private}</result></task-notification>"
                 )}}));
         }
-        let mut records = codex_prefix(
-            worker,
-            json!({"id":worker,"thread_source":"subagent",
-            "parent_thread_id":"lane-manager","agent_nickname":worker}),
-        );
+        let mut header = json!({"id":worker,"thread_source":"subagent",
+            "parent_thread_id":"lane-manager","agent_nickname":worker});
+        if *worker == "completed" {
+            header["agent_path"] = json!("/root/audit_parser");
+            header["agent_nickname"] = json!("Socrates");
+            codex_parent.push(codex(
+                "response_item",
+                json!({"type":"function_call","name":"spawn_agent",
+                "call_id":"nickname-decoy", "arguments":"{\"task_name\":\"Socrates\"}"}),
+            ));
+        }
+        let mut records = codex_prefix(worker, header);
         records.push(codex(
             "event_msg",
             json!({"type":"task_started","turn_id":"turn"}),
@@ -1278,7 +1290,7 @@ fn lane_health_reports_worker_dispositions_and_keeps_guardian_in_family() {
     home.lines("codex/sessions/2026/09/24/rollout-guardian.jsonl", &codex_prefix("guardian", json!({
         "id":"guardian", "thread_source":"guardian_review", "parent_thread_id":"lane-manager",
         // A matching name would otherwise compete for the Worker's dispatch.
-        "agent_nickname":"completed"
+        "agent_nickname":"audit_parser"
     })));
 
     let published = home.semon(&["analytics", "materialize"]);

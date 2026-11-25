@@ -987,6 +987,15 @@ pub(crate) struct CodexMeta {
     guardian_review: bool,
 }
 
+pub(crate) fn codex_dispatch_name<'a>(
+    path: Option<&'a str>,
+    nickname: Option<&'a str>,
+) -> Option<&'a str> {
+    path.and_then(|path| path.rsplit('/').next())
+        .filter(|task| !task.is_empty())
+        .or(nickname)
+}
+
 impl CodexMeta {
     pub(crate) fn from_meta(meta: &Value) -> Self {
         Self {
@@ -3746,15 +3755,7 @@ impl<'a> Builder<'a> {
             let Some(&spawner) = self.by_native.get(&("codex", parent.clone())) else {
                 return Ok((None, None, false));
             };
-            let names: Vec<String> = meta
-                .path
-                .as_deref()
-                .and_then(|path| path.rsplit('/').next())
-                .filter(|task| !task.is_empty())
-                .or(meta.nickname.as_deref())
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
+            let name = codex_dispatch_name(meta.path.as_deref(), meta.nickname.as_deref());
             // Neither the child's rollout nor `spawn_agent`'s output (only
             // `{task_name}`) names the other side. So a call is placed only
             // when it is the spawner's one `spawn_agent` call for this task
@@ -3777,7 +3778,7 @@ impl<'a> Builder<'a> {
                 let task = self.text(at, "task_name", |record, block| {
                     input_string(record, block, &["task_name"])
                 });
-                if let Some(task) = task.filter(|task| names.contains(task)) {
+                if let Some(task) = task.filter(|task| name == Some(task.as_str())) {
                     matching.push((at, task));
                 }
             }
@@ -3787,8 +3788,7 @@ impl<'a> Builder<'a> {
                     .filter(|file| {
                         matches!(&file.role, Role::Codex(other)
                             if other.parent_thread.as_deref() == Some(parent.as_str())
-                                && other.path.as_deref().and_then(|path| path.rsplit('/').next())
-                                    .filter(|task| !task.is_empty()).or(other.nickname.as_deref()) == Some(task))
+                                && codex_dispatch_name(other.path.as_deref(), other.nickname.as_deref()) == Some(task))
                     })
                     .count()
             };
