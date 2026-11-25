@@ -4023,7 +4023,11 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
             "toolUseResult":{"success":false,"message":"missing peer"}}),
     ]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache = crate::storage::sqlite::open_index(
+        &home.options,
+        &crate::storage::Namespace::new("a").unwrap(),
+    )
+    .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4159,7 +4163,9 @@ fn unsent_query_uses_indexed_bookmark_evidence() {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
             "toolUseResult":{"success":false,"message":"missing peer"}}),
     ]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4407,6 +4413,60 @@ fn focused_native_identity_collision_context_refuses_an_overbound_closure() {
         error
             .to_string()
             .contains("closure exceeds its source bound")
+    );
+}
+
+#[test]
+fn focused_native_queries_keep_cold_parent_and_indexed_sibling_relay() {
+    let home = Home::new("focused-sibling-relay");
+    home.top("lead", &[
+        human("lead", ts(1, 0), "Start workers"),
+        assistant("lead", ts(1, 1), vec![
+            tool("launch-a", "Agent", json!({"prompt":"first worker"})),
+            tool("launch-b", "Agent", json!({"prompt":"second worker"})),
+        ]),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"launch-a","content":"launched"}]},"toolUseResult":{"status":"async_launched","agentId":"worker-a"}}),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"launch-b","content":"launched"}]},"toolUseResult":{"status":"async_launched","agentId":"worker-b"}}),
+    ]);
+    home.agent("lead", "worker-a", "launch-a", &[
+        user("lead", ts(1, 2), "first worker"),
+        assistant("lead", ts(1, 3), vec![tool("send", "SendMessage", json!({"to":"worker-b","message":"sibling note"}))]),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,4),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]},"toolUseResult":{"success":true,"msg_id":"sibling-relay"}}),
+    ]);
+    home.agent("lead", "worker-b", "launch-b", &[
+        user("lead", ts(1, 2), "second worker"),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,5),"origin":{"kind":"peer","from":"worker-a","senderTaskId":"worker-a","name":"worker-a","msg_id":"sibling-relay","body":"sibling note"},"message":{"role":"user","content":"<cross-session-message from=\"worker-a\" from-name=\"worker-a\">sibling note</cross-session-message>"}}),
+    ]);
+    let mut query = home.query();
+    let cold = call(&mut query, "get_session", json!({"id":"worker-b"}));
+    assert_eq!(cold["session"]["parent"], "lead");
+    assert!(
+        cold["session"]["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|handoff| handoff["kind"] == "spawn" && handoff["from"] == "lead")
+    );
+    call(&mut query, "list_sessions", json!({}));
+    let detail = call(&mut query, "get_session", json!({"id":"worker-b"}));
+    let relay = detail["session"]["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|handoff| {
+            handoff["kind"] == "relay"
+                && handoff["from"] == "worker-a"
+                && handoff["to"] == "worker-b"
+        })
+        .expect("the indexed sibling send matches the receipt");
+    assert_eq!(relay["brief"], "sibling note");
+    let transcript = call(&mut query, "read_transcript", json!({"id":"worker-b"}));
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == relay["id"])
     );
 }
 
@@ -4906,7 +4966,9 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
             )
             .unwrap();
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,

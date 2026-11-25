@@ -1627,6 +1627,44 @@ pub(crate) fn after_transcript_body(hook: impl FnOnce(usize) + 'static) {
     selected::AFTER_BODY.with(|slot| slot.replace(Some(Box::new(hook))));
 }
 
+const NATIVE_QUERY_RELAY_PEERS: &str = "
+WITH members(source) AS MATERIALIZED (
+    SELECT member.source FROM json_each(?1) owners
+    JOIN lineage_member root ON root.source=owners.value
+    JOIN lineage_member member ON member.component=root.component
+), peers(source) AS (
+    SELECT sent.source FROM members m
+    JOIN fact_relay_receipt receipt ON receipt.source=m.source
+    JOIN fact_relay_result sent ON sent.correlation=receipt.correlation
+        AND sent.correlation IS NOT NULL AND NOT sent.failed
+    JOIN fact_relay_send call ON call.source=sent.source AND call.call_id=sent.call_id
+        AND (sent.call_pos IS NULL OR (call.pos=sent.call_pos AND call.block=sent.call_block))
+    UNION
+    SELECT receipt.source FROM members m
+    JOIN fact_relay_send call ON call.source=m.source
+    JOIN fact_relay_result sent ON sent.source=call.source AND sent.call_id=call.call_id
+        AND NOT sent.failed AND (sent.call_pos IS NULL OR (call.pos=sent.call_pos AND call.block=sent.call_block))
+    JOIN fact_relay_receipt receipt ON receipt.correlation=sent.correlation
+    UNION
+    SELECT sender.source FROM members m
+    JOIN fact_subagent_event receipt ON receipt.source=m.source AND receipt.kind='agm'
+    JOIN dim_session sender ON sender.harness='claude'
+        AND sender.native_id IN (receipt.id,receipt.peer_sock)
+    WHERE (receipt.flags & ?2)<>0
+    UNION
+    SELECT sent.source FROM members m
+    JOIN dim_session receiver ON receiver.source=m.source AND receiver.harness='claude' AND NOT receiver.lineage
+    JOIN fact_relay_send sent ON sent.target=receiver.native_id
+    UNION
+    SELECT receiver.source FROM members m
+    JOIN fact_relay_send sent ON sent.source=m.source
+    JOIN dim_session receiver ON receiver.harness='claude' AND NOT receiver.lineage
+        AND receiver.native_id=sent.target
+)
+SELECT DISTINCT ownership.owner FROM peers
+JOIN warehouse_current current ON current.source=peers.source
+JOIN bridge_session_owner ownership ON ownership.source=peers.source";
+
 fn native_query_paths(
     db: &Connection,
     source: &Source<'_>,
@@ -1651,11 +1689,58 @@ fn native_query_paths(
             .collect::<rusqlite::Result<BTreeSet<_>>>()
             .map_err(index)?
     };
+    if owners.is_empty() && !activity_only {
+        let bare = key.rsplit_once('@').map_or(key, |(bare, _)| bare);
+        if let Some(target) = bare.strip_prefix("unsent:") {
+            let mut sends = db
+                .prepare_cached(
+                    "SELECT DISTINCT ownership.owner FROM fact_relay_send send
+                 JOIN warehouse_current current ON current.source=send.source
+                 JOIN bridge_session_owner ownership ON ownership.source=send.source
+                 WHERE send.target=?1",
+                )
+                .map_err(index)?;
+            owners.extend(
+                sends
+                    .query_map([target], |row| row.get::<_, i64>(0))
+                    .map_err(index)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(index)?,
+            );
+        } else if bare.starts_with("peer-") {
+            let mut sends = db
+                .prepare_cached(
+                    "SELECT DISTINCT ownership.owner,send.target FROM fact_relay_send send
+                 JOIN warehouse_current current ON current.source=send.source
+                 JOIN bridge_session_owner ownership ON ownership.source=send.source",
+                )
+                .map_err(index)?;
+            let mut rows = sends.query([]).map_err(index)?;
+            while let Some(row) = rows.next().map_err(index)? {
+                let target: String = row.get(1).map_err(index)?;
+                let hash =
+                    crate::model::fnv(&format!("name:{}", crate::model::plain_name(&target)));
+                if bare == format!("peer-{hash:016x}") {
+                    owners.insert(row.get(0).map_err(index)?);
+                }
+            }
+        }
+    }
     if !activity_only {
+        let selected = encode(&owners)?;
         let mut parents = parents::Parents::new(db)?;
         for owner in owners.clone() {
             owners.extend(parents.ancestors(owner)?.0);
             owners.extend(parents.owner_children(owner)?);
+        }
+        let mut relays = db.prepare_cached(NATIVE_QUERY_RELAY_PEERS).map_err(index)?;
+        for owner in relays
+            .query_map(params![selected, crate::events::AGM_PROGRESS], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(index)?
+        {
+            owners.insert(owner.map_err(index)?);
         }
     }
     selected_related_paths(db, source, &encode(&owners)?, true)
@@ -1693,6 +1778,7 @@ pub(crate) fn native_query(
         options,
         namespace,
         cutoff,
+        focus.is_some() && !activity_only,
         |input, path| {
             let Some(key) = focus else { return Ok(true) };
             if path.to_str().is_some_and(|path| prior_paths.contains(path)) {
