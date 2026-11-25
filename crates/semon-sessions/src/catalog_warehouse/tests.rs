@@ -4316,6 +4316,54 @@ fn warehouse_home_result_preserves_the_human_turn_through_its_spawn_notification
 }
 
 #[test]
+fn warehouse_home_result_work_stays_within_the_selected_lineage() {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(include_str!("../events/store/warehouse.sql"))
+        .unwrap();
+    db.execute_batch(
+        "INSERT INTO dim_session(source,harness,native_id,continued,lineage)
+           VALUES (1,'codex','selected',0,0),(2,'codex','unrelated',0,0);
+         INSERT INTO lineage_member VALUES (1,1),(2,2);
+         INSERT INTO warehouse_source VALUES
+           (1,'local','codex','selected',1,'selected','{}'),
+           (2,'local','codex','unrelated',1,'unrelated','{}');
+         INSERT INTO warehouse_prefix VALUES (1,1,100,'{}',0,0),(2,2,10000,'{}',0,0);
+         INSERT INTO fact_record(source,pos,block,occurrence,ts,gap)
+           VALUES (1,10,0,0,10,0),(1,20,0,0,20,0);
+         INSERT INTO fact_prompt(source,pos,block,kind,occurrence,ts) VALUES (1,10,0,'user',0,10);
+         INSERT INTO fact_subagent_event(source,pos,block,kind,occurrence,ts,flags)
+           VALUES (1,20,0,'assistant',0,20,0);",
+    )
+    .unwrap();
+    let read = || {
+        let mut query = db.prepare(include_str!("home_result_feed.sql")).unwrap();
+        let result = query
+            .query_row(params![1, 0, crate::events::AGM_FINAL], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap();
+        assert_eq!(result, ("selected".into(), 20));
+        query.get_status(rusqlite::StatementStatus::VmStep)
+    };
+    let baseline = read();
+    db.execute_batch(
+        "WITH RECURSIVE positions(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM positions WHERE n<4096)
+           INSERT INTO fact_record(source,pos,block,occurrence,ts,gap)
+           SELECT 2,n,0,0,n,n%2 FROM positions;
+         INSERT INTO fact_prompt(source,pos,block,kind,occurrence,ts)
+           SELECT source,pos,block,'user',occurrence,ts FROM fact_record WHERE source=2 AND NOT gap;
+         INSERT INTO fact_subagent_event(source,pos,block,kind,occurrence,ts,flags)
+           SELECT source,pos,block,'assistant',occurrence,ts,0 FROM fact_record WHERE source=2 AND NOT gap;",
+    )
+    .unwrap();
+    let populated = read();
+    assert!(
+        populated <= baseline + 100,
+        "VM steps: {baseline} -> {populated}"
+    );
+}
+
+#[test]
 fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
     let mut fixture = Fixture::new("list-runtime");
     let path = fixture.claude("native", "Runtime fixture");

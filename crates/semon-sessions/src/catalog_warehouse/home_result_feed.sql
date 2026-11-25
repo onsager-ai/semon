@@ -11,18 +11,25 @@ WITH members AS MATERIALIZED (
   JOIN members old ON old.source=e.source AND old.end>e.pos
   JOIN dim_session d ON d.source=old.source AND d.lineage
   WHERE m.harness='claude' AND m.source<>old.source
-), visible AS (
+),
+-- Drive each arm of the union from the selected lineage. Joining the union
+-- afterwards lets SQLite materialize the warehouse's fact tables per owner.
+member_events AS (
+  SELECT e.source,e.pos,e.block,e.occurrence,e.ts,e.kind,e.id,e.name,e.flags,m.native_id,m.harness
+  FROM members m CROSS JOIN fact_subagent_event e ON e.source=m.source AND e.pos<m.end
+  WHERE e.kind IN ('assistant','agm','xsm','tn') OR (e.kind='tool' AND e.name='SubagentHandback')
+  UNION ALL
+  SELECT p.source,p.pos,p.block,p.occurrence,p.ts,p.kind,NULL,NULL,0,m.native_id,m.harness
+  FROM members m CROSS JOIN fact_prompt p ON p.source=m.source AND p.pos<m.end
+  UNION ALL
+  SELECT r.source,r.pos,r.block,r.occurrence,r.ts,'gap',NULL,NULL,0,m.native_id,m.harness
+  FROM members m CROSS JOIN fact_record r ON r.source=m.source AND r.pos<m.end
+  WHERE r.gap AND r.block=0
+), visible AS MATERIALIZED (
   SELECT a.source,a.pos,a.block,a.occurrence,coalesce(a.ts,r.ts,-9223372036854775808) AS ts,
-    a.kind,a.id,a.name,a.flags,m.native_id,m.harness
-  FROM members m JOIN (
-    SELECT source,pos,block,occurrence,ts,kind,id,name,flags FROM fact_subagent_event
-      WHERE kind IN ('assistant','agm','xsm','tn') OR (kind='tool' AND name='SubagentHandback')
-    UNION ALL
-    SELECT source,pos,block,occurrence,ts,kind,NULL,NULL,0 FROM fact_prompt
-    UNION ALL
-    SELECT source,pos,block,occurrence,ts,'gap',NULL,NULL,0 FROM fact_record WHERE gap AND block=0
-  ) a ON a.source=m.source AND a.pos<m.end
-  JOIN fact_record r ON r.source=a.source AND r.pos=a.pos AND r.block=0 AND r.gap=(a.kind='gap')
+    a.kind,a.id,a.name,a.flags,a.native_id,a.harness
+  FROM member_events a
+  CROSS JOIN fact_record r ON r.source=a.source AND r.pos=a.pos AND r.block=0 AND r.gap=(a.kind='gap')
   WHERE NOT EXISTS (SELECT 1 FROM copies x JOIN fact_record old ON old.source=x.source
     AND old.uuid=r.uuid AND old.pos<x.end WHERE x.target=a.source)
 ), answer AS MATERIALIZED (
@@ -46,7 +53,7 @@ WITH members AS MATERIALIZED (
         JOIN fact_agent_observation agent ON agent.source=child.source AND agent.revision=current.sidecar_revision
         JOIN members parent ON parent.native_id=agent.storage_parent
         WHERE child.harness='claude' AND agent.present
-          AND (child.native_id=p.id OR (p.kind='agm' AND child.native_id=p.name))
+          AND child.native_id IN (p.id, CASE WHEN p.kind='agm' THEN p.name END)
           AND NOT EXISTS (
             SELECT 1 FROM fact_claude_call elsewhere WHERE elsewhere.call_id=agent.call_id
               AND elsewhere.tool IN ('Agent','Task') AND NOT EXISTS (

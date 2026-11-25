@@ -1297,7 +1297,7 @@ impl ViewerCore {
                     }
                 })
                 .collect();
-            return crate::session_overview_reply(
+            let overview = crate::overview::session_overview_reply_with_deadline(
                 &sources,
                 if path.ends_with("analytics") {
                     "analytics"
@@ -1306,8 +1306,16 @@ impl ViewerCore {
                 },
                 query,
                 crate::model::now_ms(),
-            )
-            .unwrap_or_else(|error| failed(&error));
+                (path == "/api/viewer/home").then_some(deadline),
+            );
+            return match overview {
+                Ok(reply) => reply,
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => retryable(text(
+                    503,
+                    "Home took too long to read. Try again or select a machine.",
+                )),
+                Err(error) => failed(&error),
+            };
         }
         if matches!(
             path,
@@ -2008,6 +2016,21 @@ impl ViewerCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_home_read_is_retryable() {
+        let core = ViewerCore::with_machines(Vec::new());
+        let reply = core.respond_with_deadline(
+            &Extras::default(),
+            "GET",
+            "/api/viewer/home",
+            "",
+            None,
+            Instant::now(),
+        );
+        assert_eq!(reply.status, 503);
+        assert!(reply.extra_headers.contains(&("Retry-After", "1".into())));
+    }
 
     #[test]
     fn native_id_redirect_resolves_missing_and_cross_machine_ambiguity() {
