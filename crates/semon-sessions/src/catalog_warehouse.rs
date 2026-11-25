@@ -1817,12 +1817,15 @@ fn native_lineage_aliases(
     let mut aliases = BTreeMap::<_, Option<&str>>::new();
     while let Some(row) = rows.next()? {
         let harness: String = row.get(0)?;
-        let active: String = row.get(1)?;
-        let alias: String = row.get(2)?;
-        let Some(key) = data.native_keys.get(&(harness.as_str(), active)) else {
+        let Some(harness) = crate::InputRoot::parse(&harness).map(crate::InputRoot::as_str) else {
             continue;
         };
-        let alias = (data.sessions[key].harness, alias);
+        let active: String = row.get(1)?;
+        let alias: String = row.get(2)?;
+        let Some(key) = data.native_keys.get(&(harness, active)) else {
+            continue;
+        };
+        let alias = (harness, alias);
         if data.native_keys.contains_key(&alias) {
             continue;
         }
