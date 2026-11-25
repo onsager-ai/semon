@@ -2350,15 +2350,15 @@ impl semon_sessions::McpExtension for AsiMcp {
 }
 
 #[cfg(feature = "asi-query")]
-fn asi_store_root(home: &HomeArgs) -> Option<PathBuf> {
-    let index_path = semon_sessions::analytics_index_path(&home.options.cache);
-    let store_root = semon_sessions::analytics_store_root(&index_path)?;
-    admit_coverage_store(&index_path, &store_root).ok()?;
+fn asi_store_root(index_path: &Path) -> Option<PathBuf> {
+    let store_root = semon_sessions::analytics_store_root(index_path)?;
+    admit_coverage_store(index_path, &store_root).ok()?;
     Some(store_root)
 }
 
 #[cfg(feature = "asi-query")]
 fn run_asi_query(args: AsiQueryArgs) -> Result<(), String> {
+    let index = semon_sessions::analytics_index_path(&args.home.options.cache);
     let extension = AsiMcp {
         executable: env::current_exe().map_err(|error| error.to_string())?,
         store_root: if matches!(args.tool.as_str(), "search" | "view")
@@ -2366,9 +2366,9 @@ fn run_asi_query(args: AsiQueryArgs) -> Result<(), String> {
         {
             None
         } else {
-            asi_store_root(&args.home)
+            asi_store_root(&index)
         },
-        index: semon_sessions::analytics_index_path(&args.home.options.cache),
+        index,
         remote: !args.home.machines.is_empty(),
     };
     let value = match args.tool.as_str() {
@@ -2435,14 +2435,15 @@ fn run_mcp(home: &HomeArgs) -> Result<(), String> {
     let mut query = home.query();
     #[cfg(feature = "asi-query")]
     {
+        let index = semon_sessions::analytics_index_path(&home.options.cache);
         let mut extension = AsiMcp {
             executable: env::current_exe().map_err(|error| error.to_string())?,
             store_root: if home.machines.is_empty() {
-                asi_store_root(home)
+                asi_store_root(&index)
             } else {
                 None
             },
-            index: semon_sessions::analytics_index_path(&home.options.cache),
+            index,
             remote: !home.machines.is_empty(),
         };
         semon_sessions::serve_mcp_with_extension(

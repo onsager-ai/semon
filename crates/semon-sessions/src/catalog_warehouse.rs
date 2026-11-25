@@ -1794,6 +1794,55 @@ fn native_query_paths(
     selected_related_paths(db, source, &encode(&owners)?, true)
 }
 
+/// Native Query only renders sources inside the scan window. Match those
+/// presentation keys to the full committed lineage without reading older logs.
+fn native_lineage_aliases(
+    db: &Connection,
+    namespace: &Namespace,
+    paths: &str,
+    data: &mut crate::model::QueryData,
+) -> rusqlite::Result<()> {
+    let mut statement = db.prepare_cached(
+        "SELECT DISTINCT active.harness, active.native_id, alias.native_id
+         FROM json_each(?1) admitted
+         JOIN warehouse_current c ON c.path=admitted.value
+         JOIN warehouse_source s ON s.source=c.source AND s.origin=?2 AND s.carrier=c.path
+         JOIN dim_session active ON active.source=c.source
+         JOIN lineage_member m ON m.source=c.source
+         JOIN lineage_member peer ON peer.component=m.component AND peer.source<>m.source
+         JOIN warehouse_source peer_source ON peer_source.source=peer.source AND peer_source.origin=s.origin
+         JOIN dim_session alias ON alias.source=peer.source AND alias.harness=active.harness",
+    )?;
+    let mut rows = statement.query(params![paths, namespace.binding()])?;
+    let mut aliases = BTreeMap::<_, Option<&str>>::new();
+    while let Some(row) = rows.next()? {
+        let harness: String = row.get(0)?;
+        let active: String = row.get(1)?;
+        let alias: String = row.get(2)?;
+        let Some(key) = data.native_keys.get(&(harness.as_str(), active)) else {
+            continue;
+        };
+        let alias = (data.sessions[key].harness, alias);
+        if data.native_keys.contains_key(&alias) {
+            continue;
+        }
+        aliases
+            .entry(alias)
+            .and_modify(|prior| {
+                if *prior != Some(key.as_str()) {
+                    *prior = None;
+                }
+            })
+            .or_insert(Some(key.as_str()));
+    }
+    let aliases: Vec<_> = aliases
+        .into_iter()
+        .filter_map(|(identity, key)| Some((identity, key?.to_owned())))
+        .collect();
+    data.native_keys.extend(aliases);
+    Ok(())
+}
+
 /// Native query wire fields still use the shared session model. The warehouse
 /// selects and qualifies its native Index inputs before any event rows load.
 pub(crate) fn native_query(
@@ -1928,8 +1977,11 @@ pub(crate) fn native_query(
     let members: Vec<_> = sources.iter().map(|(_, member)| member.clone()).collect();
     let mut cache =
         EventCache::from_selected(&db, &members, &ids).map_err(std::io::Error::other)?;
-    let data =
+    let mut data =
         crate::model::query_warehouse(options, &mut cache, sources, skipped, &usage, now, focus)?;
+    if focus.is_none() && cutoff.is_some() {
+        native_lineage_aliases(&db, namespace, &paths, &mut data).map_err(std::io::Error::other)?;
+    }
     source.validate_authority().map_err(std::io::Error::other)?;
     Ok(data)
 }

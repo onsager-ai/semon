@@ -156,8 +156,9 @@ impl Home {
         let output = self.semon(&all);
         assert!(
             output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "{args:?}: {}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
         );
         let text = String::from_utf8(output.stdout).unwrap();
         assert_eq!(text.lines().count(), 1, "--json is one line: {text}");
@@ -1067,5 +1068,83 @@ fn lane_health_reports_published_agent_lineage_in_cli_and_mcp() {
         mcp["runtime"][key] = Value::Null;
     }
     assert_eq!(mcp, report);
+    server.finish();
+}
+
+#[cfg(feature = "asi-query")]
+#[test]
+fn lane_health_matches_active_continuation_and_discovers_first_publication() {
+    let mut home = Home::new();
+    let original = "claude/projects/-work-proj/resume-root.jsonl";
+    home.lines(
+        original,
+        &[
+            human("resume-root", ts(7, 0), "Original prompt"),
+            assistant("resume-root", ts(7, 1), json!([{"type":"text","text":"Original reply"}])),
+            json!({"type":"continued-in", "sessionId":"resume-root", "continuedInSessionId":"resume-active"}),
+        ],
+    );
+    fs::File::options()
+        .write(true)
+        .open(home.root.join(original))
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1)),
+        )
+        .unwrap();
+    home.lines(
+        "claude/projects/-work-proj/resume-active.jsonl",
+        &[human("resume-active", ts(8, 0), "Resumed prompt")],
+    );
+    home.write(
+        "claude/sessions/31.json",
+        &json!({"pid":31, "sessionId":"resume-active", "procStart":777, "status":"busy", "updatedAt":at(8, 0)}).to_string(),
+    );
+
+    home.window = vec!["--since", "1d"];
+    let mut server = Server::start(&home);
+    let (error, failed) = content(&server.call(
+        1,
+        "lane_health",
+        json!({"root_session_uid":"origin/claude/resume-root"}),
+    ));
+    assert!(failed);
+    assert_eq!(error["error"]["code"], "store_unavailable");
+
+    home.window = vec!["--all"];
+    let published = home.semon(&["analytics", "materialize"]);
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    home.window = vec!["--since", "1d"];
+    let namespace = semon_sessions::read_analytics_namespace(&home.root.join("state"))
+        .unwrap()
+        .unwrap();
+    let uid = format!("{namespace}/claude/resume-root");
+    let native = home.query(&["query", "list_sessions"]);
+    let sessions = native["sessions"].as_array().unwrap();
+    assert!(
+        !sessions
+            .iter()
+            .any(|session| session["id"] == "resume-root")
+    );
+    let active = sessions
+        .iter()
+        .find(|session| session["id"] == "resume-active")
+        .unwrap();
+    assert_eq!(active["alive"], true);
+    assert_eq!(active["state"], "working");
+    let expected =
+        json!({"state":active["state"],"alive":true,"last_activity":active["last_activity"]});
+    let (mcp, failed) = content(&server.call(2, "lane_health", json!({"root_session_uid":uid})));
+    assert!(!failed, "{mcp}");
+    let cli = home.query(&["query", "lane_health", &uid]);
+    for report in [&cli, &mcp] {
+        assert_eq!(report["members"].as_array().unwrap().len(), 1);
+        assert_eq!(report["members"][0]["session_uid"], uid);
+        assert_eq!(report["members"][0]["live"], expected);
+    }
     server.finish();
 }

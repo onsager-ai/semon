@@ -1,10 +1,10 @@
 compactions_by_session AS (
     SELECT session_uid, count(*) AS compaction_count,
-        list(struct_pack(
-            uid := uid, timestamp := ts_ms, trigger := trigger, pre_tokens := pre_tokens,
-            post_refill_tokens := post_refill_tokens, early := early,
-            storm := storm
-        ) ORDER BY ts_ms NULLS LAST, uid) AS compactions
+        list({
+            'uid': uid, 'timestamp': ts_ms, 'trigger': trigger, 'pre_tokens': pre_tokens,
+            'post_refill_tokens': post_refill_tokens, 'early': early,
+            'storm': storm
+        } ORDER BY ts_ms NULLS LAST, uid) AS compactions
     FROM context_points WHERE kind = 'compaction' GROUP BY session_uid
 ), members AS (
     SELECT d.session_uid, d.parent_session_uid,
@@ -35,19 +35,19 @@ compactions_by_session AS (
     FROM owners o LEFT JOIN steps s USING (usage_owner) GROUP BY o.usage_owner
 )
 SELECT r.session_uid AS root_session_uid,
-    (SELECT list(struct_pack(
-        session_uid := session_uid, parent_session_uid := parent_session_uid,
-        compaction_count := compaction_count, compactions := compactions
-    ) ORDER BY session_uid) FROM members) AS members,
+    (SELECT list({
+        'session_uid': session_uid, 'parent_session_uid': parent_session_uid,
+        'compaction_count': compaction_count, 'compactions': compactions
+    } ORDER BY session_uid) FROM members) AS members,
     (SELECT COALESCE(list(session_uid ORDER BY session_uid), []) FROM observed_children) AS observed_children,
-    (SELECT COALESCE(list(struct_pack(tool_key := tool_key, command_tag := command_tag, calls := calls)
+    (SELECT COALESCE(list({'tool_key': tool_key, 'command_tag': command_tag, 'calls': calls}
         ORDER BY calls DESC, tool_key, command_tag NULLS LAST), []) FROM tool_mix) AS manager_tool_mix,
-    (SELECT list(struct_pack(
-        usage_owner := usage_owner, steps := steps, priced_steps := priced_steps,
-        unpriced_steps := unpriced_steps, priced_usd_est := priced_usd_est,
-        input_tokens := input_tokens, output_tokens := output_tokens, cache_read_tokens := cache_read_tokens,
-        cache_write_5m_tokens := cache_write_5m_tokens, cache_write_1h_tokens := cache_write_1h_tokens,
-        unknown_cache_split_steps := unknown_cache_split_steps, known_reasoning_tokens := known_reasoning_tokens,
-        steps_with_reasoning := steps_with_reasoning
-    ) ORDER BY usage_owner) FROM usage_totals) AS usage
+    (SELECT list({
+        'usage_owner': usage_owner, 'steps': steps, 'priced_steps': priced_steps,
+        'unpriced_steps': unpriced_steps, 'priced_usd_est': priced_usd_est,
+        'input_tokens': input_tokens, 'output_tokens': output_tokens, 'cache_read_tokens': cache_read_tokens,
+        'cache_write_5m_tokens': cache_write_5m_tokens, 'cache_write_1h_tokens': cache_write_1h_tokens,
+        'unknown_cache_split_steps': unknown_cache_split_steps, 'known_reasoning_tokens': known_reasoning_tokens,
+        'steps_with_reasoning': steps_with_reasoning
+    } ORDER BY usage_owner) FROM usage_totals) AS usage
 FROM root_session r

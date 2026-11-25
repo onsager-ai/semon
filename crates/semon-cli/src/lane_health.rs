@@ -4,7 +4,7 @@ use semon_asi::query::{self, Request};
 use semon_sessions::Query;
 use serde_json::{Map, Value, json};
 
-use super::{AsiMcp, asi_error};
+use super::{AsiMcp, asi_error, asi_store_root};
 
 const SQL: &str = concat!(
     "WITH RECURSIVE root_session AS (
@@ -56,13 +56,11 @@ pub(super) fn report(
                 "root_session_uid",
             )
         })?;
-    let store = extension
-        .store_root
-        .as_deref()
+    let store = asi_store_root(&extension.index)
         .ok_or_else(|| asi_error("store_unavailable", "Analytics unavailable", "store"))?;
     let mut request = Request::new(SQL);
     request.params.push(json!(uid));
-    let result = query::run(&extension.executable, store, &request)
+    let result = query::run(&extension.executable, &store, &request)
         .map_err(|failure| serde_json::to_value(failure).expect("query failure serializes"))?;
     if result.truncated {
         return Err(asi_error(

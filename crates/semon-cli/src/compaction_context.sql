@@ -9,10 +9,11 @@ compaction_windows AS (
     WINDOW chronological AS (PARTITION BY session_uid ORDER BY ts_ms NULLS LAST, compaction_uid)
 ), timeline AS (
     SELECT session_uid, step_uid AS uid, epoch_ms(ts) AS ts_ms, 'step' AS kind, context_tokens,
-        NULL AS trigger, NULL AS pre_tokens, NULL AS storm
+        CAST(NULL AS VARCHAR) AS trigger, CAST(NULL AS BIGINT) AS pre_tokens,
+        CAST(NULL AS BOOLEAN) AS storm
     FROM steps
     UNION ALL
-    SELECT session_uid, compaction_uid, ts_ms, 'compaction', NULL, trigger, pre_tokens, storm
+    SELECT session_uid, compaction_uid, ts_ms, 'compaction', CAST(NULL AS BIGINT), trigger, pre_tokens, storm
     FROM compaction_windows
 ), measured AS (
     SELECT *,

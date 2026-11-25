@@ -65,7 +65,9 @@ read window. Compare `snapshot` with the generation from `analytics coverage`.
   separate from spend totals. Deduplicated shared usage remains a follow-up.
 - `runtime` gives the answer time, native observation time and native window
   start in UTC milliseconds. Each member's `live` object carries state,
-  liveness and last activity. A null `live` means the native read found no
+  liveness and last activity. A current continuation can supply live state for
+  the published root even when the root log falls outside the native window.
+  A null `live` means the native read found no
   matching observation in its window or was unavailable. Check
   `runtime.error_code` for a native read failure. A quiet or missing row leaves
   Worker disposition unknown.
