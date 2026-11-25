@@ -385,6 +385,110 @@ fn query_cutover_rows(home: &fixture::Fixture, cache: &Path) -> serde_json::Valu
 }
 
 #[test]
+fn late_claude_continuation_counts_usage_once() {
+    use std::io::Write;
+
+    use semon_asi::schema::{FACT_SESSION, FACT_STEP, Table};
+    use serde_json::json;
+
+    let home = fixture::Fixture::new();
+    let first = "00000000-0000-4000-8000-000000000001";
+    let second = "late-continuation";
+    let transcript = |id: &str, minute: u32| {
+        let prompt = format!("{id}-prompt");
+        let reply = format!("{id}-reply");
+        let records = [
+            json!({"type":"user", "uuid":prompt, "sessionId":id,
+                "timestamp":format!("2026-10-03T08:{minute:02}:00Z"),
+                "message":{"role":"user","content":"Synthetic request"}}),
+            json!({"type":"assistant", "uuid":reply, "parentUuid":prompt, "sessionId":id,
+                "timestamp":format!("2026-10-03T08:{minute:02}:01Z"),
+                "message":{"id":reply,"role":"assistant","model":"claude-sonnet-4-5",
+                    "content":[{"type":"text","text":"Synthetic reply"}],
+                    "usage":{"input_tokens":10,"output_tokens":5}}}),
+        ];
+        let path = format!("configured-claude/projects/fixture/{id}.jsonl");
+        home.write(
+            &path,
+            format!("{}\n{}\n", records[0], records[1]).as_bytes(),
+        );
+        home.root.join(path)
+    };
+    let first_path = transcript(first, 16);
+    transcript(second, 17);
+    let store = home.root.join("state/analytics-store");
+    let column = |table: &Table, name: &str| {
+        table
+            .columns
+            .iter()
+            .filter(|column| column.name != "_gen")
+            .position(|column| column.name == name)
+            .unwrap()
+    };
+    let publish = || {
+        let output = materialize_with(&home, &["--batch-sessions", "1"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        live_rows(&store)
+    };
+    let claude_totals = |rows: &BTreeMap<String, Vec<Vec<String>>>| {
+        rows["fact_session"]
+            .iter()
+            .filter(|row| row[column(&FACT_SESSION, "session_uid")].contains("/claude/"))
+            .map(|row| {
+                (
+                    row[column(&FACT_SESSION, "step_count")]
+                        .parse::<usize>()
+                        .unwrap(),
+                    row[column(&FACT_SESSION, "usd_est")]
+                        .parse::<f64>()
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = publish();
+    let separate = claude_totals(&before);
+    assert_eq!(separate.len(), 2);
+    assert!(
+        separate
+            .iter()
+            .all(|&(count, cost)| count == 1 && cost > 0.0)
+    );
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(first_path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({"type":"continued-in", "sessionId":first,
+        "continuedInSessionId":second})
+    )
+    .unwrap();
+    drop(file);
+    let after = publish();
+    assert_eq!(
+        claude_totals(&after),
+        vec![(2, separate.iter().map(|&(_, cost)| cost).sum())]
+    );
+    let steps: Vec<_> = after["fact_step"]
+        .iter()
+        .filter(|row| row[column(&FACT_STEP, "session_uid")].contains("/claude/"))
+        .collect();
+    assert_eq!(steps.len(), 2);
+    assert!(
+        steps
+            .iter()
+            .all(|row| row[column(&FACT_STEP, "usage_owner")] == "exclusive")
+    );
+}
+
+#[test]
 fn materialize_tiny_budget_drains_several_chunks_and_matches_one_shot_rows() {
     let home = fixture::Fixture::new();
     for index in 3..=5 {

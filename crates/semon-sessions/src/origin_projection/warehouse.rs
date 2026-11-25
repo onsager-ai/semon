@@ -239,6 +239,11 @@ impl AnalyticsInput for WarehouseAnalyticsInput {
                         break;
                     }
                     steps = steps.saturating_add(session.steps.len());
+                    // Retire aliases in the same publication that takes over
+                    // their facts. Pending owners leave prior facts in place.
+                    if owner.lineage {
+                        changes.extend(self.retired_aliases(&owner)?);
+                    }
                     changes.push(SessionChange::SourceRestored { session_uid: uid });
                     changes.push(SessionChange::Admitted(Box::new(session)));
                 }
@@ -315,6 +320,28 @@ struct Member {
 }
 
 impl WarehouseAnalyticsInput {
+    fn retired_aliases(&self, owner: &Owner) -> rusqlite::Result<Vec<SessionChange>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT d.native_id FROM lineage_member root
+             JOIN lineage_member m ON m.component=root.component
+             JOIN dim_session d ON d.source=m.source
+             WHERE root.source=?1 AND d.native_id<>?2 AND NOT EXISTS (
+               SELECT 1 FROM dim_session active
+               JOIN bridge_session_owner o ON o.source=active.source AND o.owner=active.source
+               JOIN warehouse_current c ON c.source=active.source
+               WHERE active.harness=d.harness AND active.native_id=d.native_id
+             )",
+        )?;
+        statement
+            .query_map(params![owner.source, owner.native_id], |row| {
+                let native_id = row.get(0)?;
+                Ok(SessionChange::Removed {
+                    session_uid: session_uid(&self.namespace, &(owner.harness.clone(), native_id)),
+                })
+            })?
+            .collect()
+    }
+
     fn members(&self, owner: i64) -> rusqlite::Result<Vec<Member>> {
         let mut statement = self.connection.prepare_cached(
             "SELECT d.source,d.native_id,c.path,s.ledger,p.ledger,p.pos,
@@ -580,9 +607,9 @@ impl WarehouseAnalyticsInput {
             "WITH agent AS (
                SELECT a.storage_parent,a.call_id FROM maintenance_cursor cursor
                JOIN fact_agent_observation a ON a.source=cursor.source AND a.revision=cursor.sidecar_revision
-               WHERE cursor.source=?1 AND a.present
+               WHERE cursor.source=?1
              ), storage AS (
-               SELECT min(m.owner) AS owner FROM agent a JOIN dim_session d ON d.harness='claude' AND d.native_id=a.storage_parent
+               SELECT min(m.owner) AS owner FROM agent a JOIN dim_session d ON d.harness='claude' AND d.lineage AND d.native_id=a.storage_parent
                JOIN bridge_session_owner m USING(source) HAVING count(DISTINCT m.owner)=1
              ), calls AS (
                SELECT DISTINCT m.owner FROM agent a CROSS JOIN fact_claude_call c INDEXED BY claude_call_identity ON c.call_id=a.call_id

@@ -325,6 +325,34 @@ fn both_harnesses_preserve_evidence_turns_and_usage() {
 }
 
 #[test]
+fn claude_agent_without_sidecar_keeps_storage_parent() {
+    let fixture = Fixture::new("storage-parent");
+    let parent = fixture.seed("parent");
+    let child = parent
+        .parent()
+        .unwrap()
+        .join("parent/subagents/agent-child.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(&child, []).unwrap();
+    append(&child, "child", 2);
+
+    fixture.admit();
+    let actual = drain(&mut fixture.open());
+    assert_eq!(actual.len(), 2);
+    let child = &actual["fixture/claude/child"];
+    assert_eq!(
+        child.session.parent_session_uid.as_deref(),
+        Some("fixture/claude/parent")
+    );
+    assert_eq!(child.session.parent_method, ParentMethod::Native);
+
+    crate::refresh_analytics_catalog(&fixture.options, || false).unwrap();
+    let path = crate::analytics_index_path(&fixture.options.cache);
+    let expected = drain(&mut SqliteAnalyticsInput::open(&path, NAMESPACE).unwrap());
+    assert_eq!(logical_rows(&actual), logical_rows(&expected));
+}
+
+#[test]
 fn watch_rescan_pins_a_drain_and_sees_next_append() {
     let fixture = Fixture::new("watch");
     fixture.seed("a");
