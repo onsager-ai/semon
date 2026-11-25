@@ -1021,131 +1021,8 @@ impl Query {
                 "Session activity is not yet available on PostgreSQL",
             ));
         }
-        if tool == "get_session_activity" && !self.embedded && !self.sources.is_retired() {
-            let id = args["id"].as_str().expect("validated activity id");
-            let mut selected = None;
-            for (source_key, evidence) in &self.sources.machines {
-                if let Some(key) = evidence
-                    .activity_target(id, now)
-                    .map_err(|error| QueryError::io(&error))?
-                {
-                    if selected.is_some() {
-                        return Err(QueryError::new(
-                            "id_conflict",
-                            format!("two machines both have {id}"),
-                        ));
-                    }
-                    selected = Some((
-                        if source_key.is_empty() {
-                            "local"
-                        } else {
-                            source_key
-                        }
-                        .to_owned(),
-                        key,
-                    ));
-                }
-            }
-            let Some((source_key, key)) = selected else {
-                return Err(QueryError::unknown_session(id));
-            };
-            let mut focused = args.clone();
-            focused["id"] = json!(key);
-            return self.execute_selected_at(
-                &source_key,
-                &key,
-                tool,
-                &focused,
-                None,
-                crate::SessionSourceReadMode::LocalThenProvider,
-                now,
-            );
-        }
-        if !self.embedded
-            && !postgres
-            && self.sources.machines.len() == 1
-            && !self.sources.is_retired()
-            && matches!(
-                tool,
-                "get_session" | "get_session_activity" | "read_transcript"
-            )
-        {
-            let id = args["id"].as_str().expect("validated focused id");
-            let (source_key, evidence) = &self.sources.machines[0];
-            if let Some(catalog_key) = evidence
-                .local_query_target(id, now)
-                .map_err(|error| QueryError::io(&error))?
-            {
-                let source_key = if source_key.is_empty() {
-                    "local"
-                } else {
-                    source_key
-                }
-                .to_owned();
-                return self.execute_selected_at(
-                    &source_key,
-                    &catalog_key,
-                    tool,
-                    args,
-                    None,
-                    crate::SessionSourceReadMode::LocalThenProvider,
-                    now,
-                );
-            }
-        }
-        if !self.embedded
-            && !postgres
-            && self.sources.machines.len() > 1
-            && !self.sources.is_retired()
-            && matches!(
-                tool,
-                "get_session" | "get_session_activity" | "read_transcript"
-            )
-        {
-            let id = args["id"].as_str().expect("validated focused id");
-            let mut selected = None;
-            let mut ready = true;
-            for (source_key, evidence) in &self.sources.machines {
-                let key = if source_key.is_empty() {
-                    "local"
-                } else {
-                    source_key
-                };
-                // Resolve ownership from every admitted source's published
-                // Catalog. Do not decode another machine's event rows merely
-                // to rule out a duplicate global session ID.
-                match crate::catalog::qualified_history_identity(&evidence.options, key, id) {
-                    Ok(Some(identity)) => {
-                        let target = evidence
-                            .local_query_target(&identity.catalog_key, now)
-                            .map_err(|error| QueryError::io(&error))?;
-                        if target.is_none() {
-                            ready = false;
-                            continue;
-                        }
-                        if selected.is_some() {
-                            return Err(QueryError::new(
-                                "id_conflict",
-                                format!("two machines both have {id}"),
-                            ));
-                        }
-                        selected = Some((key.to_owned(), identity.catalog_key));
-                    }
-                    Ok(None) => {}
-                    Err(_) => ready = false,
-                }
-            }
-            if ready && let Some((source_key, catalog_key)) = selected {
-                return self.execute_selected_at(
-                    &source_key,
-                    &catalog_key,
-                    tool,
-                    args,
-                    None,
-                    crate::SessionSourceReadMode::LocalThenProvider,
-                    now,
-                );
-            }
+        if !self.embedded && !postgres {
+            return self.execute_warehouse(tool, args, now);
         }
         // Once per call: the answer's window and the check of `since` belong
         // to the same native evidence cohort.
@@ -1158,6 +1035,42 @@ impl Query {
             "stalls" => self.stalls(args, now, None),
             _ => unreachable!("every tool is handled"),
         }?;
+        answer["window_start"] = json!(self.start);
+        Ok(answer)
+    }
+
+    fn execute_warehouse(
+        &mut self,
+        tool: &str,
+        args: &Value,
+        now: i64,
+    ) -> Result<Value, QueryError> {
+        let focus = args["id"].as_str();
+        let parts = self
+            .sources
+            .machines
+            .iter()
+            .map(|(key, source)| {
+                let data = source
+                    .warehouse_query_at(now, focus, tool == "get_session_activity")
+                    .map_err(|error| QueryError::io(&error))?;
+                Ok((key.clone(), data))
+            })
+            .collect::<Result<Vec<_>, QueryError>>()?;
+        self.start = parts.iter().filter_map(|(_, data)| data.window_start).max();
+        self.native = Some(QueryRead::new(parts, usize::MAX));
+        let result = match tool {
+            "list_sessions" => self.list_sessions(args, now, None),
+            "get_session" => self.get_session(args, now, None),
+            "get_session_activity" => activity::warehouse_page(self.evidence(), args, now),
+            "read_transcript" => self.read_transcript(args, now, None),
+            "stalls" => self.stalls(args, now, None),
+            _ => unreachable!("every tool is handled"),
+        };
+        if focus.is_some() {
+            self.native = None;
+        }
+        let mut answer = result?;
         answer["window_start"] = json!(self.start);
         Ok(answer)
     }
@@ -1603,15 +1516,10 @@ impl Query {
         )>,
     ) -> Result<Value, QueryError> {
         let id = string(args, "id").unwrap_or_default();
-        if !args["step"].is_null() {
-            return Err(QueryError::new(
-                "stale_projection",
-                "Activity step anchors require a current SQLite transcript projection",
-            ));
-        }
         let position = |key: &str| integer(args, key).map(|value| value.max(0) as usize);
-        let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
-            .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
+        let mut anchor =
+            tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
+                .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
         let limit = integer(args, "limit").map_or(tx::PAGE_ENTRIES, |limit| limit as usize);
         let owner = self.evidence().owner(&id);
         let (index, own) = match owner {
@@ -1629,6 +1537,14 @@ impl Query {
             .tx
             .get(&own)
             .ok_or_else(|| QueryError::unknown_session(&id))?;
+        if !args["step"].is_null() {
+            if !matches!(anchor, tx::Anchor::Last) {
+                return Err(QueryError::invalid(
+                    "before, after, turn and step are exclusive",
+                ));
+            }
+            anchor = activity::warehouse_anchor(data, &own, transcript, &args["step"])?;
+        }
         let records = data.sources.reader_with(provider);
         let mut read = |path: &std::path::Path, offset| records.read(path, offset);
         let mut prompts = |file: &crate::model::SlotFile, offset| records.prompt(file, offset);
@@ -1653,7 +1569,16 @@ impl Query {
             _ => QueryError::io(&error),
         })?;
         records.finish().map_err(|error| QueryError::io(&error))?;
-        serde_json::from_str(&page).map_err(|error| QueryError::new("io", error.to_string()))
+        let mut page: Value = serde_json::from_str(&page)
+            .map_err(|error| QueryError::new("io", error.to_string()))?;
+        if !args["step"].is_null()
+            && let Some(activity) = &data.warehouse_activity
+        {
+            page["transcript_generation"] = json!(crate::transcript_range::entry_generation(
+                &activity.generation
+            ));
+        }
+        Ok(page)
     }
 
     fn stalls(

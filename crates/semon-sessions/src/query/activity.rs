@@ -185,3 +185,155 @@ pub(super) fn read(
         .extend(body.as_object().expect("activity body").clone());
     Ok(answer)
 }
+
+/// Render one page from the activity derived under the warehouse source snapshot.
+pub(super) fn warehouse_page(
+    read: &QueryRead,
+    args: &Value,
+    now: i64,
+) -> Result<Value, QueryError> {
+    let id = args["id"].as_str().expect("validated activity id");
+    let (index, own) = match read.owner(id) {
+        Owner::At(index, own) => (index, own),
+        Owner::Conflict => {
+            return Err(QueryError::new(
+                "id_conflict",
+                format!("two machines both have {id}"),
+            ));
+        }
+        Owner::Missing => return Err(QueryError::unknown_session(id)),
+    };
+    let data = &read.parts[index].data;
+    if !data.sessions.contains_key(&own) {
+        return Err(QueryError::unknown_session(id));
+    }
+    let generation = args["generation"].as_str();
+    let cursor = args["cursor"].as_str();
+    if cursor.is_some() && generation.is_none() {
+        return Err(QueryError::invalid(
+            "An activity continuation requires generation",
+        ));
+    }
+    let activity = data
+        .warehouse_activity
+        .as_ref()
+        .filter(|activity| activity.key == own)
+        .ok_or_else(|| missing(generation))?;
+    if generation.is_some_and(|generation| generation != activity.generation) {
+        return Err(missing(generation));
+    }
+    let kind = args["kind"].as_str().unwrap_or("steps");
+    let limit = integer(args, "limit").unwrap_or(100) as usize;
+    let mut body = match kind {
+        "preview" => {
+            if cursor.is_some() {
+                return Err(QueryError::invalid("A preview has no continuation"));
+            }
+            json!(crate::events::session_activity::analytics::Preview::of(
+                &activity.projection.steps
+            ))
+        }
+        "facts" => {
+            let mut facts = activity
+                .projection
+                .facts
+                .iter()
+                .filter(|fact| cursor.is_none_or(|cursor| fact.identity.as_str() > cursor))
+                .collect::<Vec<_>>();
+            facts.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
+            let next = (facts.len() > limit).then(|| facts[limit - 1].identity.as_str());
+            let items = facts.iter().take(limit).map(|fact| {
+                json!({"identity":fact.identity,"timestamp":fact.timestamp,"step_id":fact.step_id,"change":fact.change})
+            }).collect::<Vec<_>>();
+            json!({"items":items,"next_cursor":next})
+        }
+        _ => {
+            let start = cursor
+                .map(str::parse::<usize>)
+                .transpose()
+                .map_err(|_| QueryError::invalid("A step cursor must be an ordinal"))?
+                .unwrap_or(0);
+            let steps = activity
+                .projection
+                .steps
+                .get(start..)
+                .ok_or_else(|| missing(generation))?;
+            let items = steps
+                .iter()
+                .take(limit)
+                .map(|step| {
+                    let mut item = json!(step);
+                    let fields = item.as_object_mut().expect("typed activity step");
+                    fields.remove("position");
+                    fields.remove("call_position");
+                    item
+                })
+                .collect::<Vec<_>>();
+            let next = (steps.len() > limit).then(|| (start + limit).to_string());
+            json!({"items":items,"next_cursor":next})
+        }
+    };
+    body["now"] = json!(now);
+    body["kind"] = json!(kind);
+    body["generation"] = json!(activity.generation);
+    body["session"] =
+        json!({"id":own,"harness":data.sessions[&own].harness,"native_ids":activity.native_ids});
+    Ok(body)
+}
+
+pub(super) fn warehouse_anchor(
+    data: &crate::model::QueryData,
+    own: &str,
+    transcript: &Transcript,
+    requested: &Value,
+) -> Result<tx::Anchor, QueryError> {
+    let requested: crate::transcript_range::StepAnchor = serde_json::from_value(requested.clone())
+        .map_err(|_| QueryError::invalid("Invalid activity step anchor"))?;
+    let unavailable = |reason| {
+        QueryError::new(
+            "stale_projection",
+            format!("Activity anchor unavailable: {reason}"),
+        )
+    };
+    let step = data
+        .warehouse_activity
+        .as_ref()
+        .filter(|activity| activity.key == own && activity.generation == requested.generation)
+        .and_then(|activity| {
+            activity
+                .projection
+                .steps
+                .get(usize::try_from(requested.ordinal).ok()?)
+        })
+        .filter(|step| step.id == requested.id)
+        .ok_or_else(|| unavailable("stale_activity"))?;
+    use crate::model::SlotKind;
+    let position = step.call_position.as_ref().unwrap_or(&step.position);
+    transcript
+        .slots
+        .iter()
+        .position(|slot| {
+            if slot
+                .file
+                .as_ref()
+                .is_none_or(|file| file.path != std::path::Path::new(&position.source))
+            {
+                return false;
+            }
+            match &slot.kind {
+                SlotKind::Operation {
+                    script_offset: Some(offset),
+                    ..
+                } if step.call_position.is_some() => *offset == position.offset,
+                SlotKind::A
+                | SlotKind::Think
+                | SlotKind::Tool { .. }
+                | SlotKind::Yielded { .. }
+                | SlotKind::Sent { .. }
+                | SlotKind::Operation { .. } => slot.offset == position.offset,
+                _ => false,
+            }
+        })
+        .map(tx::Anchor::After)
+        .ok_or_else(|| unavailable("no_exact_record"))
+}

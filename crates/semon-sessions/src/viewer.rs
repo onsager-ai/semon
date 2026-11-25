@@ -8846,17 +8846,17 @@ mod tests {
     #[test]
     fn native_permalinks_use_indexed_identity_without_workspace_models() {
         let (alpha, bravo) = (machine("twin", "lane-a"), machine("twin", "lane-b"));
-        for fixture in [&alpha, &bravo] {
-            let observer = crate::SessionCatalogObserver::new("source", fixture.options.clone());
+        for (key, fixture) in [("a", &alpha), ("b", &bravo)] {
+            let observer = crate::SessionCatalogObserver::new(key, fixture.options.clone());
             observer.changed().unwrap();
             eventually("native permalink publication", || {
-                let reply = crate::session_catalog_page(&fixture.options, "source", "limit=1");
+                let reply = crate::session_catalog_page(&fixture.options, key, "limit=1");
                 let body: Value = serde_json::from_slice(&reply.body).ok()?;
                 (reply.status == 200 && body["completeness"]["state"] == "complete").then_some(())
             });
             observer.close();
         }
-        let mut query = crate::Query::new(alpha.options.clone());
+        let mut query = crate::Query::with_machines(vec![("a".into(), alpha.options.clone())]);
         let details = query.call("get_session", &json!({"id":"lane-a"})).unwrap();
         let turn = details["session"]["turns"][0]["id"].as_str().unwrap();
         let core = Arc::new(ViewerCore::with_machines(vec![

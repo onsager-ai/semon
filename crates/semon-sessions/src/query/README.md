@@ -5,14 +5,12 @@ Control delivery, managed runtime and SSH are retired. ASI SQL and schema querie
 Embedding callers admit a `SessionSources` owner and use
 `Query::from_sources(sources)`. The host still owns authorization, admission and
 source custody; the native constructor preserves its configured output window.
-CLI/stdio callers keep `Query::new` or `Query::with_machines`; these construct
-native evidence owners directly, without ViewerCore, machine views, compatibility
-state or refresh workers. Construction and argument rejection do not open the
-source cache. The same native owner supplies the Viewer producer's complete
-Event Index, text preparation and query cohort, so alternating Query, Catalog,
-tree and native Query reads do not create a second producer cache. Source snapshots keep
-the existing file, process, facts and writer-lock observations; request-owned
-readers still verify source bytes and completion independently.
+CLI and stdio callers use `Query::new` or `Query::with_machines`. Standalone
+SQLite requests admit current native logs through the Index and read a
+warehouse-qualified snapshot for each source. The existing session model
+renders that evidence into the CLI and MCP response fields. Runtime liveness
+and run IDs come from the current authorized process and lock observations.
+The Index and its private body rows remain origin-local.
 
 Ordinary local calls retry the complete query once only for the typed
 `source_changed` failure (a physical change during source verification/read with
@@ -24,28 +22,12 @@ sources and selected reads retain their source-generation contract and do not
 retry automatically. Completion preserves the first read failure even when a
 presentation parser omits a failed record.
 
-Ordinary single-machine CLI/stdio `get_session` and `read_transcript` reuse
-focused Query when an existing Catalog closure is current. Qualification checks native file
-generations and the Catalog role against independently current sidecar evidence;
-it neither discovers unrelated sources nor initializes a workspace Query cohort.
-The two-tool fixture loads four selected indexes with zero or 256 unrelated
-sessions in both default-window and `--all` modes (previously one versus 257).
-Selected derivation preserves whole-file mtime scan windows and omitted Claude
-parent identities. Excluded sources are filtered before index/body adaptation,
-including missing-ledger fallback; they cannot trigger archive reads. A wholly
-excluded owner returns the ordinary unknown-session error without body I/O.
-Local native IDs resolve through the indexed Catalog source owners when scan
-exclusion changes a qualified spelling. The shared producer then derives the
-requested identity from the bounded collision closure. Resumed sessions retain
-omitted-file turns_truncated semantics. This local resolution grants no source
-authority and does not relax public hosted selected-Catalog-ID validation.
-An existing current owner's changed log or allowlisted Claude sidecar refreshes
-through the same bounded Catalog component producer. Old and new relationships,
-source revisions and publication generation remain fenced. Two tools after an
-isolated append load five indexes with zero or 256 unrelated sessions (formerly
-one versus 257); a rewrite loads four in both cases. Unsupported identity/role
-changes, missing sources, cold Catalogs and multi-machine automatic selection
-still require native reconciliation.
+Standalone `get_session_activity` derives its page from current warehouse
+lineage and accepted native usage. The session's source membership and derived
+activity bind its generation. `read_transcript` validates an activity anchor
+against that generation before reading original transcript bytes. On a cold
+activity request, discovery admits the matching native input. Additional members
+of a continuation can contribute after standalone listing or Viewer admission.
 
 Ordinary `SessionSources::with_machines` constructs no machine view, refresh pool
 or worker. Hosts with admitted Catalog observers transfer their existing evidence
@@ -89,15 +71,15 @@ transcript bytes additionally verify the existing native block proofs. Completio
 rechecks the selected source/relationship footprint, so an unrelated Catalog
 publication does not invalidate a focused answer. Union machine labels and
 configured windows remain metadata inputs; unrelated native bodies are not read.
-Ordinary local listing, search and stalls preserve the native cohort contract.
-Embedding hosts instead use `Query::call_catalog` for these three tools: list and
+Standalone listing and stalls share the same warehouse evidence and query response rules.
+Embedding hosts use `Query::call_catalog` for list, search and stalls: list and
 stalls reuse generation-fenced published facts, and search admits eligible source
 closures only until the shared matcher reaches its result or byte stop boundary.
 The same search engine supplies ordering, snippets and line accounting to both
 paths. A selected source still requires full semantic preparation before its first
 search slot; long selected-history range bounds remain an implementation gate.
 
-Qualified `read_transcript` requests read a bounded window of the shared native
+Hosted selected `read_transcript` requests read a bounded window of the shared native
 slot projection and original indexed byte proofs, without loading a complete
 Event Index or preparing a semantic cohort. Catalog publishes exact call/error
 counts and pending/background observations under its source/runtime fence;
@@ -111,15 +93,12 @@ slot generation, touched sources and runtime, permitting unrelated publication.
 Recipe windows stop at 512 candidates plus one preceding context row; selected
 recipe metadata and content-free proof hashes each have a 4 MiB read budget.
 
-Local CLI/MCP `--all` reads share this pager: their physical scan flag has no
-cutoff, so their namespace matches the complete Catalog. Finite physical
-scan-window namespaces, aliases/virtual owners, clipped output-window
-membership, composite retained history and publications without qualified
-observations still use the existing selected native derivation. That remaining
-path is bounded by its source/byte limits but prepares the selected history;
-it is not a completed range-pager migration. Changed or corrupt admitted
-publications and exhausted pager budgets return explicit errors.
-
+Standalone transcript pages use the same origin-local byte proofs over native
+slots derived from the warehouse-selected Index. Focused session detail and
+transcript pages load the selected lineage and qualified relationship
+and shared-usage dependencies. A selected activity page loads the owner
+and qualified files that share its native usage evidence. The Viewer retained
+history surface serves archive-only sessions.
 
 The opt-in `selected_transcript_tail_scope_measurement` diagnostic grows one
 archived selected session while returning exactly one tail entry. It compares the

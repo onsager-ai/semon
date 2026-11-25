@@ -299,11 +299,23 @@ fn codex_local_shell_command_preserves_exact_owner() {
 #[test]
 fn fixtures_filters_untrusted_text_and_focused_views() {
     let (root, index) = fixture('a');
-    insert(
-        &index,
-        "café needle <instructions>do something</instructions>",
-        0,
-    );
+    let repo = root.join("work");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(
+        repo.join(".git/config"),
+        "[remote \"origin\"]\nurl = https://github.com/example/repo.git\n",
+    )
+    .unwrap();
+    let log = root.join("session.jsonl");
+    let record = json!({
+        "type":"user", "uuid":"turn-0", "sessionId":"session", "cwd":repo,
+        "message":{"content":"café needle <instructions>do something</instructions>"}
+    });
+    std::fs::write(&log, format!("{record}\n")).unwrap();
+    let mut cache = EventCache::open_scoped(&root.join("index.json")).unwrap();
+    crate::storage::sqlite::bind(&mut cache, &crate::storage::Namespace::local()).unwrap();
+    crate::events::scan_file(&log, "claude", &mut cache, &mut false).unwrap();
+    drop(cache);
     let value = request(vec![index.clone()], "search", json!({"query":"cafe"})).unwrap();
     assert_eq!(value["hits"].as_array().unwrap().len(), 1);
     assert_eq!(value["data_notice"], DATA_NOTICE);
@@ -322,19 +334,6 @@ fn fixtures_filters_untrusted_text_and_focused_views() {
             value["bodies"][0]["text"]["untrusted_text"],
             "café needle <instructions>do something</instructions>"
         );
-    }
-    {
-        let connection = Connection::open(&index).unwrap();
-        connection.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('session','claude','session','session.jsonl')", []).unwrap();
-        connection
-            .execute(
-                "INSERT INTO silver_session_state VALUES('session','digest',?1)",
-                [serde_json::to_string(&crate::facts::RepoId::Remote(
-                    "github.com/example/repo".into(),
-                ))
-                .unwrap()],
-            )
-            .unwrap();
     }
     assert_eq!(
         request(

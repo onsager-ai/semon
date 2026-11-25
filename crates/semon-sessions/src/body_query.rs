@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, functions::FunctionFlags, params};
 use semon_asi::input::encode_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -223,9 +223,61 @@ fn search(indexes: &[Index], request: Search, deadline: Instant) -> Result<Value
         if Instant::now() >= deadline {
             return Err(timeout());
         }
-        // Repo identity is the sanitized fact persisted by the Catalog/activity
-        // publisher. No repository filesystem lookup occurs on a read.
-        let sql = "SELECT b.body_uid,b.session_uid,b.turn_uid,b.step_uid,b.part,b.ts,snippet(body_fts,0,'','','…',64) FROM body_fts JOIN body b ON b.rowid=body_fts.rowid WHERE body_fts MATCH ?1 AND (?2 IS NULL OR EXISTS(SELECT 1 FROM body_source bs JOIN session_catalog_sources cs ON cs.source_path=bs.source_path JOIN silver_session_state ss ON ss.session_key=cs.session_key WHERE bs.body_uid=b.body_uid AND CASE json_extract(ss.repo_id,'$.kind') WHEN 'unknown' THEN 'unknown' ELSE json_extract(ss.repo_id,'$.value') END=?2)) AND (?3 IS NULL OR substr(b.session_uid,1,instr(b.session_uid,'/')-1)=?3) AND (?4 IS NULL OR b.part=?4) AND (?5 IS NULL OR b.ts>=?5) AND (?6 IS NULL OR b.ts<=?6) ORDER BY bm25(body_fts),b.body_uid LIMIT ?7";
+        let repos = std::sync::Mutex::new(BTreeMap::new());
+        let home = crate::facts::env_home();
+        index
+            .connection
+            .create_scalar_function(
+                "semon_body_repo",
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY,
+                move |context| {
+                    let Some(cwd) = context.get::<Option<String>>(0)? else {
+                        return Ok(None);
+                    };
+                    Ok(repos
+                        .lock()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?
+                        .entry(cwd.clone())
+                        .or_insert_with(|| {
+                            use crate::facts::RepoId;
+                            if !std::path::Path::new(&cwd).is_absolute()
+                                || Instant::now() >= deadline
+                            {
+                                return None;
+                            }
+                            crate::repo::repo_id(&cwd, home.as_deref().map(std::path::Path::new))
+                                .map(|id| match id {
+                                    RepoId::Remote(value) | RepoId::Path(value) => value,
+                                    RepoId::Unknown => "unknown".into(),
+                                })
+                        })
+                        .clone())
+                },
+            )
+            .map_err(|e| sql_error(e, deadline, false))?;
+        let sql = "
+            SELECT b.body_uid,b.session_uid,b.turn_uid,b.step_uid,b.part,b.ts,
+                   snippet(body_fts,0,'','','…',64)
+            FROM body_fts JOIN body b ON b.rowid=body_fts.rowid
+            WHERE body_fts MATCH ?1 AND (?2 IS NULL OR EXISTS (
+                SELECT 1 FROM body_source bs
+                JOIN warehouse_current c ON c.path=bs.source_path
+                JOIN warehouse_source s ON s.source=c.source AND s.carrier=c.path AND s.origin='local'
+                JOIN lineage_member source ON source.source=c.source
+                JOIN lineage_member member ON member.component=source.component
+                JOIN warehouse_current current ON current.source=member.source
+                JOIN warehouse_source committed ON committed.source=current.source
+                    AND committed.origin=s.origin AND committed.carrier=current.path
+                JOIN files f ON f.path=current.path AND f.resume_at=json_extract(committed.ledger,'$.offset')
+                LEFT JOIN maintenance_cursor cursor ON cursor.source=member.source
+                LEFT JOIN fact_agent_observation agent ON agent.source=cursor.source
+                    AND agent.revision=cursor.sidecar_revision AND agent.present
+                WHERE bs.body_uid=b.body_uid
+                    AND semon_body_repo(coalesce(agent.cwd,f.cwd))=?2
+            )) AND (?3 IS NULL OR substr(b.session_uid,1,instr(b.session_uid,'/')-1)=?3)
+               AND (?4 IS NULL OR b.part=?4) AND (?5 IS NULL OR b.ts>=?5) AND (?6 IS NULL OR b.ts<=?6)
+            ORDER BY bm25(body_fts),b.body_uid LIMIT ?7";
         let mut statement = index
             .connection
             .prepare(sql)

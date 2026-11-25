@@ -534,7 +534,9 @@ fn metadata_and_selected_session_reads_do_not_hydrate_unrelated_prompt_history()
             .claude_home
             .join("projects/-work-proj/history.jsonl");
         let original = fs::read(&path).unwrap();
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -651,7 +653,9 @@ fn native_projection_reuse_rebuilds_unqualified_and_corrupt_recipes_from_evidenc
                 human("lead", ts(1, 1), "later evidence"),
             ],
         );
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+                .unwrap();
         let observe = |cache: &mut crate::events::EventCache| {
             crate::model::observe_catalog(
                 &home.options,
@@ -3248,7 +3252,9 @@ fn selected_query_uses_original_generations_without_workspace_preparation_or_res
             let id = format!("unrelated-{n}");
             home.top(&id, &[human(&id, ts(1, 0), &"unrelated".repeat(8192))]);
         }
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache =
+            crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+                .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -3467,7 +3473,9 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
             }
         }
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -3476,14 +3484,19 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
         NOW,
     )
     .unwrap();
-    let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
     for (id, args, expected) in cases {
         let mut local = Query::new(home.options.clone());
+        let before = crate::events::FILE_READS.with(std::cell::Cell::get);
         let local_page = local.call_at("read_transcript", &args, NOW).unwrap();
         assert_eq!(local_page, expected, "local --all paging contract: {args}");
         assert!(
             local.native.is_none(),
             "local --all page prepared a complete native cohort: {args}"
+        );
+        let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
+        assert!(
+            indexes - before <= 4,
+            "local page loaded unrelated Index rows: {args}"
         );
         let mut query = Query::from_sources(admitted(home.options.clone()));
         let actual = query
@@ -3502,17 +3515,19 @@ fn selected_transcript_pages_match_native_anchors_thinking_and_tool_observations
             query.native.is_none(),
             "page prepared a complete native cohort: {args}"
         );
+        assert_eq!(
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            indexes
+        );
     }
-    assert_eq!(
-        crate::events::FILE_READS.with(std::cell::Cell::get),
-        indexes
-    );
 }
 
 #[test]
 fn ordinary_windowed_paging_reuses_a_complete_in_window_native_context() {
     let home = fixture();
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -3537,6 +3552,7 @@ fn ordinary_windowed_paging_reuses_a_complete_in_window_native_context() {
             let expected = oracle.call_at("read_transcript", &args, NOW).unwrap();
             let mut query = Query::new(options.clone());
             let loaded = crate::events::CACHE_READS.with(std::cell::Cell::get);
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             assert_eq!(
                 query.call_at("read_transcript", &args, NOW).unwrap(),
                 expected,
@@ -3549,6 +3565,11 @@ fn ordinary_windowed_paging_reuses_a_complete_in_window_native_context() {
             assert_eq!(
                 crate::events::CACHE_READS.with(std::cell::Cell::get),
                 loaded
+            );
+            let requested = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            assert!(
+                requested <= 4,
+                "windowed page loaded unrelated Index rows: {args}"
             );
         }
     }
@@ -4023,7 +4044,11 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
             "toolUseResult":{"success":false,"message":"missing peer"}}),
     ]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache = crate::storage::sqlite::open_index(
+        &home.options,
+        &crate::storage::Namespace::new("a").unwrap(),
+    )
+    .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4159,7 +4184,9 @@ fn unsent_query_uses_indexed_bookmark_evidence() {
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"missing peer"}]},
             "toolUseResult":{"success":false,"message":"missing peer"}}),
     ]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4244,7 +4271,9 @@ fn selected_native_query_closes_nested_parent_dependencies_without_unrelated_sou
         let id = format!("unrelated-{n}");
         home.top(&id, &[human(&id, ts(1, 0), "Unrelated history")]);
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4325,7 +4354,9 @@ fn focused_query_keeps_cross_harness_and_literal_native_identity_collision_conte
             ),
         ],
     );
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4339,6 +4370,11 @@ fn focused_query_keeps_cross_harness_and_literal_native_identity_collision_conte
     for key in [":claude:same-id", "claude:same-id", "codex:same-id"] {
         for tool in ["get_session", "read_transcript"] {
             let mut cases = vec![json!({"id":key})];
+            assert_eq!(
+                home.query().call_at(tool, &cases[0], NOW).unwrap(),
+                baseline.call_at(tool, &cases[0], NOW).unwrap(),
+                "standalone {tool} changed canonical identity for {key}"
+            );
             if tool == "read_transcript" {
                 for position in [0, 1, 2, 100] {
                     for limit in [1, 2, 100] {
@@ -4411,6 +4447,106 @@ fn focused_native_identity_collision_context_refuses_an_overbound_closure() {
 }
 
 #[test]
+fn focused_native_queries_keep_cold_parent_and_indexed_sibling_relay() {
+    let home = Home::new("focused-sibling-relay");
+    home.top("lead", &[
+        human("lead", ts(1, 0), "Start workers"),
+        assistant("lead", ts(1, 1), vec![
+            tool("launch-a", "Agent", json!({"prompt":"first worker"})),
+            tool("launch-b", "Agent", json!({"prompt":"second worker"})),
+        ]),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"launch-a","content":"launched"}]},"toolUseResult":{"status":"async_launched","agentId":"worker-a"}}),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,2),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"launch-b","content":"launched"}]},"toolUseResult":{"status":"async_launched","agentId":"worker-b"}}),
+    ]);
+    home.agent("lead", "worker-a", "launch-a", &[
+        user("lead", ts(1, 2), "first worker"),
+        assistant("lead", ts(1, 3), vec![tool("send", "SendMessage", json!({"to":"worker-b","message":"sibling note"}))]),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,4),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]},"toolUseResult":{"success":true,"msg_id":"sibling-relay"}}),
+    ]);
+    home.agent("lead", "worker-b", "launch-b", &[
+        user("lead", ts(1, 2), "second worker"),
+        json!({"type":"user","sessionId":"lead","timestamp":ts(1,5),"origin":{"kind":"peer","from":"worker-a","senderTaskId":"worker-a","name":"worker-a","msg_id":"sibling-relay","body":"sibling note"},"message":{"role":"user","content":"<cross-session-message from=\"worker-a\" from-name=\"worker-a\">sibling note</cross-session-message>"}}),
+    ]);
+    let mut query = home.query();
+    let cold = call(&mut query, "get_session", json!({"id":"worker-b"}));
+    assert_eq!(cold["session"]["parent"], "lead");
+    assert!(
+        cold["session"]["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|handoff| handoff["kind"] == "spawn" && handoff["from"] == "lead")
+    );
+    call(&mut query, "list_sessions", json!({}));
+    let detail = call(&mut query, "get_session", json!({"id":"worker-b"}));
+    let relay = detail["session"]["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|handoff| {
+            handoff["kind"] == "relay"
+                && handoff["from"] == "worker-a"
+                && handoff["to"] == "worker-b"
+        })
+        .expect("the indexed sibling send matches the receipt");
+    assert_eq!(relay["brief"], "sibling note");
+    let transcript = call(&mut query, "read_transcript", json!({"id":"worker-b"}));
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == relay["id"])
+    );
+}
+
+#[test]
+fn first_focused_query_after_index_recovery_reads_rebuilt_path() {
+    let mut home = Home::new("focused-index-recovery");
+    home.options.index_recovery = crate::IndexRecovery::Local;
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(1, 0), "recovery prompt"),
+            assistant("lead", ts(1, 1), vec![text("recovered answer")]),
+        ],
+    );
+    let path = crate::events::EventCache::path(&home.options.cache);
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
+    crate::events::scan_file(
+        &home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl"),
+        "claude",
+        &mut cache,
+        &mut false,
+    )
+    .unwrap();
+    drop(cache);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.pragma_update(
+        None,
+        "user_version",
+        crate::events::store::SCHEMA_VERSION - 1,
+    )
+    .unwrap();
+    drop(db);
+
+    let page = call(&mut home.query(), "read_transcript", json!({"id":"lead"}));
+    assert!(
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["text"] == "recovered answer")
+    );
+    assert_ne!(crate::events::EventCache::path(&home.options.cache), path);
+}
+
+#[test]
 fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads() {
     for all in [false, true] {
         for unrelated in [0, 256] {
@@ -4421,7 +4557,11 @@ fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads
                 let id = format!("unrelated-{n}");
                 home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
             }
-            let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            let mut cache = crate::storage::sqlite::open_index(
+                &home.options,
+                &crate::storage::Namespace::local(),
+            )
+            .unwrap();
             crate::model::observe_catalog(
                 &home.options,
                 &mut cache,
@@ -4442,6 +4582,17 @@ fn ordinary_focused_query_reuses_qualified_catalog_without_unrelated_index_loads
                 .iter()
                 .map(|(tool, args)| baseline.call_at(tool, args, NOW).unwrap())
                 .collect();
+            if unrelated > 0 {
+                let db = rusqlite::Connection::open(crate::events::EventCache::path(
+                    &home.options.cache,
+                ))
+                .unwrap();
+                db.execute(
+                    "UPDATE files SET pending='invalid-json' WHERE path LIKE '%/unrelated-0.jsonl'",
+                    [],
+                )
+                .unwrap();
+            }
             let mut query = home.query();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             for ((tool, args), expected) in tools.iter().zip(expected) {
@@ -4472,9 +4623,12 @@ fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
                 let id = format!("unrelated-{n}");
                 peer.top(&id, &[human(&id, ts(12, 0), "unrelated peer history")]);
             }
-            for home in [&selected, &peer] {
-                let mut cache =
-                    crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+            for (key, home) in [("a", &selected), ("b", &peer)] {
+                let mut cache = crate::storage::sqlite::open_index(
+                    &home.options,
+                    &crate::storage::Namespace::new(key).unwrap(),
+                )
+                .unwrap();
                 crate::model::observe_catalog(
                     &home.options,
                     &mut cache,
@@ -4533,7 +4687,9 @@ fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
 fn ordinary_single_machine_focus_does_not_qualify_a_provisional_native_identity() {
     let home = Home::new("provisional-owner");
     home.top("lead", &[human("lead", ts(12, 0), "observed Claude owner")]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4586,8 +4742,12 @@ fn ordinary_multi_machine_focus_does_not_infer_absence_from_partial_discovery() 
     let second = Home::new("second-owner");
     first.top("lead", &[human("lead", ts(12, 0), "selected evidence")]);
     second.top("peer", &[human("peer", ts(12, 0), "other evidence")]);
-    for home in [&first, &second] {
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    for (key, home) in [("a", &first), ("b", &second)] {
+        let mut cache = crate::storage::sqlite::open_index(
+            &home.options,
+            &crate::storage::Namespace::new(key).unwrap(),
+        )
+        .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -4623,12 +4783,16 @@ fn ordinary_multi_machine_focus_does_not_infer_absence_from_partial_discovery() 
 fn ordinary_multi_machine_focused_query_refuses_qualified_duplicate_owners() {
     let first = Home::new("first-owner");
     let second = Home::new("second-owner");
-    for home in [&first, &second] {
+    for (key, home) in [("a", &first), ("b", &second)] {
         home.top(
             "duplicate",
             &[human("duplicate", ts(12, 0), "native evidence")],
         );
-        let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+        let mut cache = crate::storage::sqlite::open_index(
+            &home.options,
+            &crate::storage::Namespace::new(key).unwrap(),
+        )
+        .unwrap();
         crate::model::observe_catalog(
             &home.options,
             &mut cache,
@@ -4742,7 +4906,9 @@ fn ordinary_focused_query_reconciles_changed_log_sidecar_and_scan_window_context
         let id = format!("unrelated-{n}");
         home.top(&id, &[human(&id, ts(1, 0), "unrelated prompt")]);
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4845,7 +5011,9 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
             )
             .unwrap();
     }
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -4986,7 +5154,9 @@ fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_change
             ),
         ],
     );
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -5057,7 +5227,9 @@ fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
     let mut shipped = assistant("second", ts(1, 1), vec![text("Shipped.")]);
     shipped["session_id"] = json!("first");
     home.top("second", &[resumed, shipped]);
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -5090,6 +5262,13 @@ fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
                 .is_none()
         );
     }
+    let activity = call(
+        &mut home.query(),
+        "get_session_activity",
+        json!({"id":"second"}),
+    );
+    assert_eq!(activity["session"]["id"], "second");
+    assert_eq!(activity["items"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -5814,6 +5993,114 @@ fn focused_tail_does_not_load_growing_session_busy_metadata() {
 }
 
 #[test]
+fn standalone_peer_details_resolve_the_ids_returned_by_listing() {
+    let home = Home::new("standalone-peer-owners");
+    home.top("sender", &[
+        human("sender", ts(1, 0), "Send a message"),
+        assistant("sender", ts(1, 1), vec![tool("send", "SendMessage", json!({
+            "to":"remote [offline]", "message":"Claude outgoing context"
+        }))]),
+        json!({"type":"user","sessionId":"sender","timestamp":ts(1,2),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]},
+            "toolUseResult":{"success":true,"message":"sent"}}),
+    ]);
+    let receipt = |origin: Value, body: &str| {
+        json!({"type":"user","sessionId":"receiver","timestamp":ts(2,1),"origin":origin,
+            "message":{"role":"user","content":body}})
+    };
+    home.top(
+        "receiver",
+        &[
+            human("receiver", ts(2, 0), "Receive messages"),
+            receipt(
+                json!({"kind":"peer","name":"process-peer","body":"Claude process receipt",
+            "from":"uds:/run/user/1000/cc-socks/7.sock","verifiedPeerPid":7,
+            "verifiedPeerProcStart":"1","msg_id":"process-receipt"}),
+                "Claude process receipt",
+            ),
+            receipt(
+                json!({"kind":"peer","name":"socket-peer","body":"Claude socket receipt",
+            "from":"uds:/run/user/1000/cc-socks/8.sock","msg_id":"socket-receipt"}),
+                "Claude socket receipt",
+            ),
+            receipt(
+                json!({"kind":"peer","name":"named-peer","body":"Claude named receipt",
+            "msg_id":"named-receipt"}),
+                "Claude named receipt",
+            ),
+        ],
+    );
+    home.lines("codex/sessions/2026/09/24/rollout-codex-sender.jsonl", &[
+        codex_line(ts(3, 0), "session_meta", json!({"id":"codex-sender","cwd":"/work/proj"})),
+        codex_line(ts(3, 0), "event_msg", json!({"type":"user_message","message":"Coordinate"})),
+        codex_line(ts(3, 1), "response_item", json!({"type":"function_call",
+            "namespace":"collaboration","name":"send_message","call_id":"send-to-worker",
+            "arguments":"{\"target\":\"root/missing-worker\",\"message\":\"Codex outgoing context\"}"})),
+        codex_line(ts(3, 2), "response_item", json!({"type":"function_call_output",
+            "call_id":"send-to-worker","output":"sent"})),
+    ]);
+    for n in 0..16 {
+        let id = format!("unrelated-{n}");
+        home.top(&id, &[human(&id, ts(4, 0), "Unrelated prompt")]);
+    }
+    let mut query = home.query();
+    let listing = call(&mut query, "list_sessions", json!({"limit":100}));
+    let sessions = listing["sessions"].as_array().unwrap();
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    assert_eq!(
+        db.execute(
+            "UPDATE files SET pending='invalid-json' WHERE path LIKE '%/unrelated-0.jsonl'",
+            []
+        )
+        .unwrap(),
+        1
+    );
+    for (name, owner, brief, outgoing) in [
+        ("remote", "sender", "Claude outgoing context", true),
+        ("process-peer", "receiver", "Claude process receipt", false),
+        ("socket-peer", "receiver", "Claude socket receipt", false),
+        ("named-peer", "receiver", "Claude named receipt", false),
+        (
+            "root/missing-worker",
+            "codex-sender",
+            "Codex outgoing context",
+            true,
+        ),
+    ] {
+        let row = sessions
+            .iter()
+            .find(|row| row["kind"] == "stub" && row["name"] == name)
+            .unwrap_or_else(|| panic!("listing omitted peer {name}"));
+        let id = row["id"].as_str().unwrap();
+        let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let detail = call(&mut query, "get_session", json!({"id":id}));
+        assert_eq!(detail["session"]["id"], id);
+        assert_eq!(detail["session"]["name"], name);
+        let handoffs = detail["session"]["handoffs"].as_array().unwrap();
+        assert_eq!(handoffs.len(), 1, "unexpected peer handoffs for {name}");
+        let handoff = &handoffs[0];
+        let (from, to) = if outgoing { (owner, id) } else { (id, owner) };
+        assert_eq!(handoff["from"], from);
+        assert_eq!(handoff["to"], to);
+        assert_eq!(handoff["brief"], brief);
+        let page = call(&mut query, "read_transcript", json!({"id":id}));
+        assert!(
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == handoff["id"])
+        );
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+        assert!(
+            loads <= 4,
+            "focused peer {name} loaded unrelated indexes: {loads}"
+        );
+    }
+}
+
+#[test]
 fn shared_virtual_and_unsent_owners_preserve_complete_native_results() {
     let home = Home::new("shared-virtual-owners");
     for (sid, minute) in [("first", 1), ("second", 2)] {
@@ -6056,7 +6343,9 @@ fn activity_family_rolls_up_without_child_step_duplication() {
 #[test]
 fn activity_step_transcript_anchor_reads_exact_record() {
     let home = activity_fixture();
-    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
     crate::model::observe_catalog(
         &home.options,
         &mut cache,
@@ -6076,27 +6365,38 @@ fn activity_step_transcript_anchor_reads_exact_record() {
 }
 
 #[test]
-fn activity_step_transcript_anchor_refuses_in_memory_fallback() {
+fn warehouse_transcript_anchor_rejects_a_stale_activity_generation() {
     let home = activity_fixture();
     let mut query = home.query();
     let activity = call(&mut query, "get_session_activity", json!({"id":"activity"}));
     let args = json!({"id":"activity", "step": {
-        "generation": activity["generation"], "ordinal": 0, "id": activity["items"][0]["id"]
+        "generation": "stale", "ordinal": 0, "id": activity["items"][0]["id"]
     }});
-    assert!(query.read_transcript(&args, NOW, None).is_err());
+    assert_eq!(
+        failure(&mut query, "read_transcript", args),
+        "stale_projection"
+    );
 }
 
 #[test]
 fn activity_projection_rejects_a_different_storage_namespace() {
     let home = activity_fixture();
-    let mut query = home.query();
-    call(&mut query, "get_session_activity", json!({"id":"activity"}));
-    let evidence = &query.sources.machines[0].1;
+    let mut cache =
+        crate::storage::sqlite::open_index(&home.options, &crate::storage::Namespace::local())
+            .unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
     let wrong = crate::storage::Namespace::new("other-source").unwrap();
     let args = json!({"id":"activity"});
     assert!(
         super::activity::read(
-            &evidence.options,
+            &home.options,
             Some(&wrong),
             "activity",
             &args,
@@ -6106,8 +6406,8 @@ fn activity_projection_rejects_a_different_storage_namespace() {
         )
         .is_err()
     );
-    let db = rusqlite::Connection::open(crate::events::EventCache::path(&evidence.options.cache))
-        .unwrap();
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
     let metadata: String = db
         .query_row(
             "SELECT metadata FROM session_activity_sources WHERE session_key='activity'",
@@ -6118,7 +6418,7 @@ fn activity_projection_rejects_a_different_storage_namespace() {
     let row = serde_json::from_str(&metadata).unwrap();
     assert!(
         crate::events::store::session_activity::publish_selected(
-            &evidence.options,
+            &home.options,
             &row,
             Some(&wrong),
         )
@@ -6628,15 +6928,14 @@ fn activity_cold_direct_call_does_not_prepare_unrelated_sources() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(projections, 1);
+        assert_eq!(projections, 0, "native queries do not publish activity");
     }
 }
 
 #[test]
 fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
-    // A fresh activity process must read only the selected projection from a
-    // listing-created index. Unrelated native preparation exceeds the smaller
-    // control, even though the selected twelve-step session fits comfortably.
+    // A fresh activity process must derive only the selected session from a
+    // listing-created Index. The smaller control excludes workspace derivation.
     let home = Home::new("activity-batches");
     for n in 0..144 {
         let sid = format!("session-{n:03}");
@@ -6694,7 +6993,7 @@ fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(current, 1, "only the selected session may be published");
+        assert_eq!(current, 0, "native queries do not publish activity");
         let next = call(
             &mut Query::new(options),
             "get_session_activity",

@@ -316,6 +316,7 @@ pub(super) fn accepted_codex(
 
 /// A focused activity derivation publishes its own physical-source projection.
 /// It never replaces Catalog ownership, relationships or family summaries.
+#[cfg(test)]
 pub(crate) fn publish_selected(
     options: &crate::Options,
     row: &crate::model::summary::CatalogRow,
