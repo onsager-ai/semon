@@ -8189,13 +8189,18 @@ fn build_sources_inner(
     let warehouse_activity = warehouse
         .and_then(|(_, requested)| requested)
         .and_then(|requested| {
-            builder.sessions.iter().find(|session| {
-                session.key == requested
-                    || session
-                        .files
-                        .iter()
-                        .any(|&file| files[file].id == requested)
-            })
+            builder
+                .by_key
+                .get(requested)
+                .map(|&index| &builder.sessions[index])
+                .or_else(|| {
+                    builder.sessions.iter().find(|session| {
+                        session
+                            .files
+                            .iter()
+                            .any(|&file| files[file].id == requested)
+                    })
+                })
         })
         .and_then(|session| Some((session, activity_projections.get(&session.key)?.as_ref()?)))
         .map(|(session, projection)| {

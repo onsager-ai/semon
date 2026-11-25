@@ -1059,14 +1059,18 @@ impl Query {
             .collect::<Result<Vec<_>, QueryError>>()?;
         self.start = parts.iter().filter_map(|(_, data)| data.window_start).max();
         self.native = Some(QueryRead::new(parts, usize::MAX));
-        let mut answer = match tool {
+        let result = match tool {
             "list_sessions" => self.list_sessions(args, now, None),
             "get_session" => self.get_session(args, now, None),
             "get_session_activity" => activity::warehouse_page(self.evidence(), args, now),
             "read_transcript" => self.read_transcript(args, now, None),
             "stalls" => self.stalls(args, now, None),
             _ => unreachable!("every tool is handled"),
-        }?;
+        };
+        if focus.is_some() {
+            self.native = None;
+        }
+        let mut answer = result?;
         answer["window_start"] = json!(self.start);
         Ok(answer)
     }

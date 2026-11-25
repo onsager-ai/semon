@@ -41,6 +41,7 @@ pub fn admit_warehouse(options: &Options, cancelled: impl Fn() -> bool) -> io::R
         |_, _| Ok(true),
         cancelled,
     )
+    .map(|_| ())
 }
 
 pub(crate) fn admit_namespace(
@@ -50,7 +51,7 @@ pub(crate) fn admit_namespace(
     include_claude_parent: bool,
     include: impl Fn(&crate::Input, &std::path::Path) -> io::Result<bool>,
     cancelled: impl Fn() -> bool,
-) -> io::Result<()> {
+) -> io::Result<BTreeSet<String>> {
     let _facts_fence = options
         .facts
         .as_ref()
@@ -72,6 +73,7 @@ pub(crate) fn admit_namespace(
                 .is_none_or(|time| time.as_millis() >= u128::try_from(cutoff).unwrap_or(0))
         })
     };
+    let mut skipped = BTreeSet::new();
     loop {
         if cancelled() {
             return Err(io::Error::new(
@@ -83,7 +85,12 @@ pub(crate) fn admit_namespace(
         let mut seen = BTreeSet::new();
         for input in page.inputs {
             let path = input.full_path(options);
+            let claude_top = input.root == crate::InputRoot::Claude
+                && path.parent().and_then(std::path::Path::parent) == Some(projects.as_path());
             if !in_window(&path) {
+                if claude_top && let Some(id) = path.file_stem().and_then(|id| id.to_str()) {
+                    skipped.insert(id.to_owned());
+                }
                 continue;
             }
             if input.root == crate::InputRoot::Codex
@@ -92,7 +99,7 @@ pub(crate) fn admit_namespace(
                 continue;
             }
             if input.root == crate::InputRoot::Claude
-                && path.parent().and_then(std::path::Path::parent) != Some(projects.as_path())
+                && !claude_top
                 && !crate::native_sidecar::agent_path(&path)
             {
                 continue;
@@ -146,7 +153,7 @@ pub(crate) fn admit_namespace(
         }
         cache.release_published_indexes();
         if page.complete {
-            return Ok(());
+            return Ok(skipped);
         }
     }
 }

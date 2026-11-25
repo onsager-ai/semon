@@ -1665,30 +1665,45 @@ SELECT DISTINCT ownership.owner FROM peers
 JOIN warehouse_current current ON current.source=peers.source
 JOIN bridge_session_owner ownership ON ownership.source=peers.source";
 
+// Include the native ID behind a qualified key, every literal spelling that
+// could reserve that key, and all harness owners of those IDs. The model
+// assigns aliases from the in-window files, after admission can find collisions.
+fn native_query_ids(key: &str) -> BTreeSet<&str> {
+    let mut ids = BTreeSet::from([key]);
+    let mut bare = key;
+    while let Some(rest) = bare.strip_prefix(':') {
+        ids.insert(rest);
+        bare = rest;
+    }
+    if let Some((harness, id)) = bare.split_once(':')
+        && crate::InputRoot::parse(harness).is_some()
+    {
+        ids.insert(id);
+    }
+    ids
+}
+
 fn native_query_paths(
     db: &Connection,
     source: &Source<'_>,
     key: &str,
+    ids: &str,
     activity_only: bool,
 ) -> Result<Vec<String>, ReadError> {
-    let mut owners = if let Some((owner, _, _)) = current_identity(db, source, key, None)? {
-        BTreeSet::from([owner])
-    } else {
-        // A whole-file scan window can expose a continuation by its own native
-        // ID after the warehouse component's original owner ages out.
-        let mut aliases = db
-            .prepare_cached(
-                "SELECT DISTINCT b.owner FROM dim_session d
-             JOIN bridge_session_owner b ON b.source=d.source
-             WHERE d.native_id=?1",
-            )
-            .map_err(index)?;
-        aliases
-            .query_map([key], |row| row.get::<_, i64>(0))
-            .map_err(index)?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()
-            .map_err(index)?
-    };
+    // Match members as well as owners: an in-window continuation can become
+    // the native owner when the first file in its component ages out.
+    let mut aliases = db
+        .prepare_cached(
+            "SELECT DISTINCT b.owner FROM json_each(?1) ids
+             JOIN dim_session d ON d.native_id=ids.value
+             JOIN bridge_session_owner b ON b.source=d.source",
+        )
+        .map_err(index)?;
+    let mut owners = aliases
+        .query_map([ids], |row| row.get::<_, i64>(0))
+        .map_err(index)?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()
+        .map_err(index)?;
     if owners.is_empty() && !activity_only {
         let bare = key.rsplit_once('@').map_or(key, |(bare, _)| bare);
         if let Some(target) = bare.strip_prefix("unsent:") {
@@ -1759,6 +1774,8 @@ pub(crate) fn native_query(
     use crate::model::{catalog_source_in_window, scan_cutoff};
 
     let cutoff = scan_cutoff(options, now);
+    let ids = focus.map(native_query_ids).unwrap_or_default();
+    let encoded_ids = encode(&ids).map_err(std::io::Error::other)?;
     let mut prior_paths = BTreeSet::new();
     if let Some(key) = focus {
         let path = EventCache::path(&options.cache);
@@ -1768,19 +1785,21 @@ pub(crate) fn native_query(
             if let Ok(view) = selected::ReadView::open(&source) {
                 let tx = view.lock().map_err(std::io::Error::other)?;
                 prior_paths.extend(
-                    native_query_paths(&tx, &source, key, activity_only)
+                    native_query_paths(&tx, &source, key, &encoded_ids, activity_only)
                         .map_err(std::io::Error::other)?,
                 );
             }
         }
     }
-    crate::origin_projection::admit_namespace(
+    let skipped = crate::origin_projection::admit_namespace(
         options,
         namespace,
         cutoff,
         focus.is_some() && !activity_only,
         |input, path| {
-            let Some(key) = focus else { return Ok(true) };
+            if focus.is_none() {
+                return Ok(true);
+            }
             if path.to_str().is_some_and(|path| prior_paths.contains(path)) {
                 return Ok(true);
             }
@@ -1788,13 +1807,7 @@ pub(crate) fn native_query(
                 .file_stem()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
-            let matches = |id: &str| {
-                key == id
-                    || key
-                        .trim_start_matches(':')
-                        .split_once(':')
-                        .is_some_and(|(harness, own)| harness == input.root.as_str() && own == id)
-            };
+            let matches = |id: &str| ids.contains(id);
             match input.root {
                 crate::InputRoot::Claude => {
                     if crate::native_sidecar::agent_path(path) {
@@ -1834,8 +1847,8 @@ pub(crate) fn native_query(
     let view = selected::ReadView::open(&source).map_err(std::io::Error::other)?;
     let db = view.lock().map_err(std::io::Error::other)?;
     let paths = if let Some(key) = focus {
-        let paths =
-            native_query_paths(&db, &source, key, activity_only).map_err(std::io::Error::other)?;
+        let paths = native_query_paths(&db, &source, key, &encoded_ids, activity_only)
+            .map_err(std::io::Error::other)?;
         encode(&paths).map_err(std::io::Error::other)?
     } else {
         Snapshot::read(&db, &source)
@@ -1857,19 +1870,6 @@ pub(crate) fn native_query(
     let mut sources = Vec::new();
     let mut ids = BTreeSet::new();
     let mut usage = BTreeMap::new();
-    let mut skipped = BTreeSet::new();
-    for (path, availability) in &source.inventory {
-        if let (Some(cutoff), Availability::Expected(Some(stat))) = (cutoff, availability)
-            && stat.modified_ns / 1_000_000 < u128::try_from(cutoff).unwrap_or(0)
-            && let Some(relative) = selected::relative(options, "claude", path)
-            && relative.split('/').count() == 3
-            && let Some(id) = std::path::Path::new(relative)
-                .file_stem()
-                .and_then(|id| id.to_str())
-        {
-            skipped.insert(id.to_owned());
-        }
-    }
     while let Some(row) = rows.next().map_err(std::io::Error::other)? {
         let harness: String = row.get(0).map_err(std::io::Error::other)?;
         let path: String = row.get(1).map_err(std::io::Error::other)?;
@@ -1879,9 +1879,6 @@ pub(crate) fn native_query(
         let native_id: String = row.get(3).map_err(std::io::Error::other)?;
         let member = ledger.source(std::path::Path::new(&path), &native_id);
         if !catalog_source_in_window(&member, cutoff) {
-            if harness == "claude" && !crate::native_sidecar::agent_path(&member.path) {
-                skipped.insert(native_id);
-            }
             continue;
         }
         if harness == "codex"
