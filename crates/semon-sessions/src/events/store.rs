@@ -6244,6 +6244,15 @@ fn read_message_usage(
     Ok(usage_by_id)
 }
 
+/// Native Codex can have a qualified usage cohort with zero accepted steps.
+pub(crate) fn warehouse_has_codex_usage(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<bool> {
+    native_usage::normalized(connection, path, ledger)
+}
+
 /// Activity needs normalized metadata only. Never load body rows, transcript
 /// extras, runtime facts, or semantic projections for an analytics input.
 pub(crate) fn warehouse_activity_file(

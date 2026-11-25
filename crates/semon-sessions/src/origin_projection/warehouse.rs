@@ -106,7 +106,8 @@ pub struct WarehouseAnalyticsInput {
     after: i64,
     last_checkpoint: Option<String>,
     table: Arc<crate::pricing::EffectiveTable>,
-    recorded_repos: BTreeMap<String, RepoId>,
+    options: Options,
+    machine: MachineFacts,
 }
 
 impl WarehouseAnalyticsInput {
@@ -133,13 +134,15 @@ impl WarehouseAnalyticsInput {
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        let recorded_repos = options
+        let machine = options
             .facts
             .as_ref()
-            .map(|path| crate::facts::read_facts(path))
+            .map(|path| crate::facts::source_authority::CurrentSources::open(path)?.read_snapshot())
             .transpose()
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
-            .map_or_else(BTreeMap::new, |facts| facts.repo_ids);
+            .map_or(MachineFacts::Local, |facts| {
+                MachineFacts::Recorded(Box::new(facts))
+            });
         Ok(Self {
             connection,
             namespace: namespace.into(),
@@ -150,7 +153,8 @@ impl WarehouseAnalyticsInput {
             after: 0,
             last_checkpoint: None,
             table: crate::pricing::snapshot(),
-            recorded_repos,
+            options: options.clone(),
+            machine,
         })
     }
 
@@ -163,9 +167,6 @@ impl WarehouseAnalyticsInput {
              CROSS JOIN lineage_member m ON m.source=d.source
              CROSS JOIN lineage_group g ON g.id=m.component AND g.owner=d.source
              WHERE d.source>?2 AND d.source<=?3
-               AND d.harness IN ('claude','codex')
-               AND (d.harness<>'codex' OR EXISTS (
-                 SELECT 1 FROM fact_step_observation u WHERE u.source=d.source AND u.kind='codex-response' AND u.accepted))
              ORDER BY d.source LIMIT ?4",
         )?;
         statement
@@ -355,6 +356,9 @@ impl WarehouseAnalyticsInput {
         owner: &Owner,
         uid: String,
     ) -> rusqlite::Result<Option<semon_asi::input::AdmittedSession>> {
+        if owner.harness == "copilot" {
+            return Ok(None);
+        }
         let members = self.members(owner.source)?;
         if members.is_empty() {
             return Ok(None);
@@ -362,6 +366,14 @@ impl WarehouseAnalyticsInput {
         let mut files = Vec::with_capacity(members.len());
         let mut sources = Vec::with_capacity(members.len());
         for member in &members {
+            let path = std::path::Path::new(&member.path);
+            if crate::native_evidence::catalog_input(path, &self.options)
+                .is_none_or(|input| input.root.as_str() != owner.harness)
+                || (owner.harness == "codex"
+                    && !self.machine.codex_rollout_is_current(&self.options, path))
+            {
+                return Ok(None);
+            }
             let Some(file) =
                 store::warehouse_activity_file(&self.connection, &member.path, &member.ledger)?
             else {
@@ -380,7 +392,17 @@ impl WarehouseAnalyticsInput {
             let copied = copied_events(index, &members, &files);
             inputs.add(&member.path, &owner.harness, file, |i| copied.contains(&i));
             if owner.harness == "codex" {
-                inputs.usage.extend(self.codex_usage(member)?);
+                let usage = self.codex_usage(member)?;
+                if usage.is_empty()
+                    && !store::warehouse_has_codex_usage(
+                        &self.connection,
+                        &member.path,
+                        &member.ledger,
+                    )?
+                {
+                    return Ok(None);
+                }
+                inputs.usage.extend(usage);
             }
         }
         let shared = if owner.harness == "claude" {
@@ -467,23 +489,32 @@ impl WarehouseAnalyticsInput {
              ORDER BY u.pos,u.block,u.occurrence",
         )?;
         query
-            .query_map(params![member.source, member.ledger.offset], |row| {
-                let identity: String = row.get(1)?;
-                let billing: String = row.get(3)?;
-                Ok(UsageStep::normalized_codex(
-                    serde_json::from_str(&identity).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    SourcePosition {
-                        source: member.path.clone(),
-                        offset: row.get(0)?,
-                    },
-                    events::CodexUsageEvent {
-                        model: row.get(2)?,
-                        tokens: serde_json::from_str(&billing)
+            .query_map(
+                params![
+                    member.source,
+                    i64::try_from(member.ledger.offset)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?
+                ],
+                |row| {
+                    let identity: String = row.get(1)?;
+                    let billing: String = row.get(3)?;
+                    Ok(UsageStep::normalized_codex(
+                        serde_json::from_str(&identity)
                             .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                        timestamp: row.get(4)?,
-                    },
-                ))
-            })?
+                        SourcePosition {
+                            source: member.path.clone(),
+                            offset: u64::try_from(row.get::<_, i64>(0)?)
+                                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        },
+                        events::CodexUsageEvent {
+                            model: row.get(2)?,
+                            tokens: serde_json::from_str(&billing)
+                                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                            timestamp: row.get(4)?,
+                        },
+                    ))
+                },
+            )?
             .collect()
     }
 
@@ -545,8 +576,10 @@ impl WarehouseAnalyticsInput {
     }
 
     fn repo(&self, cwd: Option<&str>) -> rusqlite::Result<Repo> {
-        let id = cwd.and_then(|cwd| self.recorded_repos.get(cwd));
-        if let Some(RepoId::Remote(id)) = id {
+        let id = cwd
+            .and_then(|cwd| self.machine.recorded_repo_id(cwd))
+            .flatten();
+        if let Some(RepoId::Remote(id)) = &id {
             return Ok(Repo {
                 key: id.clone(),
                 repo_id: Some(id.clone()),
@@ -554,7 +587,7 @@ impl WarehouseAnalyticsInput {
                 display_name: "remote repository".into(),
             });
         }
-        if let Some(RepoId::Path(path)) = id {
+        if let Some(RepoId::Path(path)) = &id {
             if let Some(key) = self
                 .connection
                 .query_row(

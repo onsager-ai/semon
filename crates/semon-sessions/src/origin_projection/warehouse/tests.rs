@@ -19,14 +19,15 @@ const BUDGET: InputBudget = InputBudget {
 };
 
 struct Fixture {
-    root: tempfile::TempDir,
+    root: PathBuf,
     options: Options,
 }
 
 impl Fixture {
-    fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path();
+    fn new(name: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("semon-p4-{}-{name}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let dir = &root;
         let options = Options {
             claude_home: dir.join("claude"),
             claude_json: dir.join("claude.json"),
@@ -72,6 +73,12 @@ impl Fixture {
 
     fn open(&self) -> WarehouseAnalyticsInput {
         WarehouseAnalyticsInput::open(&self.options, NAMESPACE).unwrap()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
@@ -136,7 +143,7 @@ fn logical_rows(
 
 #[test]
 fn cold_start_warehouse_matches_semantic_origin() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("cold");
     fixture.seed("a");
     fixture.seed("b");
     let capture = crate::test_hooks::register(&fixture.options.cache, |point| {
@@ -164,7 +171,7 @@ fn cold_start_warehouse_matches_semantic_origin() {
     assert!(actual.values().all(|session| session.steps.len() == 1));
     // Exercise the real writer and its manifest checkpoint through several batches.
     let mut input = fixture.open();
-    let mut store = Store::open(&fixture.root.path().join("warehouse-analytics")).unwrap();
+    let mut store = Store::open(&fixture.root.join("warehouse-analytics")).unwrap();
     assert!(
         !publish_cycle(
             &mut store,
@@ -198,7 +205,7 @@ fn cold_start_warehouse_matches_semantic_origin() {
 
 #[test]
 fn watch_rescan_pins_a_drain_and_sees_next_append() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("watch");
     fixture.seed("a");
     let path = fixture.seed("b");
     fixture.admit();
@@ -229,7 +236,7 @@ fn watch_rescan_pins_a_drain_and_sees_next_append() {
 
 #[test]
 fn concurrent_admission_matches_single_run() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("race");
     let path = fixture.seed("race");
     fixture.admit();
     let count = || {
@@ -260,7 +267,7 @@ fn concurrent_admission_matches_single_run() {
         stale.join().unwrap();
         assert_eq!(count(), 3);
     });
-    let baseline = Fixture::new();
+    let baseline = Fixture::new("baseline");
     let path = baseline.seed("race");
     append(&path, "race", 2);
     append(&path, "race", 3);
@@ -269,4 +276,49 @@ fn concurrent_admission_matches_single_run() {
         logical_rows(&drain(&mut fixture.open())),
         logical_rows(&drain(&mut baseline.open()))
     );
+}
+
+#[test]
+fn next_inventory_reflects_replacement_and_committed_withdrawal() {
+    let fixture = Fixture::new("withdrawal");
+    let path = fixture.seed("replace");
+    fixture.admit();
+    let mut store = Store::open(&fixture.root.join("warehouse-analytics")).unwrap();
+    let publish = |store: &mut Store| {
+        let mut input = fixture.open();
+        assert!(
+            publish_cycle(store, &mut input, NAMESPACE, Versions::default(), BUDGET)
+                .unwrap()
+                .complete
+        );
+    };
+    publish(&mut store);
+    let initial = drain(&mut fixture.open());
+    let uid = "fixture/claude/replace";
+    let replacement = path.with_extension("tmp");
+    fs::write(&replacement, []).unwrap();
+    append(&replacement, "replace", 2);
+    fs::rename(&replacement, &path).unwrap();
+    fixture.admit();
+    let replaced = drain(&mut fixture.open());
+    assert_eq!(replaced[uid].steps.len(), 1);
+    assert_ne!(
+        replaced[uid].steps[0].step_uid,
+        initial[uid].steps[0].step_uid
+    );
+    assert_ne!(replaced[uid].source_witness, initial[uid].source_witness);
+    publish(&mut store);
+
+    // The regular Index owns withdrawals. Source disappearance alone does
+    // not let the reader erase or mark a still-admitted warehouse identity.
+    let namespace = Namespace::new("local").unwrap();
+    let mut producer = sqlite::open_index(&fixture.options, &namespace).unwrap();
+    producer.begin_full_scan().unwrap();
+    fs::remove_file(path).unwrap();
+    fixture.admit();
+    assert_eq!(drain(&mut fixture.open()).len(), 1);
+    producer.retain(&BTreeSet::new(), &mut false);
+    publish(&mut store);
+    assert!(store.live_map().contains_key(uid));
+    assert!(store.manifest().source_missing.contains_key(uid));
 }
