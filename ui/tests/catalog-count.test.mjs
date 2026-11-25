@@ -17,7 +17,7 @@ function observation(keys = ['a', 'b'], source = 'laptop') {
   const page = {
     machine: source,
     generation: 'a'.repeat(64),
-    read_scope: 'retained_history',
+    read_scope: 'current',
     completeness: { state: 'complete' },
     items: keys.map((key) => ({ key })),
     next_cursor: null,
@@ -35,7 +35,7 @@ function observation(keys = ['a', 'b'], source = 'laptop') {
   };
 }
 
-test('only a complete unpaged exact source observation establishes the displayed count', () => {
+test('only a complete unpaged current source observation establishes the displayed count', () => {
   for (const keys of [[], ['a'], ['a', 'b'], Array.from({ length: 100 }, (_, i) => String(i))]) {
     const value = observation(keys);
     assert.equal(completeCatalogCount(value), true);
@@ -103,7 +103,7 @@ test('a page cannot reuse evidence from another generation, source or read scope
     (value) => (value.page.generation = 'b'.repeat(64)),
     (value) => (value.source = 'workstation'),
     (value) => (value.page.machine = 'workstation'),
-    (value) => (value.page.read_scope = 'current'),
+    (value) => (value.page.read_scope = 'retained_history'),
     (value) => (value.witness = null),
     (value) => (value.page = null),
   ]) {
