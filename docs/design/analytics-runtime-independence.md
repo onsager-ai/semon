@@ -1,7 +1,8 @@
 # Analytics without live runtime observation
 
-Chief PM approved the design on 2026-11-24. P4.1 found the change-tracking
-constraint below. Infra runs the hp-code-2 measurement before P4.2 proceeds.
+Chief PM approved the design on 2026-11-24. The owner approved D11 for P4.1.
+The staged adapter scans committed warehouse inputs in bounded batches. Infra
+runs the hp-code-2 measurement before P4.2 proceeds.
 
 ## Problem
 
@@ -117,32 +118,28 @@ and family totals, costs, and label provenance. Keep source qualification and
 Index compare-and-swap checks. Remove the old stage and its generation fences
 when the remaining CLI, MCP and export callers have moved.
 
-### P4.1 change-tracking constraint
+### D11 · P4.1 full namespace scans
 
-`warehouse_prefix.revision` orders prefix creation and advancement. A qualified
-withdrawal can delete `warehouse_current` and retire the dimension and lineage
-membership without creating a prefix receipt. A same-offset sidecar change or
-source relocation can also change the admitted input without advancing that
-revision. Replacement creates a receipt for the new source, but that receipt
-alone cannot enumerate all old and new identities affected by regrouping. These
-changes can occur between analytics batches or while its process is down.
+P4.1 stages a runtime-free native admission entry point and a warehouse input
+adapter. Each drain opens one SQLite read snapshot after admission and pages
+whole sessions with the existing input budgets. The snapshot pins membership,
+ledgers, prefixes and facts for the whole drain. Appends or replacements that
+commit after it opens appear on the next drain. A restart takes a fresh
+inventory and uses the existing checkpoint representation. The adapter has no
+persisted change feed or checkpoint format of its own.
 
-The existing `catalog_source_revision` counter can signal that a source changed,
-but the accompanying claims are per path and Catalog can acknowledge and delete
-them before analytics reads them. The silver journal reflects semantic activity
-publication. Using either journal as the warehouse change feed would miss work
-or retain the dependency phase 4 is removing. A complete namespace scan can
-recover current membership, but requires revisiting the corpus after unrelated
-changes and cannot provide the proposed bounded replay over committed changes.
-
-The design needs a durable Index change boundary that covers withdrawals and
-old and new identity dependencies, with entries committed alongside the native
-facts and ledger CAS. It also needs an analytics checkpoint qualified against
-that boundary so the writer can resume a fixed replay endpoint across restarts.
-A design for this boundary must price journal writes and storage, dependency
-fan-out, replay retention, and inventory recovery when a checkpoint is too old.
-Both the new persisted boundary and any checkpoint change require a separate
-decision before implementation.
+The scan revisits the namespace on every drain. Measure that cost against the
+roughly 3,000 sessions on the six-hour hp-code-2 timer. A long read snapshot can
+also delay SQLite WAL reclamation until the drain closes. The existing Index
+producer can qualify and commit a withdrawal. A fresh warehouse inventory then
+marks the absent published identity source-missing. The runtime-free admission
+entry point does not reconcile disappeared files or re-admit archived history.
+These cases can remain visible until the other native producer reconciles them.
+The staged adapter derives activity from normalized Index rows bound to the
+same warehouse ledgers and uses the warehouse's committed identities, native
+parents and usage facts. Where no recorded repo identity is available it
+publishes an unknown repo. The next slice owns CLI materialize, ASI SQL and
+export cutover and the production timing gate.
 
 ## hp-code-2 measurement before P4.2
 

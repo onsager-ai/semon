@@ -754,6 +754,142 @@ fn pretty_model(model: &str) -> Option<String> {
     Some(model)
 }
 
+/// Derive activity from committed, body-free Index rows, regardless of how
+/// the caller resolves a session's current physical members.
+#[derive(Default)]
+pub(crate) struct ActivityInputs {
+    pub(crate) usage: Vec<events::session_activity::UsageStep>,
+    signals: Vec<(String, events::Signal)>,
+    observations: Vec<events::session_activity::classify::LocatedObservation>,
+    unclassified_tools: Vec<events::session_activity::UnclassifiedTool>,
+    input_events: Vec<events::session_activity::TimedInput>,
+}
+
+impl ActivityInputs {
+    pub(crate) fn add(
+        &mut self,
+        path: &str,
+        harness: &str,
+        index: &events::FileIndex,
+        is_copy: impl Fn(usize) -> bool,
+    ) {
+        use events::session_activity::{SourcePosition, UsageStep};
+        if harness == "claude" {
+            let mut turns: Vec<_> = index
+                .events
+                .iter()
+                .filter(|event| matches!(event.k, events::Kind::U | events::Kind::Ask))
+                .map(|event| (event.o, event.u.clone()))
+                .collect();
+            turns.sort_by_key(|(offset, _)| *offset);
+            self.usage.extend(index.usage().iter().map(|(id, used)| {
+                let turn = turns
+                    .partition_point(|(offset, _)| *offset <= used.offset)
+                    .checked_sub(1)
+                    .and_then(|index| turns[index].1.clone());
+                let mut step = UsageStep::claude(
+                    id.clone(),
+                    SourcePosition {
+                        source: path.into(),
+                        offset: used.offset,
+                    },
+                    used.clone(),
+                );
+                step.turn_id = turn;
+                step
+            }));
+        }
+        self.input_events.extend(
+            index
+                .events
+                .iter()
+                .filter(|event| matches!(event.k, events::Kind::U | events::Kind::Ask))
+                .map(|event| events::session_activity::TimedInput {
+                    position: SourcePosition {
+                        source: path.into(),
+                        offset: event.o,
+                    },
+                    timestamp: event.t,
+                }),
+        );
+        self.observations
+            .extend(index.events.iter().enumerate().filter_map(|(at, event)| {
+                event.activity_observation.clone().map(|mut observation| {
+                    observation
+                        .fill_wait_from_reply(event.t, event.r.as_ref().and_then(|reply| reply.t));
+                    events::session_activity::classify::LocatedObservation {
+                        position: SourcePosition {
+                            source: path.into(),
+                            offset: event.o,
+                        },
+                        timestamp: event.t,
+                        result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
+                        result_offset: event.r.as_ref().map(|reply| reply.o),
+                        // Copies retain timing and classifier evidence, but do
+                        // not contribute a second tool call to StepFacts.
+                        tool: if is_copy(at) {
+                            None
+                        } else {
+                            event.activity_tool.clone()
+                        },
+                        observation,
+                    }
+                })
+            }));
+        self.unclassified_tools.extend(
+            index
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| {
+                    event.k == events::Kind::Tool && event.activity_observation.is_none()
+                })
+                .map(|(at, event)| events::session_activity::UnclassifiedTool {
+                    position: SourcePosition {
+                        source: path.into(),
+                        offset: event.o,
+                    },
+                    // A completion-only connector has its call and reply
+                    // at the same record; it provides no observed start.
+                    timestamp: event
+                        .t
+                        .filter(|_| event.r.as_ref().is_none_or(|reply| reply.o != event.o)),
+                    result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
+                    result_offset: event.r.as_ref().map(|reply| reply.o),
+                    ok: event
+                        .r
+                        .as_ref()
+                        .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e)),
+                    tool: if is_copy(at) { None } else { event.n.clone() },
+                }),
+        );
+        self.signals.extend(
+            index
+                .signals
+                .iter()
+                .cloned()
+                .map(|signal| (path.into(), signal)),
+        );
+    }
+
+    pub(crate) fn derive(
+        self,
+        key: String,
+        shared: &crate::claude_usage::Shared,
+        table: Arc<crate::pricing::EffectiveTable>,
+    ) -> events::store::session_activity::Projection {
+        events::store::session_activity::Projection::derive(
+            key,
+            self.usage,
+            shared,
+            self.signals,
+            self.observations,
+            (self.unclassified_tools, self.input_events),
+            table,
+        )
+    }
+}
+
 /// What a subagent's `SendMessage` names as `to` for its own parent
 /// conversation ("Message queued for the main conversation's next turn").
 const PARENT_ADDRESS: &str = "main";
@@ -2481,7 +2617,6 @@ impl<'a> Builder<'a> {
         &self,
         session: &Sess,
     ) -> io::Result<Option<events::store::session_activity::Projection>> {
-        use events::session_activity::{SourcePosition, UsageStep};
         if !matches!(
             session.kind,
             SessKind::Lineage | SessKind::Agent | SessKind::Codex
@@ -2496,138 +2631,31 @@ impl<'a> Builder<'a> {
         {
             return Ok(None);
         }
-        let mut usage = Vec::new();
-        let mut signals = Vec::new();
-        let mut observations = Vec::new();
-        let mut unclassified_tools = Vec::new();
-        let mut input_events = Vec::new();
+        let mut inputs = ActivityInputs::default();
         for position in &session.files {
             let file = &self.files[*position];
             let path = file
                 .path
                 .to_str()
                 .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
-            if file.harness() == "claude" {
-                let mut turns: Vec<_> = file
-                    .summary
-                    .events
-                    .iter()
-                    .filter(|event| matches!(event.k, events::Kind::U | events::Kind::Ask))
-                    .map(|event| (event.o, event.u.clone()))
-                    .collect();
-                turns.sort_by_key(|(offset, _)| *offset);
-                usage.extend(file.summary.usage().iter().map(|(id, used)| {
-                    let turn = turns
-                        .partition_point(|(offset, _)| *offset <= used.offset)
-                        .checked_sub(1)
-                        .and_then(|index| turns[index].1.clone());
-                    let mut step = UsageStep::claude(
-                        id.clone(),
-                        SourcePosition {
-                            source: path.into(),
-                            offset: used.offset,
-                        },
-                        used.clone(),
-                    );
-                    step.turn_id = turn;
-                    step
-                }));
-            } else if file.summary.has_native_usage() {
-                usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
+            inputs.add(path, file.harness(), &file.summary, |at| {
+                self.copied.contains(&(*position, at))
+            });
+            if file.summary.has_native_usage() {
+                inputs
+                    .usage
+                    .extend(self.cache.activity_codex_steps(&summary::source(file))?);
             }
-            input_events.extend(
-                file.summary
-                    .events
-                    .iter()
-                    .filter(|event| matches!(event.k, events::Kind::U | events::Kind::Ask))
-                    .map(|event| events::session_activity::TimedInput {
-                        position: SourcePosition {
-                            source: path.into(),
-                            offset: event.o,
-                        },
-                        timestamp: event.t,
-                    }),
-            );
-            observations.extend(file.summary.events.iter().enumerate().filter_map(
-                |(at, event)| {
-                    event.activity_observation.clone().map(|mut observation| {
-                        observation.fill_wait_from_reply(
-                            event.t,
-                            event.r.as_ref().and_then(|reply| reply.t),
-                        );
-                        events::session_activity::classify::LocatedObservation {
-                            position: SourcePosition {
-                                source: path.into(),
-                                offset: event.o,
-                            },
-                            timestamp: event.t,
-                            result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
-                            result_offset: event.r.as_ref().map(|reply| reply.o),
-                            // Copies retain timing and classifier evidence, but do
-                            // not contribute a second tool call to StepFacts.
-                            tool: if self.copied.contains(&(*position, at)) {
-                                None
-                            } else {
-                                event.activity_tool.clone()
-                            },
-                            observation,
-                        }
-                    })
-                },
-            ));
-            unclassified_tools.extend(
-                file.summary
-                    .events
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, event)| {
-                        event.k == events::Kind::Tool && event.activity_observation.is_none()
-                    })
-                    .map(|(at, event)| events::session_activity::UnclassifiedTool {
-                        position: SourcePosition {
-                            source: path.into(),
-                            offset: event.o,
-                        },
-                        // A completion-only connector has its call and reply
-                        // at the same record; it provides no observed start.
-                        timestamp: event
-                            .t
-                            .filter(|_| event.r.as_ref().is_none_or(|reply| reply.o != event.o)),
-                        result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
-                        result_offset: event.r.as_ref().map(|reply| reply.o),
-                        ok: event
-                            .r
-                            .as_ref()
-                            .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e)),
-                        tool: if self.copied.contains(&(*position, at)) {
-                            None
-                        } else {
-                            event.n.clone()
-                        },
-                    }),
-            );
-            signals.extend(
-                file.summary
-                    .signals
-                    .iter()
-                    .cloned()
-                    .map(|signal| (path.into(), signal)),
-            );
         }
         let shared = self
             .shared_usage
             .get(&session.key)
             .cloned()
             .unwrap_or_default();
-        let table = crate::pricing::snapshot();
-        Ok(Some(events::store::session_activity::Projection::derive(
+        Ok(Some(inputs.derive(
             session.key.clone(),
-            usage,
             &shared,
-            signals,
-            observations,
-            (unclassified_tools, input_events),
-            table,
+            crate::pricing::snapshot(),
         )))
     }
 
