@@ -7338,6 +7338,15 @@ mod tests {
                                 &format!("machine={source}&sid={sid}&limit=8"),
                                 None,
                             );
+                            // An append can invalidate the source snapshot even on a first-page
+                            // read. The next iteration starts a new read for this source.
+                            if page.status == 409 {
+                                let error = body_of(&page);
+                                assert_eq!(error["error"]["code"], "stale_cursor", "{error}");
+                                assert_eq!(error["error"]["retryable"], true, "{error}");
+                                assert_eq!(error["reset_cursor"], true, "{error}");
+                                continue;
+                            }
                             assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
                             let page = body_of(&page);
                             assert_eq!(page["projection"], 7);
