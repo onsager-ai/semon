@@ -5993,6 +5993,114 @@ fn focused_tail_does_not_load_growing_session_busy_metadata() {
 }
 
 #[test]
+fn standalone_peer_details_resolve_the_ids_returned_by_listing() {
+    let home = Home::new("standalone-peer-owners");
+    home.top("sender", &[
+        human("sender", ts(1, 0), "Send a message"),
+        assistant("sender", ts(1, 1), vec![tool("send", "SendMessage", json!({
+            "to":"remote [offline]", "message":"Claude outgoing context"
+        }))]),
+        json!({"type":"user","sessionId":"sender","timestamp":ts(1,2),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"send","content":"sent"}]},
+            "toolUseResult":{"success":true,"message":"sent"}}),
+    ]);
+    let receipt = |origin: Value, body: &str| {
+        json!({"type":"user","sessionId":"receiver","timestamp":ts(2,1),"origin":origin,
+            "message":{"role":"user","content":body}})
+    };
+    home.top(
+        "receiver",
+        &[
+            human("receiver", ts(2, 0), "Receive messages"),
+            receipt(
+                json!({"kind":"peer","name":"process-peer","body":"Claude process receipt",
+            "from":"uds:/run/user/1000/cc-socks/7.sock","verifiedPeerPid":7,
+            "verifiedPeerProcStart":"1","msg_id":"process-receipt"}),
+                "Claude process receipt",
+            ),
+            receipt(
+                json!({"kind":"peer","name":"socket-peer","body":"Claude socket receipt",
+            "from":"uds:/run/user/1000/cc-socks/8.sock","msg_id":"socket-receipt"}),
+                "Claude socket receipt",
+            ),
+            receipt(
+                json!({"kind":"peer","name":"named-peer","body":"Claude named receipt",
+            "msg_id":"named-receipt"}),
+                "Claude named receipt",
+            ),
+        ],
+    );
+    home.lines("codex/sessions/2026/09/24/rollout-codex-sender.jsonl", &[
+        codex_line(ts(3, 0), "session_meta", json!({"id":"codex-sender","cwd":"/work/proj"})),
+        codex_line(ts(3, 0), "event_msg", json!({"type":"user_message","message":"Coordinate"})),
+        codex_line(ts(3, 1), "response_item", json!({"type":"function_call",
+            "namespace":"collaboration","name":"send_message","call_id":"send-to-worker",
+            "arguments":"{\"target\":\"root/missing-worker\",\"message\":\"Codex outgoing context\"}"})),
+        codex_line(ts(3, 2), "response_item", json!({"type":"function_call_output",
+            "call_id":"send-to-worker","output":"sent"})),
+    ]);
+    for n in 0..16 {
+        let id = format!("unrelated-{n}");
+        home.top(&id, &[human(&id, ts(4, 0), "Unrelated prompt")]);
+    }
+    let mut query = home.query();
+    let listing = call(&mut query, "list_sessions", json!({"limit":100}));
+    let sessions = listing["sessions"].as_array().unwrap();
+    let db =
+        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    assert_eq!(
+        db.execute(
+            "UPDATE files SET pending='invalid-json' WHERE path LIKE '%/unrelated-0.jsonl'",
+            []
+        )
+        .unwrap(),
+        1
+    );
+    for (name, owner, brief, outgoing) in [
+        ("remote", "sender", "Claude outgoing context", true),
+        ("process-peer", "receiver", "Claude process receipt", false),
+        ("socket-peer", "receiver", "Claude socket receipt", false),
+        ("named-peer", "receiver", "Claude named receipt", false),
+        (
+            "root/missing-worker",
+            "codex-sender",
+            "Codex outgoing context",
+            true,
+        ),
+    ] {
+        let row = sessions
+            .iter()
+            .find(|row| row["kind"] == "stub" && row["name"] == name)
+            .unwrap_or_else(|| panic!("listing omitted peer {name}"));
+        let id = row["id"].as_str().unwrap();
+        let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let detail = call(&mut query, "get_session", json!({"id":id}));
+        assert_eq!(detail["session"]["id"], id);
+        assert_eq!(detail["session"]["name"], name);
+        let handoffs = detail["session"]["handoffs"].as_array().unwrap();
+        assert_eq!(handoffs.len(), 1, "unexpected peer handoffs for {name}");
+        let handoff = &handoffs[0];
+        let (from, to) = if outgoing { (owner, id) } else { (id, owner) };
+        assert_eq!(handoff["from"], from);
+        assert_eq!(handoff["to"], to);
+        assert_eq!(handoff["brief"], brief);
+        let page = call(&mut query, "read_transcript", json!({"id":id}));
+        assert!(
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == handoff["id"])
+        );
+        let loads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+        assert!(
+            loads <= 4,
+            "focused peer {name} loaded unrelated indexes: {loads}"
+        );
+    }
+}
+
+#[test]
 fn shared_virtual_and_unsent_owners_preserve_complete_native_results() {
     let home = Home::new("shared-virtual-owners");
     for (sid, minute) in [("first", 1), ("second", 2)] {

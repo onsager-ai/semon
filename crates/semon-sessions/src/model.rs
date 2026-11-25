@@ -913,6 +913,26 @@ pub(crate) fn plain_name(name: &str) -> String {
         .to_owned()
 }
 
+/// A Claude peer is identified by the strongest evidence on its receipt.
+/// An outgoing send has only the peer's name.
+pub(crate) fn claude_peer_id(
+    name: &str,
+    pid: Option<u64>,
+    start: Option<&str>,
+    socket: Option<&str>,
+) -> String {
+    let identity = match (pid, socket) {
+        (Some(pid), _) => format!("pid:{pid}:{}", start.unwrap_or_default()),
+        (None, Some(socket)) => format!("sock:{socket}"),
+        (None, None) => format!("name:{}", plain_name(name)),
+    };
+    stable_id("peer-", &identity)
+}
+
+pub(crate) fn codex_peer_id(target: &str) -> String {
+    stable_id("peer-", &format!("codex:{target}"))
+}
+
 /// A received relay's `msg_id`: an agent message's id names its sender, not
 /// the message.
 fn relay_msg_id(event: &Event) -> Option<&String> {
@@ -2180,8 +2200,7 @@ impl<'a> Builder<'a> {
         index
     }
 
-    fn stub(&mut self, source: &str, name: &str) -> usize {
-        let key = stable_id("peer-", source);
+    fn stub(&mut self, key: String, name: &str) -> usize {
         if let Some(index) = self.by_key.get(&key) {
             return *index;
         }
@@ -4148,7 +4167,10 @@ impl<'a> Builder<'a> {
             } else if reply.m.is_some() {
                 let name = plain_name(&self.send_target(at));
                 unmatched = true;
-                (Some(self.stub(&format!("name:{name}"), &name)), None)
+                (
+                    Some(self.stub(claude_peer_id(&name, None, None, None), &name)),
+                    None,
+                )
             } else {
                 let name = plain_name(&self.send_target(at));
                 let unique = if let Some(epoch) = self.staged_epoch {
@@ -4172,7 +4194,9 @@ impl<'a> Builder<'a> {
                     unmatched = true;
                 }
                 (
-                    Some(unique.unwrap_or_else(|| self.stub(&format!("name:{name}"), &name))),
+                    Some(unique.unwrap_or_else(|| {
+                        self.stub(claude_peer_id(&name, None, None, None), &name)
+                    })),
                     None,
                 )
             };
@@ -4249,14 +4273,9 @@ impl<'a> Builder<'a> {
                 .and_then(agent_id)
                 .or_else(|| found.id.as_deref().filter(|_| agent).and_then(agent_id));
             let from = from.unwrap_or_else(|| {
-                let identity = match (peer.pid, &peer.start, &peer.sock) {
-                    (Some(pid), start, _) => {
-                        format!("pid:{pid}:{}", start.clone().unwrap_or_default())
-                    }
-                    (None, _, Some(sock)) => format!("sock:{sock}"),
-                    _ => format!("name:{name}"),
-                };
-                self.stub(&identity, &name)
+                let key =
+                    claude_peer_id(&name, peer.pid, peer.start.as_deref(), peer.sock.as_deref());
+                self.stub(key, &name)
             });
             let tag = if agent {
                 "agent-message"
@@ -4477,7 +4496,7 @@ impl<'a> Builder<'a> {
             let failed = reply.as_ref().is_some_and(|reply| reply.e);
             let (to, unmatched) = match matches.as_slice() {
                 [only] => (*only, false),
-                _ => (self.stub(&format!("codex:{target}"), &target), true),
+                _ => (self.stub(codex_peer_id(&target), &target), true),
             };
             let call = event(self.files, at).id.clone().unwrap_or_default();
             let handoff = Handoff {

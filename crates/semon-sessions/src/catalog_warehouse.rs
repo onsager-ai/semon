@@ -1683,6 +1683,54 @@ fn native_query_ids(key: &str) -> BTreeSet<&str> {
     ids
 }
 
+// These are candidates. Native derivation decides whether a receipt pairs
+// with a send or an actual agent before it creates a virtual peer.
+fn native_query_peer_owners(db: &Connection, key: &str) -> Result<BTreeSet<i64>, ReadError> {
+    let mut candidates = db
+        .prepare_cached(
+            "WITH peers(source,name,pid,start,sock) AS (
+                SELECT source,target,NULL,NULL,NULL FROM fact_relay_send
+                UNION ALL
+                SELECT source,name,pid,start,sock FROM fact_relay_receipt
+                UNION ALL
+                SELECT source,coalesce(name,id),peer_pid,peer_start,peer_sock
+                FROM fact_subagent_event WHERE kind='agm' AND (flags & ?1)<>0
+            )
+            SELECT DISTINCT ownership.owner,native.harness,coalesce(peer.name,''),peer.pid,peer.start,peer.sock
+            FROM peers peer
+            JOIN warehouse_current current ON current.source=peer.source
+            JOIN dim_session native ON native.source=peer.source
+            JOIN bridge_session_owner ownership ON ownership.source=peer.source",
+        )
+        .map_err(index)?;
+    let mut rows = candidates
+        .query([crate::events::AGM_PROGRESS])
+        .map_err(index)?;
+    let mut owners = BTreeSet::new();
+    while let Some(row) = rows.next().map_err(index)? {
+        let name: String = row.get(2).map_err(index)?;
+        let peer = match row.get_ref(1).map_err(index)?.as_str().map_err(index)? {
+            "claude" => {
+                let pid: Option<i64> = row.get(3).map_err(index)?;
+                let start: Option<String> = row.get(4).map_err(index)?;
+                let socket: Option<String> = row.get(5).map_err(index)?;
+                crate::model::claude_peer_id(
+                    &name,
+                    pid.map(|pid| pid as u64),
+                    start.as_deref(),
+                    socket.as_deref(),
+                )
+            }
+            "codex" => crate::model::codex_peer_id(&name),
+            _ => continue,
+        };
+        if key == peer {
+            owners.insert(row.get(0).map_err(index)?);
+        }
+    }
+    Ok(owners)
+}
+
 fn native_query_paths(
     db: &Connection,
     source: &Source<'_>,
@@ -1723,22 +1771,7 @@ fn native_query_paths(
                     .map_err(index)?,
             );
         } else if bare.starts_with("peer-") {
-            let mut sends = db
-                .prepare_cached(
-                    "SELECT DISTINCT ownership.owner,send.target FROM fact_relay_send send
-                 JOIN warehouse_current current ON current.source=send.source
-                 JOIN bridge_session_owner ownership ON ownership.source=send.source",
-                )
-                .map_err(index)?;
-            let mut rows = sends.query([]).map_err(index)?;
-            while let Some(row) = rows.next().map_err(index)? {
-                let target: String = row.get(1).map_err(index)?;
-                let hash =
-                    crate::model::fnv(&format!("name:{}", crate::model::plain_name(&target)));
-                if bare == format!("peer-{hash:016x}") {
-                    owners.insert(row.get(0).map_err(index)?);
-                }
-            }
+            owners.extend(native_query_peer_owners(db, bare)?);
         }
     }
     if !activity_only {
