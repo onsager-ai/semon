@@ -8816,6 +8816,12 @@ fn build_sources_inner(
         verify_sidecars(&files, options)?;
         source_records.finish()?;
     }
+    let native_keys = builder
+        .by_native
+        .iter()
+        .filter(|&(_, &index)| sessions.contains_key(&builder.sessions[index].key))
+        .map(|(id, &index)| (id.clone(), builder.sessions[index].key.clone()))
+        .collect();
     drop(source_records);
     if let Some(catalog) = catalog {
         cache.publish_session_projection(
@@ -8827,16 +8833,6 @@ fn build_sources_inner(
         );
     }
     cache.publish_session_descriptions();
-    let native_keys = builder
-        .by_native
-        .iter()
-        .filter_map(|(id, &index)| {
-            let key = &builder.sessions[index].key;
-            sessions
-                .contains_key(key)
-                .then(|| (id.clone(), key.clone()))
-        })
-        .collect();
     Ok(BuildOutput::Query(Box::new(QueryData {
         observed_at: now,
         native_keys,
