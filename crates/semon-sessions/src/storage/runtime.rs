@@ -298,13 +298,7 @@ impl RuntimeStore {
                 ))
                 .map_err(|_| crate::CatalogIdentityError::Unavailable);
         }
-        crate::native_resolution::sqlite_resolve_native(
-            &self.options,
-            key,
-            harness,
-            native_id,
-            scope,
-        )
+        crate::catalog_warehouse::host_resolve_native(&self.options, key, harness, native_id, scope)
     }
 
     pub(crate) fn page_ready(&self) -> io::Result<bool> {
