@@ -475,15 +475,42 @@ export default async function turnsCheck(browser) {
       D1.hadAnchor = !!started;
       if (started) {
         await goto(page, { v: 'sessions' }, D0);
-        await goto(page, { v: 'session', id: started.sid, turn: started.id }, D0);
-        await page.waitForFunction(
-          (turn) =>
-            document.querySelector(
-              '.turn[data-turn="' + CSS.escape(turn) + '"] [data-entry-key].flash',
-            ),
-          started.id,
-        );
-        D1.fromSessions = { expectTurn: started.id, ...(await landed()) };
+        // The entry flash is transient. Observe it during navigation, before
+        // goto finishes its screen and font readiness waits.
+        const source = D.SOURCES[D.SESS[started.sid].machine];
+        const key = D.KEYS[started.sid];
+        const flashed = (async () => {
+          const response = await page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return (
+              url.pathname === '/api/session-anchor' &&
+              url.searchParams.get('machine') === source &&
+              url.searchParams.get('sid') === key &&
+              url.searchParams.get('scope') === 'current' &&
+              url.searchParams.get('turn') === started.id
+            );
+          });
+          const anchor = await response.json();
+          const entry = anchor.address?.entry_id;
+          if (!response.ok() || !/^[a-f0-9]{64}$/.test(entry ?? ''))
+            throw Error(
+              `Native anchor ${key}/${started.id} has no entry (HTTP ${response.status()})`,
+            );
+          const target = page.locator(`[data-entry-key="${entry}"].flash`);
+          try {
+            await target.waitFor();
+            return await landed();
+          } catch (error) {
+            throw Error(`Native anchor ${key}/${started.id} did not flash entry ${entry}`, {
+              cause: error,
+            });
+          }
+        })();
+        const [landing] = await Promise.all([
+          flashed,
+          goto(page, { v: 'session', id: started.sid, turn: started.id }, D0),
+        ]);
+        D1.fromSessions = { expectTurn: started.id, ...landing };
         await page.goBack();
         await page.waitForFunction(
           () => document.querySelector('#topbar .t')?.textContent === 'Sessions',
