@@ -13,8 +13,7 @@
 //  - zero overflow screens (T.overflowScreens === 0): nothing pokes past the 390px screen on any lane or trace.
 //  - every "Show more" on a handoff card fully un-clips its text (moreStillClipped === 0) and never navigates the
 //    page away (navigatedByMore === 0) — it is a text reveal, not a link.
-//  - a spawn card's brief, opened with "Show more" at 390 px, grows to its full text: its box is as tall as the text (clientHeight >= scrollHeight - 1),
-//    and the "Show less" button and the "Open" button sit below it, not under the spilled text; "Show less" clamps it again.
+//  - a sender relationship card shows its target status in the transcript and leaves the URL unchanged when tapped.
 //  - every "more" opened on a trace hop fully un-clips its text (hopMoreStillClipped === 0).
 //  - the walk actually visited screens and at least one trace (T.screens > 0, T.traces > 0), so a broken lane list
 //    or a missing Trace button would fail loudly instead of reporting an all-zero pass.
@@ -154,59 +153,21 @@ export default async function full(browser) {
     await page.screenshot({ path: path.join(ENV.out, 'full-relay.png') });
   }
 
-  // A compact linked row discloses its complete brief in place; long content stays
-  // within the expanded region and the following transcript stays below it.
+  // The selected sender shows its recorded outcome. Its target status is
+  // readable content and adds no cross-session navigation control.
   {
-    let probe = null;
-    for (const id of lanes) {
-      await openLane(id);
-      if (await page.locator('.cc-toggle').count())
-        await page.locator('.cc-toggle').first().click();
-      probe = await page.evaluate(() => {
-        const c = document.querySelector('.child-card');
-        if (!c) return null;
-        const br = c.querySelector('.cc-brief');
-        br.replaceChildren(
-          document.createTextNode(
-            Array.from(
-              { length: 14 },
-              (_, i) =>
-                'Paragraph ' +
-                i +
-                ' of a long brief. ' +
-                'It wraps over several lines on a phone. '.repeat(3),
-            ).join(' '),
-          ),
-        );
-        const b = br.getBoundingClientRect(),
-          card = c.getBoundingClientRect(),
-          next = c.nextElementSibling?.getBoundingClientRect();
-        const line = parseFloat(getComputedStyle(br).lineHeight);
-        return {
-          clamp: getComputedStyle(br).webkitLineClamp,
-          client: br.clientHeight,
-          scroll: br.scrollHeight,
-          line,
-          cardInside: b.bottom <= card.bottom + 1,
-          nextBelow: !next || next.top >= card.bottom - 1,
-          sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        };
-      });
-      if (probe) break;
-    }
-    r.results.spawnBrief = probe;
-    r.expect(!!probe, 'the fixture needs a spawn card on some session');
-    if (probe) {
-      r.expect(
-        probe.clamp === 'none' && probe.client >= probe.scroll - 1 && probe.client > probe.line * 2,
-        'the expanded linked brief retains its complete text: ' + JSON.stringify(probe),
-      );
-      r.expect(
-        probe.cardInside && probe.nextBelow && probe.sideways <= 0,
-        'a long brief stays inside its disclosure, with what follows below it: ' +
-          JSON.stringify(probe),
-      );
-    }
+    const spawn = D.H.find((event) => event.kind === 'spawn' && event.reason === 'not linked yet');
+    if (!spawn) throw new Error('The fixture needs a sender spawn card');
+    await openLane(spawn.from);
+    const card = page.locator(`.event[data-h="${spawn.id}"]`);
+    const target = card.locator('.ev-result').filter({ hasText: /^Target\s*not linked yet$/ });
+    await target.waitFor();
+    const current = page.url();
+    await target.click();
+    r.expect(
+      page.url() === current && (await card.locator('a, .who-link, .ev-head button').count()) === 0,
+      'a sender spawn card preserves the selected route without a cross-session target',
+    );
   }
 
   r.results.tally = T;

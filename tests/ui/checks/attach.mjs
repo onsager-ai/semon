@@ -293,12 +293,22 @@ export default async function attachCheck(browser) {
         JSON.stringify(c.thumbs.map((t) => t.alt)),
     );
     r.expect(
-      c.thumbs.every(
-        (t) =>
-          t.src?.startsWith('/api/session-entry?') &&
-          new URLSearchParams(t.src.split('?')[1]).get('part') === 'attachment' &&
-          /^[a-f0-9]{64}$/.test(new URLSearchParams(t.src.split('?')[1]).get('generation') ?? ''),
-      ),
+      c.thumbs.every(({ src, inUser }) => {
+        if (!src?.startsWith('/api/session-entry?') || !inUser) return false;
+        const query = new URLSearchParams(src.split('?')[1]);
+        const address = JSON.parse(query.get('address') ?? 'null');
+        return (
+          query.get('part') === 'attachment' &&
+          query.get('scope') === 'current' &&
+          query.get('sid') === SID &&
+          query.get('image') === '0' &&
+          !!query.get('machine') &&
+          /^[a-f0-9]{64}$/.test(address?.binding) &&
+          /^[a-f0-9]{64}$/.test(address?.entry_id) &&
+          Number.isSafeInteger(address?.record?.offset) &&
+          !!address.record.path
+        );
+      }),
       tag +
         ': each thumbnail uses a generation-fenced native entry URL: ' +
         JSON.stringify(c.thumbs.map((t) => t.src)),

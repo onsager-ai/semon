@@ -1,9 +1,11 @@
 // Stable visible order uses real native publication and the canonical Source snapshots.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { nativeFixture } from '../native-fixture.mjs';
 import { logs } from '../native-order-logs.mjs';
 import { fileURLToPath } from 'node:url';
-import { closePage, overflow, launch } from '../lib.mjs';
+import { ENV, closePage, overflow, launch } from '../lib.mjs';
 import { selectSchemes } from '../suite-plan.mjs';
 
 const rows = (page, selector) =>
@@ -28,7 +30,9 @@ export default async function orderCheck(browser) {
       { width, dark },
     ]),
   );
-  for (const [, { width, dark }] of selectSchemes(schemes, process.env.SEMON_ORDER_SCHEMES)) {
+  const out = path.join(ENV.out, 'order');
+  fs.mkdirSync(out, { recursive: true });
+  for (const [scheme, { width, dark }] of selectSchemes(schemes, process.env.SEMON_ORDER_SCHEMES)) {
     const fixture = await nativeFixture({
       prepare: (root, now) => {
         const files = logs(root);
@@ -112,6 +116,7 @@ export default async function orderCheck(browser) {
       );
       assert.ok(still(before, held), 'row coordinates and scroll stay fixed');
       assert.equal(await page.locator('.order-pill, .order-chip, #order-status').count(), 0);
+      await page.screenshot({ path: path.join(out, `${scheme}-held.png`) });
       if (width === 390) await page.locator('#topbar .lead').click();
       await page.locator('.nav-item[data-go="analytics"]').click();
       await page
@@ -174,6 +179,7 @@ export default async function orderCheck(browser) {
       assert.equal(await overflow(page), 0);
       assert.deepEqual(retired, []);
       assert.deepEqual(page.errors, []);
+      await page.screenshot({ path: path.join(out, `${scheme}-applied.png`) });
     } finally {
       await closePage(page);
       await fixture.close();

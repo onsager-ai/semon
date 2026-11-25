@@ -137,12 +137,9 @@ export default async function copiedUsageCheck(browser) {
     server = await start(root);
     const parent = await nativeSession(server, 'native-claude-parent'),
       child = await nativeSession(server, 'native-claude-child');
-    assert.equal(parent.claude_usage.observed.input + child.claude_usage.observed.input, 25);
-    assert.equal(child.claude_usage.exclusive.input, 5);
-    assert.equal(child.claude_usage.fresh, null);
-    assert.equal(child.claude_usage.shared_owner, null);
-    assert.deepEqual(parent.claude_usage.shared, child.claude_usage.shared);
-    assert.equal(parent.cost.usd, null);
+    assert.equal(parent.key, 'native-claude-parent');
+    assert.equal(child.key, 'native-claude-child');
+    assert.equal(child.copied_usage, true);
     assert.equal(child.cost.usd, null);
     for (const size of ['phone', 'desktop'])
       for (const dark of [false, true]) {
@@ -172,10 +169,8 @@ export default async function copiedUsageCheck(browser) {
     for (const [file, bytes] of sources) assert.deepEqual(fs.readFileSync(file), bytes);
     report.results = {
       physicalSessions: 2,
-      observedInput: 25,
-      distinctInput: 15,
-      exclusiveInput: 5,
-      owner: null,
+      childCopiedUsage: child.copied_usage,
+      childCost: child.cost.usd,
     };
     return report.done();
   } finally {

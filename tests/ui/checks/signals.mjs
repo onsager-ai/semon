@@ -4,30 +4,30 @@ import { launch, served, data, goto } from '../lib.mjs';
 import { selectedFixture } from '../selected-fixture.mjs';
 export default async function signalsCheck(browser) {
   const D = await data(),
-    sid = Object.keys(D.TX).find((id) => D.TX[id].some((e) => e.k === 'tool'));
+    sid = 'harbor';
+  assert.ok(D.TX[sid].slice(-32).some((entry) => entry.k === 'tool'));
   for (const size of ['phone', 'desktop']) {
     const page = await served(browser, { size });
     try {
       await selectedFixture(page, sid, (tx) => {
         tx.session.details.signals = { compact: 1, effort: 1 };
         const tool = tx.entries.find((e) => e.k === 'tool');
+        assert.ok(tool, 'native fixture window contains a tool');
         tx.entries = [
-          { ...tool, slot: 0 },
+          { ...tool },
           {
             ...tool,
             k: 'signal',
-            slot: 1,
             signal: { kind: 'compact', value: 180000 },
             at: tool.at,
           },
           {
             ...tool,
             k: 'signal',
-            slot: 2,
             signal: { kind: 'effort', previous: 'high', tag: 'max' },
             at: tool.at,
           },
-          { ...tool, slot: 3 },
+          { ...tool },
         ];
       });
       await page.reload();

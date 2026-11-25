@@ -127,7 +127,15 @@ function faults(dir, now) {
         model: 'claude-sonnet-5',
         role: 'assistant',
         type: 'message',
-        content: [{ type: 'text', text: 'All batches ran.' }],
+        content: [
+          {
+            type: 'text',
+            text: [
+              'All batches ran.',
+              ...Array.from({ length: 48 }, (_, index) => 'Batch summary item ' + (index + 1)),
+            ].join('\n\n'),
+          },
+        ],
       },
     }),
   );

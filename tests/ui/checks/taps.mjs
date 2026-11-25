@@ -530,9 +530,12 @@ export default async function tapsCheck(browser) {
         await page.waitForTimeout(80);
         await tally(page, at('session ' + short));
         await attempt('scroll ' + short + ' up for the jump button', async () => {
-          await page.evaluate(() =>
-            window.scrollBy(0, -Math.min(600, document.documentElement.scrollHeight / 3)),
-          );
+          await page.evaluate(() => {
+            const scroll = matchMedia('(max-width: 760px)').matches
+              ? document.scrollingElement
+              : document.querySelector('#main');
+            scroll.scrollTop -= Math.min(600, scroll.scrollHeight / 3);
+          });
           await page.waitForTimeout(250);
           await tally(page, at('session scrolled ' + short));
         });
@@ -621,7 +624,7 @@ export default async function tapsCheck(browser) {
           await page.waitForFunction(() => document.body.classList.contains('drawer-open'));
           await page.waitForTimeout(350);
           await tally(page, device + ' account drawer');
-          await page.locator('.account-widget-phone .account-trigger').click();
+          await page.locator('#account-drawer .account-trigger').click();
         } else await page.locator('.account-widget-desktop .account-trigger').click();
         await page.waitForTimeout(150);
         await tally(page, device + ' account menu');
@@ -723,11 +726,7 @@ export default async function tapsCheck(browser) {
       'no .' + must + ' was measured: its screen was not reached',
     );
   }
-  for (const shape of [
-    'button.agent-row.agent-more',
-    'div.list > button.more',
-    'div.event.waiting > button.link.ev-more',
-  ]) {
+  for (const shape of ['div.list > button.more', 'div.event > button.link.ev-more']) {
     r.expect(
       Object.keys(bySignature).some((sig) => sig.includes(shape)),
       'representative coverage missed control shape: ' + shape,

@@ -93,7 +93,7 @@ const singleSourceInventory = {
 const list = (items) => ({
   api: 1,
   machine: 'source',
-  read_scope: 'retained_history',
+  read_scope: 'current',
   machine_info: { key: 'source', label: 'Fixture source', freshness: 'cached' },
   generation: 'a'.repeat(64),
   observed_at: null,
@@ -1237,36 +1237,14 @@ for (const width of [390, 1280])
                     wait_edges_truncated: false,
                   },
                 },
-                participants: { 'unjoined-peer': 'Recorded peer' },
-                participant_summaries: {
-                  'unjoined-peer': {
-                    name: 'Recorded peer',
-                    harness: 'codex',
-                    kind: 'Subagent',
-                    model: 'native-model',
-                    tokens: [1, 2, 0],
-                    cost: { usd: 2, unpriced_models: [] },
-                    observed_extent: {
-                      scope: 'whole_session',
-                      last: now - 1000,
-                      status: { state: 'work', observation: 'current' },
-                      recorded_activity: {
-                        state: 'available',
-                        kind: 'timestamp_clusters',
-                        intervals: [
-                          [now - 130000, now - 100000],
-                          [now - 90000, now - 80000],
-                        ],
-                      },
-                    },
-                  },
-                },
+                participants: {},
                 handoffs: [
                   {
                     id: 'peer-relay',
                     kind: 'relay',
                     from: 'shared',
-                    to: 'unjoined-peer',
+                    to: null,
+                    reason: 'not linked yet',
                     at: now - 120000,
                     status: 'done',
                     brief: '',
@@ -1287,7 +1265,7 @@ for (const width of [390, 1280])
                 frontier: [],
                 previews: {},
                 incomplete: true,
-                incomplete_only_missing_receiving_turns: true,
+                incomplete_only_missing_receiving_turns: false,
                 previews_incomplete: false,
               },
             });
@@ -1444,36 +1422,10 @@ for (const width of [390, 1280])
         });
         stage = 'Trace publication';
         await withDeadline(page.locator('#page .agents-panel').waitFor(), stage);
-        const peer = page.locator('#page .agent-peer');
-        assert.equal(await peer.getAttribute('data-depth'), '0');
-        assert.equal(await peer.locator('.agent-harness-dot.h-codex').count(), 1);
-        assert.equal(await peer.locator('.agent-relay-icon').count(), 1);
-        assert.ok((await peer.locator('.agent-track .agent-gridline').count()) > 0);
-        assert.equal(await peer.locator('.agent-segment.busy').count(), 2);
-        assert.equal(
-          await peer.locator('.agent-segment.idle,.agent-wait,.agent-spawn-tick').count(),
-          0,
-        );
-        assert.match(
-          await peer.locator('.agent-track').getAttribute('data-tip'),
-          /whole-session timestamp clusters.*not continuous CPU activity/,
-        );
-        assert.equal(await peer.getAttribute('data-agent-id'), null);
-        assert.equal(await peer.getAttribute('data-critical'), null);
-        assert.match(await peer.getAttribute('aria-label'), /receiving|turn isn't in these logs/);
-        assert.match(
-          await peer.locator('.agent-duration').getAttribute('data-tip'),
-          /Whole-session/,
-        );
-        assert.match(
-          await page.locator('#page .flow').textContent(),
-          /Its turn isn't in these logs/,
-        );
-        assert.doesNotMatch(
-          await page.locator('#page .trace-summary').textContent(),
-          /context is unavailable/,
-        );
-        assert.equal(await page.locator('#page .agent-edges path').count(), 0);
+        assert.equal(await page.locator('#page .agent-peer, #page .agent-edges path').count(), 0);
+        const relay = page.locator('#page .flow .hop[data-h="peer-relay"]');
+        assert.match(await relay.textContent(), /not linked yet/);
+        assert.equal(await relay.locator('a, button.open').count(), 0);
         assert.equal(await homeCount(), 0);
         assert.match(await page.locator('#lanes').textContent(), /Alpha shared/);
         assert.match(await page.locator('#lanes').textContent(), /Beta shared/);
@@ -1572,7 +1524,7 @@ function transcript(key, p, total = 65, generation = 'b') {
     end = Math.min(first + limit, total);
   return {
     api: 1,
-    identity: { ...identity(key), read_scope: 'retained_history' },
+    identity: { ...identity(key), read_scope: p.get('scope') ?? 'current' },
     session: meta(key),
     projection: {
       version: 6,
@@ -1679,7 +1631,7 @@ for (const width of [390, 1280])
               value.identity = {
                 ...nativeIdentity,
                 source_key: machine,
-                read_scope: 'retained_history',
+                read_scope: url.searchParams.get('scope') ?? 'current',
               };
               value.entries[0].provenance.source = nativeSource;
               return route.fulfill({ json: value });
@@ -2613,7 +2565,7 @@ test('partial catalog discovery completes while retaining uncommitted search foc
           json: {
             api: 1,
             machine: 'source',
-            read_scope: 'retained_history',
+            read_scope: 'current',
             machine_info: { key: 'source', label: 'Source', freshness: 'cached' },
             generation: 'a'.repeat(64),
             observed_at: null,
@@ -2677,8 +2629,15 @@ test('archive source hint waits for a parsed canonical session without native au
         return route.fulfill({ json: singleSourceInventory });
       if (u.pathname === '/api/session-capabilities')
         return route.fulfill({ json: { ...capabilities(true), source_candidates: true } });
-      if (u.pathname === '/api/sessions')
-        return route.fulfill({ json: list(u.searchParams.has('sid') ? [meta('parsed')] : []) });
+      if (u.pathname === '/api/sessions') {
+        const selected = u.searchParams.get('sid') === 'parsed';
+        return route.fulfill({
+          json: {
+            ...list(selected ? [{ ...meta('parsed'), lifecycle: 'retained' }] : []),
+            read_scope: u.searchParams.get('scope') ?? 'current',
+          },
+        });
+      }
       if (u.pathname === '/api/session-source-candidates')
         return route.fulfill({
           json: {
@@ -2854,7 +2813,10 @@ for (const { width, colorScheme } of [
             term = u.searchParams.get('q');
           reads.push(params);
           if (fail) return route.fulfill({ status: 503, json: { error: 'unavailable' } });
-          const result = list(term === 'missing' ? [] : items);
+          const result = {
+            ...list(term === 'missing' ? [] : items),
+            total: term === 'missing' ? 0 : items.length,
+          };
           if (term) {
             result.search = {
               semantics: 'unicode_lowercase_substring',

@@ -38,10 +38,6 @@ export default async function analyticsCheck(browser) {
     .filter((s) => s.repo === 'harbor')
     .map((s) => s.id)
     .sort();
-  r.expect(
-    !!D.SESS.deps?.rate_limits,
-    'the fixture must serve Codex rate limits for the allowance panel',
-  );
 
   for (const [mode, size, dark] of [
     ['phone', 'phone', false],

@@ -101,9 +101,9 @@ export default async function namesCheck(browser) {
   const D = await data(),
     r = reporter('names'),
     results = {};
-  const claude = Object.values(D.SESS).find((s) => s.harness === 'claude' && s.lane),
-    codex = Object.values(D.SESS).find((s) => s.harness === 'codex' && s.lane);
-  r.expect(!!claude && !!codex, 'the fixture must hold a Claude and a Codex session');
+  const claude = Object.values(D.SESS).find((s) => s.harness === 'claude' && !s.parent),
+    codex = Object.values(D.SESS).find((s) => s.harness === 'codex' && !s.parent);
+  if (!claude || !codex) throw new Error('The fixture must hold root Claude and Codex sessions');
   const seen = { 'Claude Code': 0, Claude: 0, Codex: 0 };
 
   for (const [size, dark] of [

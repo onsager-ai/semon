@@ -36,20 +36,8 @@
     "why": "Moves come from the relay's takeovers.jsonl in M5; the model has none yet."
   },
   {
-    "gap": "session atlas.busy: sample [[630,662],[667,668]], served [[630,668]]",
-    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (11:02 to 11:07) is exactly 5 minutes."
-  },
-  {
     "gap": "session deps.kind: sample undefined, served \"Codex run\"",
     "why": "Every Codex session is a \"Codex run\" in the model, including one you started directly."
-  },
-  {
-    "gap": "handoff h10.done: sample 585, served undefined",
-    "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
-  },
-  {
-    "gap": "handoff h10.result: sample \"Not this quarter. Revisit when offline sync (#212) lands and there are real queue sizes.\", served undefined",
-    "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
   },
   {
     "gap": "handoff h13 (move atlas→atlas at 667): not served",
@@ -156,10 +144,6 @@
     "why": "Advisor is reached by a peer relay, not a spawned child; the model does not assign a child kind to relay sessions."
   },
   {
-    "gap": "session advisor.lane: sample false, served true",
-    "why": "The sample marks Advisor as a peer role, while the model infers a lane for this role session."
-  },
-  {
     "gap": "session advisor.parent: sample \"principal\", served undefined",
     "why": "Advisor is reached by a peer relay, not a spawned child; the model only assigns parent links to child sessions."
   },
@@ -178,10 +162,6 @@
   {
     "gap": "session h-codex.tokens: sample [0.9,11.4,0.06], served [0.9,11.34,0.06]",
     "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
-  },
-  {
-    "gap": "session h-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":900000,\"output\":60000,\"cacheWrite\":60000,\"cacheRead\":11340000}}, served {\"gpt-6-luna\":{\"input\":900000,\"output\":60000,\"cacheWrite\":0,\"cacheRead\":11340000}}",
-    "why": "Codex logs expose cached input tokens but do not report cache-write tokens separately."
   },
   {
     "gap": "session h-codex.start: sample 712, served -728",
@@ -208,10 +188,6 @@
     "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
   },
   {
-    "gap": "session q-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":700000,\"output\":50000,\"cacheWrite\":40000,\"cacheRead\":9760000}}, served {\"gpt-6-luna\":{\"input\":700000,\"output\":50000,\"cacheWrite\":0,\"cacheRead\":9760000}}",
-    "why": "Codex logs expose cached input tokens but do not report cache-write tokens separately."
-  },
-  {
     "gap": "session q-codex.start: sample 680, served -3640",
     "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
   },
@@ -224,10 +200,6 @@
     "why": "The model's aggregate token total and the sample's manually entered total differ slightly. API-equivalent cost comes from the served cost record."
   },
   {
-    "gap": "session deps.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":300000,\"output\":20000,\"cacheWrite\":30000,\"cacheRead\":2170000}}, served {\"gpt-6-luna\":{\"input\":300000,\"output\":20000,\"cacheWrite\":0,\"cacheRead\":2170000}}",
-    "why": "Codex logs expose cached input tokens but do not report cache-write tokens separately."
-  },
-  {
     "gap": "session ledger.state: sample \"idle\", served \"done\"",
     "why": "The model reports an exited session as done; it has no idle-after-exit state."
   },
@@ -238,38 +210,6 @@
   {
     "gap": "session l-sub.start: sample 442, served -5318",
     "why": "The week of analytics history reuses the session log dates; the model derives start from its earliest event while the mockup stores a separate session start."
-  },
-  {
-    "gap": "session atlas-ingest.busy: sample [[670,684],[725,728],[738,751]], served [[670,685],[700,700],[708,708],[725,728],[738,751]]",
-    "why": "The spawn at 11:25 (1 minute after the sample's first interval) stretches it, and the results of the docs subagent (11:40) and the storage run (11:48) are lone stamps between the sample's intervals."
-  },
-  {
-    "gap": "session a-scan.busy: sample [[672,677]], served [[672,680]]",
-    "why": "The model's busy rule merges stamps no more than 5 minutes apart, and every line of a session is a stamp, so the calls and results the fixture writes at each handoff's time close the sample's gaps and stretch its intervals."
-  },
-  {
-    "gap": "session a-parse.busy: sample [[682,706],[710,725]], served [[682,725]]",
-    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (11:46 to 11:50) is 4 minutes."
-  },
-  {
-    "gap": "session a-store.busy: sample [[682,696],[700,708]], served [[682,708]]",
-    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (11:36 to 11:40) is 4 minutes."
-  },
-  {
-    "gap": "session a-review.busy: sample [[726,733],[737,746]], served [[726,746]]",
-    "why": "The model's busy rule merges stamps no more than 5 minutes apart; the sample's gap (12:13 to 12:17) is 4 minutes."
-  },
-  {
-    "gap": "session a-docs.busy: sample [[685,698]], served [[685,700]]",
-    "why": "The model's busy rule merges stamps no more than 5 minutes apart, and every line of a session is a stamp, so the calls and results the fixture writes at each handoff's time close the sample's gaps and stretch its intervals."
-  },
-  {
-    "gap": "session a-review-grep.busy: sample [[730,733]], served [[730,734]]",
-    "why": "The model's busy rule merges stamps no more than 5 minutes apart, and every line of a session is a stamp, so the calls and results the fixture writes at each handoff's time close the sample's gaps and stretch its intervals."
-  },
-  {
-    "gap": "handoff a-relay.done: sample 740, served undefined",
-    "why": "A relay has no result in the model: the reply comes back as a separate relay, or not at all."
   },
   {
     "gap": "handoff a-result.status: sample \"done\", served \"new\"",
@@ -334,5 +274,929 @@
   {
     "gap": "tx deps: served entry not in the sample: {\"k\":\"signal\",\"signal\":{\"kind\":\"approval\",\"tag\":\"never\"}}",
     "why": "The fixture records initial Codex model and effort settings. Signal capture now exposes their content-free transcript markers (#141); the approved static mockup predates these markers."
+  },
+  {
+    "gap": "session principal.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session principal.role: sample true, served false",
+    "why": "The historical sample labels fictional roles. Warehouse Catalog rows describe native sessions."
+  },
+  {
+    "gap": "session principal.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session principal.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":520000,\"output\":230000,\"cacheWrite\":120000,\"cacheRead\":43980000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session principal.busy: sample [[432,434],[450,468],[548,552],[586,590]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session sentinel.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session sentinel.role: sample true, served false",
+    "why": "The historical sample labels fictional roles. Warehouse Catalog rows describe native sessions."
+  },
+  {
+    "gap": "session sentinel.model: sample \"sonnet-5\", served \"claude-sonnet-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session sentinel.tokens_by_model: sample {\"claude-sonnet-5\":{\"input\":120000,\"output\":30000,\"cacheWrite\":0,\"cacheRead\":9400000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session sentinel.busy: sample [[360,364],[390,392],[420,433],[460,462],[500,502],[540,542],[580,582],[620,622],[660,662],[700,702],[740,742],[758,760]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session advisor.role: sample true, served false",
+    "why": "The historical sample labels fictional roles. Warehouse Catalog rows describe native sessions."
+  },
+  {
+    "gap": "session advisor.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session advisor.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":70000,\"output\":40000,\"cacheWrite\":0,\"cacheRead\":3100000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session advisor.busy: sample [[550,585]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session harbor.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session harbor.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session harbor.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":410000,\"output\":190000,\"cacheWrite\":200000,\"cacheRead\":38000000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session harbor.busy: sample [[485,492],[700,760]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session h-codex.name: sample \"feat/offline-sync\", served \"Codex run\"",
+    "why": "The warehouse publishes source-qualified native titles and its fallback title when no title is recorded."
+  },
+  {
+    "gap": "session h-codex.state: sample \"work\", served \"off\"",
+    "why": "The warehouse evaluates qualified runtime and terminal Index evidence. The sample supplies a hand-authored state."
+  },
+  {
+    "gap": "session h-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":900000,\"output\":60000,\"cacheWrite\":60000,\"cacheRead\":11340000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session h-codex.busy: sample [[712,760]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session h-codex.activity: sample [\"apply_patch\",\"crates/sync/src/queue.rs\",6], served undefined",
+    "why": "The warehouse publishes an active tool only from qualified current turn and tool evidence."
+  },
+  {
+    "gap": "session h-review.model: sample \"sonnet-5\", served \"claude-sonnet-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session h-review.tokens_by_model: sample {\"claude-sonnet-5\":{\"input\":50000,\"output\":10000,\"cacheWrite\":0,\"cacheRead\":1800000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session h-review.busy: sample [[751,760]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session h-review-codex.state: sample \"work\", served \"off\"",
+    "why": "The warehouse evaluates qualified runtime and terminal Index evidence. The sample supplies a hand-authored state."
+  },
+  {
+    "gap": "session h-review-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":180000,\"output\":20000,\"cacheWrite\":0,\"cacheRead\":2400000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session h-review-codex.busy: sample [[756,760]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session h-failed.model: sample \"sonnet-5\", served \"claude-sonnet-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session h-failed.tokens_by_model: sample {\"claude-sonnet-5\":{\"input\":40000,\"output\":10000,\"cacheWrite\":0,\"cacheRead\":420000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session h-failed.busy: sample [[753,756]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session quill.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session quill.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session quill.state: sample \"wait\", served \"idle\"",
+    "why": "The warehouse evaluates qualified runtime and terminal Index evidence. The sample supplies a hand-authored state."
+  },
+  {
+    "gap": "session quill.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":220000,\"output\":110000,\"cacheWrite\":80000,\"cacheRead\":19620000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session quill.busy: sample [[610,641],[675,681],[725,752]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session q-plan.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session q-plan.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":120000,\"output\":30000,\"cacheWrite\":0,\"cacheRead\":5300000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session q-plan.busy: sample [[640,675]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session q-codex.name: sample \"feat/pdf-export\", served \"Codex run\"",
+    "why": "The warehouse publishes source-qualified native titles and its fallback title when no title is recorded."
+  },
+  {
+    "gap": "session q-codex.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":700000,\"output\":50000,\"cacheWrite\":40000,\"cacheRead\":9760000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session q-codex.busy: sample [[680,725]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session atlas.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session atlas.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session atlas.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":180000,\"output\":70000,\"cacheWrite\":0,\"cacheRead\":12600000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session atlas.busy: sample [[630,662],[667,668]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session atlas-ingest.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session atlas-ingest.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session atlas-ingest.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":450000,\"output\":120000,\"cacheWrite\":0,\"cacheRead\":180000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session atlas-ingest.busy: sample [[670,684],[725,728],[738,751]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session a-scan.model: sample \"sonnet-5\", served \"claude-sonnet-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session a-scan.tokens_by_model: sample {\"claude-sonnet-5\":{\"input\":360000,\"output\":50000,\"cacheWrite\":0,\"cacheRead\":120000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session a-scan.busy: sample [[672,677]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session a-parse.name: sample \"feat/ingest-parser\", served \"Codex run\"",
+    "why": "The warehouse publishes source-qualified native titles and its fallback title when no title is recorded."
+  },
+  {
+    "gap": "session a-parse.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":18000000,\"output\":4000000,\"cacheWrite\":0,\"cacheRead\":6000000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session a-parse.busy: sample [[682,706],[710,725]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session a-store.name: sample \"feat/ingest-store\", served \"Codex run\"",
+    "why": "The warehouse publishes source-qualified native titles and its fallback title when no title is recorded."
+  },
+  {
+    "gap": "session a-store.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":12000000,\"output\":2000000,\"cacheWrite\":0,\"cacheRead\":4000000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session a-store.busy: sample [[682,696],[700,708]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session a-index.name: sample \"feat/ingest-index\", served \"Codex run\"",
+    "why": "The warehouse publishes source-qualified native titles and its fallback title when no title is recorded."
+  },
+  {
+    "gap": "session a-index.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":21000000,\"output\":5000000,\"cacheWrite\":0,\"cacheRead\":8000000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session a-index.busy: sample [[683,710],[716,738]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session a-review.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session a-review.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":620000,\"output\":190000,\"cacheWrite\":0,\"cacheRead\":240000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session a-review.busy: sample [[726,733],[737,746]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session a-docs.model: sample \"haiku-4.5\", served \"claude-haiku-4-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session a-docs.tokens_by_model: sample {\"claude-haiku-4-5\":{\"input\":100000,\"output\":30000,\"cacheWrite\":0,\"cacheRead\":50000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session a-docs.busy: sample [[685,698]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session a-review-grep.model: sample \"haiku-4.5\", served \"claude-haiku-4-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session a-review-grep.tokens_by_model: sample {\"claude-haiku-4-5\":{\"input\":80000,\"output\":20000,\"cacheWrite\":0,\"cacheRead\":30000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session a-review-grep.busy: sample [[730,733]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session deps.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session deps.state: sample \"work\", served \"off\"",
+    "why": "The warehouse evaluates qualified runtime and terminal Index evidence. The sample supplies a hand-authored state."
+  },
+  {
+    "gap": "session deps.tokens_by_model: sample {\"gpt-6-luna\":{\"input\":300000,\"output\":20000,\"cacheWrite\":30000,\"cacheRead\":2170000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session deps.rate_limits: sample {\"recorded_at\":758,\"windows\":[{\"minutes\":300,\"used_percent\":84,\"resets_at\":990},{\"minutes\":10080,\"used_percent\":37,\"resets_at\":6300}]}, served undefined",
+    "why": "Selected Catalog metadata no longer exposes the mockup’s per-session rate-limit field."
+  },
+  {
+    "gap": "session deps.busy: sample [[740,760]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session deps.activity: sample [\"shell\",\"cargo audit --json\",11], served undefined",
+    "why": "The warehouse publishes an active tool only from qualified current turn and tool evidence."
+  },
+  {
+    "gap": "session ledger.lane: sample true, served false",
+    "why": "The historical sample designates lanes. The warehouse Catalog identifies native sessions and their explicit parents."
+  },
+  {
+    "gap": "session ledger.model: sample \"opus-5.5\", served \"claude-opus-5-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session ledger.tokens_by_model: sample {\"claude-opus-5-5\":{\"input\":60000,\"output\":30000,\"cacheWrite\":0,\"cacheRead\":3900000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session ledger.busy: sample [[430,443],[451,482]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "session l-sub.model: sample \"haiku-4.5\", served \"claude-haiku-4-5\"",
+    "why": "The warehouse preserves the recorded provider model identifier."
+  },
+  {
+    "gap": "session l-sub.tokens_by_model: sample {\"claude-haiku-4-5\":{\"input\":20000,\"output\":10000,\"cacheWrite\":0,\"cacheRead\":600000}}, served {}",
+    "why": "The selected Catalog detail exposes aggregate recorded tokens and cost. Per-model usage belongs to the Analytics publication."
+  },
+  {
+    "gap": "session l-sub.busy: sample [[442,451]], served []",
+    "why": "The selected Catalog detail does not publish the historical model’s inferred busy intervals. Activity-duration analytics use Index facts."
+  },
+  {
+    "gap": "handoff h1.status: sample \"work\", served \"done\"",
+    "why": "The warehouse reports a recorded terminal outcome. The historical sample assigns the live state by hand."
+  },
+  {
+    "gap": "handoff h2 (spawn harbor→h-codex at 712): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h3 (spawn harbor→h-review at 751): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h20 (spawn harbor→h-failed at 753): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h19 (spawn h-review→h-review-codex at 756): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h5 (spawn quill→q-plan at 640): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h6 (spawn quill→q-codex at 680): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h7.brief: sample \"Codex's PR #219 fails two layout tests. Both look like the page-break rule. Should I send it back to Codex with the failing cases, or would you rather look at the RTL layout first?\", served \"\"",
+    "why": "The observed question or result gets its text from the recorded owner and native recipe. The historical sample inserts an authored preview."
+  },
+  {
+    "gap": "handoff h9 (relay sentinel→principal at 432): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h10 (relay principal→advisor at 550): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff h11.brief: sample \"Sweep done: 2 CI failures (quill is real, ledger was flaky), 5 open PRs, and the SQLite queue move is deferred on Advisor's advice.\", served \"\"",
+    "why": "The observed question or result gets its text from the recorded owner and native recipe. The historical sample inserts an authored preview."
+  },
+  {
+    "gap": "handoff h14.brief: sample \"One tool call didn't finish before the move: `terraform apply -auto-approve`. Check the real infrastructure state before I resume.\", served \"\"",
+    "why": "The observed question or result gets its text from the recorded owner and native recipe. The historical sample inserts an authored preview."
+  },
+  {
+    "gap": "handoff h17 (spawn ledger→l-sub at 442): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-h-scan (spawn atlas-ingest→a-scan at 672): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-h-parse (spawn atlas-ingest→a-parse at 682): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-h-store (spawn atlas-ingest→a-store at 682): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-h-index (spawn atlas-ingest→a-index at 683): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-h-docs (spawn atlas-ingest→a-docs at 685): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-h-review (spawn atlas-ingest→a-review at 726): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-h-grep (spawn a-review→a-review-grep at 730): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-relay (relay atlas-ingest→harbor at 740): not served",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff a-result.brief: sample \"The ingest parser and storage work are ready. Review is clear; the index run needs a CI fix.\", served \"\"",
+    "why": "The observed question or result gets its text from the recorded owner and native recipe. The historical sample inserts an authored preview."
+  },
+  {
+    "gap": "handoff relay sentinel→null at 432: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn ledger→null at 442: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff relay principal→null at 550: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn quill→null at 640: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn atlas-ingest→null at 672: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn atlas-ingest→null at 685: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn atlas-ingest→null at 726: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn a-review→null at 730: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff relay atlas-ingest→null at 740: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn harbor→null at 751: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn harbor→null at 753: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "handoff spawn h-review→null at 756: served, not in the sample",
+    "why": "The committed warehouse publishes sender-only relationship events. The historical sample assigns a cross-session target."
+  },
+  {
+    "gap": "tx harbor: sample entry not served: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"crates/sync/src/queue.rs\",\"ok\":true,\"secs\":\"0.1s\",\"out\":\"fn next_delay(attempt: u32) -> Duration {\\n    let delay = BASE * 2u32.pow(attempt);\\n    Duration::from_millis(delay as u64)\\n}\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx harbor: sample entry not served: {\"k\":\"tool\",\"name\":\"Edit\",\"arg\":\"crates/sync/src/queue.rs\",\"ok\":true,\"secs\":\"0.0s\",\"diff\":[[\"ctx\",\" fn next_delay(attempt: u32) -> Duration {\"],[\"del\",\"-    let delay = BASE * 2u32.pow(attempt);\"],[\"add\",\"+    let delay = BASE.saturating_mul(2u32.saturating_pow(attempt)).min(MAX_DELAY);\"]]}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx harbor: sample entry not served: {\"k\":\"h\",\"id\":\"h2\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx harbor: sample entry not served: {\"k\":\"h\",\"id\":\"h3\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx harbor: sample entry not served: {\"k\":\"h\",\"id\":\"h20\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"<fixture>/work/harbor/crates/sync/src/queue.rs\",\"ok\":true,\"secs\":\"0.1s\",\"out\":\"fn next_delay(attempt: u32) -> Duration {\\n    let delay = BASE * 2u32.pow(attempt);\\n    Duration::from_millis(delay as u64)\\n}\"}",
+    "why": "The native tool records an absolute fixture path. The sample labels the same tool with a repository-relative path."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Edit\",\"arg\":\"<fixture>/work/harbor/crates/sync/src/queue.rs\",\"ok\":true,\"secs\":\"0.0s\",\"diff\":[[\"ctx\",\" fn next_delay(attempt: u32) -> Duration {\"],[\"del\",\"-    let delay = BASE * 2u32.pow(attempt);\"],[\"add\",\"+    let delay = BASE.saturating_mul(2u32.saturating_pow(attempt)).min(MAX_DELAY);\"]]}",
+    "why": "The native tool records an absolute fixture path. The sample labels the same tool with a repository-relative path."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"codex exec --full-auto < /tmp/handoff-offline-sync.md\",\"secs\":\"48m 0s\",\"live\":true}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"h\",\"id\":\"r37f8c06c0bb2ba74\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Review offline-sync diff\",\"ok\":true,\"secs\":\"0.5s\",\"in\":\"{\\n  \\\"description\\\": \\\"Review offline-sync diff\\\",\\n  \\\"subagent_type\\\": \\\"general-purpose\\\",\\n  \\\"prompt\\\": \\\"Review Codex's diff on `feat/offline-sync` as it lands: ordering, `Nack` handling, no commit before `Ack`.\\\",\\n  \\\"run_in_background\\\": true\\n}\",\"out\":\"Async agent launched successfully.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"h\",\"id\":\"rf292b8a38d8a48c9\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx harbor: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Check retry safety\",\"ok\":false,\"secs\":\"3m 0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Check retry safety\\\",\\n  \\\"subagent_type\\\": \\\"general-purpose\\\",\\n  \\\"prompt\\\": \\\"Check whether the retry cap can overflow under repeated Nacks, then report the smallest reproducer.\\\",\\n  \\\"run_in_background\\\": true\\n}\",\"out\":\"Failed before producing a reproducer: the review sandbox could not read the test fixture.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx h-codex: sample entry not served: {\"k\":\"h\",\"id\":\"h2\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-codex: sample entry not served: {\"k\":\"tool\",\"name\":\"apply_patch\",\"arg\":\"crates/sync/src/queue.rs\",\"secs\":\"6s\",\"live\":true}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx h-codex: served entry not in the sample: {\"k\":\"h\",\"id\":\"s5c3d5aea6e47cc2d\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-codex: served entry not in the sample: {\"k\":\"tool\",\"name\":\"apply_patch\",\"arg\":\"crates/sync/src/queue.rs\",\"ok\":false,\"secs\":\"—\",\"unfinished\":true}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx h-review: sample entry not served: {\"k\":\"h\",\"id\":\"h3\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-review: sample entry not served: {\"k\":\"h\",\"id\":\"h19\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-review: sample entry not served: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"crates/sync/src/flush.rs\",\"secs\":\"2s\",\"live\":true}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx h-review: served entry not in the sample: {\"k\":\"h\",\"id\":\"sb15ee0c74e1a6ddd\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-review: served entry not in the sample: {\"k\":\"h\",\"id\":\"r0beeb7f1e45a8a73\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-review: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Check flush ordering\",\"ok\":true,\"secs\":\"10.0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Check flush ordering\\\",\\n  \\\"subagent_type\\\": \\\"general-purpose\\\",\\n  \\\"prompt\\\": \\\"Check the flush loop's ordering and stop behavior against the review notes.\\\",\\n  \\\"run_in_background\\\": true\\n}\",\"out\":\"Async agent launched successfully.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx h-review: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"<fixture>/work/harbor/crates/sync/src/flush.rs\",\"secs\":\"2s\",\"live\":true}",
+    "why": "The native tool records an absolute fixture path. The sample labels the same tool with a repository-relative path."
+  },
+  {
+    "gap": "tx h-review-codex: sample entry not served: {\"k\":\"h\",\"id\":\"h19\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-review-codex: sample entry not served: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"crates/sync/src/flush.rs\",\"ok\":true,\"secs\":\"0.3s\",\"out\":\"while let Some(batch) = queue.oldest() { /* stop on Nack */ }\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx h-review-codex: served entry not in the sample: {\"k\":\"h\",\"id\":\"s2740b48dc93d06fc\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-review-codex: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"<fixture>/work/harbor/crates/sync/src/flush.rs\",\"ok\":true,\"secs\":\"0.3s\",\"out\":\"while let Some(batch) = queue.oldest() { /* stop on Nack */ }\"}",
+    "why": "The native tool records an absolute fixture path. The sample labels the same tool with a repository-relative path."
+  },
+  {
+    "gap": "tx h-failed: sample entry not served: {\"k\":\"h\",\"id\":\"h20\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-failed: sample entry not served: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"crates/sync/tests/fixtures/retry.log\",\"ok\":false,\"secs\":\"2.8s\",\"out\":\"permission denied: retry.log\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx h-failed: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to harbor · failed · 12:36\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-failed: served entry not in the sample: {\"k\":\"h\",\"id\":\"s50e0d86c9e53be40\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx h-failed: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Read\",\"arg\":\"<fixture>/work/harbor/crates/sync/tests/fixtures/retry.log\",\"ok\":false,\"secs\":\"2.8s\",\"out\":\"permission denied: retry.log\"}",
+    "why": "The native tool records an absolute fixture path. The sample labels the same tool with a repository-relative path."
+  },
+  {
+    "gap": "tx quill: sample entry not served: {\"k\":\"h\",\"id\":\"h5\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx quill: sample entry not served: {\"k\":\"h\",\"id\":\"h6\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx quill: sample entry not served: {\"k\":\"h\",\"id\":\"h7\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx quill: served entry not in the sample: {\"k\":\"h\",\"id\":\"r0075b044312fa8cc\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx quill: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Draft the migration plan\",\"ok\":true,\"secs\":\"35m 0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Draft the migration plan\\\",\\n  \\\"subagent_type\\\": \\\"Plan\\\",\\n  \\\"prompt\\\": \\\"Draft a migration plan for an `export_jobs` table: columns, indexes, rollback, backfill.\\\"\\n}\",\"out\":\"`export_jobs` with a nullable `pdf_path`, one index, no backfill.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx quill: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"codex exec --full-auto < /tmp/handoff-pdf-export.md\",\"ok\":true,\"secs\":\"45m 0s\",\"out\":\"PR #219 pushed; codex exited.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx quill: served entry not in the sample: {\"k\":\"tool\",\"name\":\"AskUserQuestion\",\"arg\":\"\",\"ok\":false,\"secs\":\"—\",\"unfinished\":true}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx q-plan: sample entry not served: {\"k\":\"h\",\"id\":\"h5\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx q-plan: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to quill · 11:15\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx q-plan: served entry not in the sample: {\"k\":\"h\",\"id\":\"sceac4809906ee547\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx q-codex: sample entry not served: {\"k\":\"h\",\"id\":\"h6\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx q-codex: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to quill · failed · 12:05\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx q-codex: served entry not in the sample: {\"k\":\"h\",\"id\":\"s2281c79363782772\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx principal: sample entry not served: {\"k\":\"h\",\"id\":\"h9\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx principal: sample entry not served: {\"k\":\"h\",\"id\":\"h10\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx principal: sample entry not served: {\"k\":\"h\",\"id\":\"h11\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx principal: served entry not in the sample: {\"k\":\"h\",\"id\":\"rff7eac4485106759\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx principal: served entry not in the sample: {\"k\":\"h\",\"id\":\"rad6a60b65180cc14\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx principal: served entry not in the sample: {\"k\":\"tool\",\"name\":\"SendMessage\",\"arg\":\"Advisor\",\"ok\":true,\"secs\":\"0.2s\",\"in\":\"{\\n  \\\"to\\\": \\\"Advisor\\\",\\n  \\\"message\\\": \\\"Second opinion: is moving the sync queue to SQLite worth it this quarter?\\\"\\n}\",\"out\":\"Message sent to Advisor\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx sentinel: sample entry not served: {\"k\":\"h\",\"id\":\"h9\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx sentinel: served entry not in the sample: {\"k\":\"h\",\"id\":\"r843abe84b6ed4338\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx sentinel: served entry not in the sample: {\"k\":\"tool\",\"name\":\"SendMessage\",\"arg\":\"Principal\",\"ok\":true,\"secs\":\"0.2s\",\"in\":\"{\\n  \\\"to\\\": \\\"Principal\\\",\\n  \\\"message\\\": \\\"New failure on quill `main`: layout / pdf-render. Not flaky: failed twice.\\\"\\n}\",\"out\":\"Message sent to Principal\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx advisor: sample entry not served: {\"k\":\"h\",\"id\":\"h10\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx advisor: served entry not in the sample: {\"k\":\"h\",\"id\":\"r34c1116e1af663f3\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas: sample entry not served: {\"k\":\"h\",\"id\":\"h14\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-scan\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-parse\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-store\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-index\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-docs\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-review\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-relay\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: sample entry not served: {\"k\":\"h\",\"id\":\"a-result\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"h\",\"id\":\"r96daa5115c6f16df\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Survey ingest call sites\",\"ok\":true,\"secs\":\"8m 0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Survey ingest call sites\\\",\\n  \\\"subagent_type\\\": \\\"Explore\\\",\\n  \\\"prompt\\\": \\\"Survey the ingest call sites.\\\"\\n}\",\"out\":\"Found the parser entry points in `ingest.rs` and two callers that need the new frame shape.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"codex exec --full-auto < /tmp/handoff-ingest-parser.md\",\"ok\":true,\"secs\":\"43m 0s\",\"out\":\"codex exited.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"codex exec --full-auto < /tmp/handoff-ingest-store.md\",\"ok\":true,\"secs\":\"26m 0s\",\"out\":\"codex exited.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Bash\",\"arg\":\"codex exec --full-auto < /tmp/handoff-ingest-index.md\",\"ok\":true,\"secs\":\"55m 0s\",\"out\":\"codex exited.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"h\",\"id\":\"ra1d8c5fd369a0ff6\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Update the ingest docs\",\"ok\":true,\"secs\":\"15m 0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Update the ingest docs\\\",\\n  \\\"subagent_type\\\": \\\"general-purpose\\\",\\n  \\\"prompt\\\": \\\"Update `docs/ingest.md` for the new frame shape once the survey is in.\\\"\\n}\",\"out\":\"Docs updated; the frame table now lists the new fields.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"h\",\"id\":\"r78398edfb6ca438b\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Review the parser diff\",\"ok\":true,\"secs\":\"20m 0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Review the parser diff\\\",\\n  \\\"subagent_type\\\": \\\"general-purpose\\\",\\n  \\\"prompt\\\": \\\"Review the parser diff.\\\"\\n}\",\"out\":\"The parser diff is sound; the review found no blocking issue.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"h\",\"id\":\"re69d55c5dcc4b251\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx atlas-ingest: served entry not in the sample: {\"k\":\"tool\",\"name\":\"SendMessage\",\"arg\":\"harbor\",\"ok\":true,\"secs\":\"0.2s\",\"in\":\"{\\n  \\\"to\\\": \\\"harbor\\\",\\n  \\\"message\\\": \\\"The ingest parser lands today; rebase `feat/offline-sync` after it.\\\"\\n}\",\"out\":\"Message sent to harbor\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx a-scan: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-scan\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-scan: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to atlas ingest · 11:20\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-scan: served entry not in the sample: {\"k\":\"h\",\"id\":\"s6879c1433bcd7835\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-parse: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-parse\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-parse: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to atlas ingest · 12:05\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-parse: served entry not in the sample: {\"k\":\"h\",\"id\":\"s621743ce5444b1c2\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-store: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-store\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-store: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to atlas ingest · 11:48\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-store: served entry not in the sample: {\"k\":\"h\",\"id\":\"s2c36afba9104fe98\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-index: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-index\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-index: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to atlas ingest · failed · 12:18\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-index: served entry not in the sample: {\"k\":\"h\",\"id\":\"s1a3a1554df9d1545\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-docs: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-docs\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-docs: sample entry not served: {\"k\":\"tool\",\"name\":\"Edit\",\"arg\":\"docs/ingest.md\",\"ok\":true,\"secs\":\"0.0s\",\"diff\":[[\"ctx\",\" | field | type |\"],[\"add\",\"+| frame_len | u32 |\"]]}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx a-docs: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to atlas ingest · 11:40\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-docs: served entry not in the sample: {\"k\":\"h\",\"id\":\"s82383783c1a814cb\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-docs: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Edit\",\"arg\":\"<fixture>/work/atlas/docs/ingest.md\",\"ok\":true,\"secs\":\"0.0s\",\"diff\":[[\"ctx\",\" | field | type |\"],[\"add\",\"+| frame_len | u32 |\"]]}",
+    "why": "The native tool records an absolute fixture path. The sample labels the same tool with a repository-relative path."
+  },
+  {
+    "gap": "tx a-review: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-review\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-review: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-grep\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-review: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to atlas ingest · 12:26\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-review: served entry not in the sample: {\"k\":\"h\",\"id\":\"sb3cfc2fda2937ef8\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-review: served entry not in the sample: {\"k\":\"h\",\"id\":\"r16ab676cf9f98fdf\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-review: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Find parse_frame callers\",\"ok\":true,\"secs\":\"4m 0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Find parse_frame callers\\\",\\n  \\\"subagent_type\\\": \\\"general-purpose\\\",\\n  \\\"prompt\\\": \\\"Find every caller of `parse_frame`.\\\"\\n}\",\"out\":\"Found four callers; all are covered by the parser change or its tests.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx a-review-grep: sample entry not served: {\"k\":\"h\",\"id\":\"a-h-grep\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-review-grep: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to Review the parser diff · 12:14\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx a-review-grep: served entry not in the sample: {\"k\":\"h\",\"id\":\"sa4d6f871fa073703\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx deps: sample entry not served: {\"k\":\"tool\",\"name\":\"shell\",\"arg\":\"cargo audit --json\",\"secs\":\"11s\",\"live\":true}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx deps: served entry not in the sample: {\"k\":\"tool\",\"name\":\"shell\",\"arg\":\"cargo audit --json\",\"ok\":false,\"secs\":\"—\",\"unfinished\":true}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx ledger: sample entry not served: {\"k\":\"h\",\"id\":\"h17\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx ledger: sample entry not served: {\"k\":\"tool\",\"name\":\"Edit\",\"arg\":\"src/money.rs\",\"ok\":true,\"secs\":\"0.0s\",\"diff\":[[\"del\",\"-    (amount * rate).round()\"],[\"add\",\"+    (amount * rate).round_dp_with_strategy(2, MidpointNearestEven)\"]]}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx ledger: served entry not in the sample: {\"k\":\"h\",\"id\":\"rdf3c73226ebded91\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx ledger: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Agent\",\"arg\":\"Find rounding call sites\",\"ok\":true,\"secs\":\"9m 0s\",\"in\":\"{\\n  \\\"description\\\": \\\"Find rounding call sites\\\",\\n  \\\"subagent_type\\\": \\\"Explore\\\",\\n  \\\"prompt\\\": \\\"List every place that rounds money, and whether it rounds before or after summing.\\\"\\n}\",\"out\":\"4 call sites; only `money.rs:31` rounds before summing.\"}",
+    "why": "The warehouse renders recorded tool calls and results from native entries, including relationship tools. The historical sample summarizes them."
+  },
+  {
+    "gap": "tx ledger: served entry not in the sample: {\"k\":\"tool\",\"name\":\"Edit\",\"arg\":\"<fixture>/work/ledger/src/money.rs\",\"ok\":true,\"secs\":\"0.0s\",\"diff\":[[\"del\",\"-    (amount * rate).round()\"],[\"add\",\"+    (amount * rate).round_dp_with_strategy(2, MidpointNearestEven)\"]]}",
+    "why": "The native tool records an absolute fixture path. The sample labels the same tool with a repository-relative path."
+  },
+  {
+    "gap": "tx l-sub: sample entry not served: {\"k\":\"h\",\"id\":\"h17\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx l-sub: sample entry not served: {\"k\":\"end\",\"text\":\"Returned to ledger · 07:31\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
+  },
+  {
+    "gap": "tx l-sub: served entry not in the sample: {\"k\":\"h\",\"id\":\"s35eadef8a55781fd\"}",
+    "why": "The warehouse retains qualified sender and local turn events. The historical sample adds synthetic cross-session cards and returns."
   }
 ]

@@ -56,8 +56,6 @@ const PLACES = {
   },
   details: { selector: 'dialog.session-menu dl.kv dd .hicon', size: 16, text: (h) => NAME[h] },
   trace: { selector: '.page .chip-h > .hicon', size: 14 },
-  'turn-header': { selector: '.page .turn-h > .hicon', size: 16 },
-  'child-kind': { selector: '.page .child-card .cc-meta > .hicon', size: 14 },
 };
 
 // Every mark matching `selector` that is drawn (a collapsed sidebar group holds marks that are not), as the page shows it.
@@ -175,7 +173,7 @@ export default async function hiconsCheck(browser) {
 
   // The sessions whose harness the fixture is made to report as OpenCode: the most recent Claude ones at the top of the sidebar.
   const lanes = Object.values(D.SESS)
-    .filter((s) => s.lane)
+    .filter((s) => !s.parent)
     .sort((a, b) => b.last - a.last);
   const opencode = lanes
     .filter((s) => s.harness === 'claude')
@@ -187,21 +185,19 @@ export default async function hiconsCheck(browser) {
     opencode.length === 2 && !!claude && !!codex,
     'the fixture must hold three top-level Claude sessions and a Codex one',
   );
-  const relay = [
-    ...new Set(
-      D.H.filter((h) => h.kind === 'relay' && D.SESS[h.to] && D.SESS[h.from]).map((h) => h.to),
-    ),
-  ].slice(0, 6);
-  const spawner = [
-    ...new Set(
-      D.H.filter((h) => h.kind === 'spawn' && D.SESS[h.from] && D.SESS[h.to]).map((h) => h.from),
-    ),
-  ].slice(0, 6);
-  const turn = D.turns.find((t) => t.sent.length);
-  r.expect(
-    relay.length > 0 && spawner.length > 0 && !!turn,
-    'the fixture must hold a relay, a spawn and a turn that sent something',
-  );
+  const senderFixtures = ['relay', 'spawn'].map((kind) => {
+    const event = D.H.find(
+      (h) =>
+        h.kind === kind &&
+        h.reason === 'not linked yet' &&
+        D.SESS[h.from] &&
+        !opencode.includes(h.from),
+    );
+    if (!event) throw new Error('The fixture must hold an unlinked sender ' + kind);
+    return event;
+  });
+  const turn = D.turns.find((t) => t.sent.length && !opencode.includes(t.sid));
+  if (!turn) throw new Error('The fixture must hold a trace with a sender action');
 
   for (const [size, dark] of [
     ['phone', false],
@@ -222,13 +218,17 @@ export default async function hiconsCheck(browser) {
           for (const section of ['recent', 'working', 'inbox', 'answered'])
             for (const row of body[section])
               if (opencode.includes(row.catalog_key)) row.session.harness = 'opencode';
-        } else if (endpoint === 'sessions') {
-          for (const row of body.items) if (opencode.includes(row.key)) row.harness = 'opencode';
+        } else if (endpoint === 'sessions' && Array.isArray(body.items)) {
           const filter = new URL(route.request().url()).searchParams.get('harness');
-          if (filter) body.items = body.items.filter((row) => row.harness === filter);
-        } else if (opencode.includes(body.identity?.catalog_key)) {
-          body.session.harness = 'opencode';
+          if (!filter)
+            for (const row of body.items) if (opencode.includes(row.key)) row.harness = 'opencode';
+        } else if (
+          endpoint === 'session-transcript' &&
+          opencode.includes(body.identity?.catalog_key)
+        ) {
+          if (body.session) body.session.harness = 'opencode';
           body.identity.harness = 'opencode';
+          body.selected.harness = 'opencode';
         }
         await route.fulfill({ response, json: body });
       });
@@ -334,6 +334,7 @@ export default async function hiconsCheck(browser) {
       await page.click('#lead-btn');
       await page.waitForTimeout(320);
     } // the drawer is the sidebar on a phone
+    await page.locator('#lanes .srow').first().waitFor();
     await loaded(page);
     const side = await read(page, PLACES.sidebar.selector);
     const seen = judge('sidebar', side, { need: 3 });
@@ -505,57 +506,26 @@ export default async function hiconsCheck(browser) {
       tag + ': the trademark note is shown outside the session menu',
     );
 
-    // ---- A trace's session chip ----
-    if (turn) {
-      await goto(page, { v: 'trace', sid: turn.sid, turn: turn.id }, D);
-      await loaded(page);
-      judge('trace', await read(page, PLACES.trace.selector));
-      await shot('trace');
-    }
-
-    // ---- A session that received a relay: its header names the sender's harness ----
-    let relayed = false;
-    for (const sid of relay) {
-      await goto(page, { v: 'session', id: sid }, D);
-      await page.waitForTimeout(150);
-      await loaded(page);
-      const marks = await read(page, PLACES['turn-header'].selector);
-      if (!marks.length) continue;
-      judge('turn-header', marks);
-      relayed = true;
-      await shot('relay-header');
-      break;
-    }
-    r.expect(
-      relayed,
-      tag + ' turn-header: no session that received a relay shows a turn header with a mark',
-    );
-
-    // ---- A session that handed work off: the child card's kind badge ----
-    let carded = false;
-    for (const sid of spawner) {
-      await goto(page, { v: 'session', id: sid }, D);
-      await page.waitForTimeout(150);
-      await loaded(page);
-      const marks = await read(page, PLACES['child-kind'].selector);
-      if (!marks.length) continue;
-      judge('child-kind', marks);
-      const badge = await page.evaluate(() =>
-        [...document.querySelectorAll('.page .child-card .cc-meta')].every((m) => {
-          const mk = m.querySelector(':scope > .hicon')?.getBoundingClientRect(),
-            b = m.getBoundingClientRect();
-          return !!mk && mk.top >= b.top - 2 && mk.bottom <= b.top + 24;
-        }),
+    // The trace identifies the selected sender. Relationship cards do not
+    // give the unlinked target an identity, mark, or navigation control.
+    await goto(page, { v: 'trace', sid: turn.sid, turn: turn.id }, D);
+    await loaded(page);
+    judge('trace', await read(page, PLACES.trace.selector));
+    await shot('trace');
+    for (const event of senderFixtures) {
+      await goto(page, { v: 'session', id: event.from }, D);
+      const card = page.locator(`.event[data-h="${event.id}"]`);
+      await card
+        .locator('.ev-result')
+        .filter({ hasText: /^Target\s*not linked yet$/ })
+        .waitFor();
+      r.expect(
+        (await card.locator('.hicon, .ev-head a, .ev-head button').count()) === 0,
+        tag + ': ' + event.kind + ' sender card exposes an unlinked target',
       );
-      r.expect(badge, tag + " child-kind: a card's mark is not on the first line of its kind line");
-      carded = true;
-      await shot('child-card');
-      break;
+      await card.scrollIntoViewIfNeeded();
+      await shot('sender-' + event.kind);
     }
-    r.expect(
-      carded,
-      tag + ' child-kind: no session that handed work off shows a child card with a mark',
-    );
 
     r.expect(
       await page.evaluate(

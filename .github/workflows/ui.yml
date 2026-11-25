@@ -285,7 +285,7 @@ jobs:
       - name: Fixture gaps against the sample's data
         if: matrix.suite == 'navigation'
         working-directory: tests/ui
-        run: node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
+        run: SEMON_FIXTURE_ROOT="$RUNNER_TEMP/sample" node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
 
       - name: Functional checks
         if: contains(fromJSON('["navigation","transcript","shell","interaction","accessibility"]'), matrix.suite)
@@ -384,7 +384,7 @@ jobs:
           cd tests/ui
           node manage-dashboard.mjs
           node pushed-parity.mjs --native-pages
-          node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
+          SEMON_FIXTURE_ROOT="$RUNNER_TEMP/sample" node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
           node receive-viewer.mjs
 
       # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
