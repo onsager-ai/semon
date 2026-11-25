@@ -185,6 +185,13 @@ impl Default for Discovery {
     }
 }
 impl Discovery {
+    pub(crate) fn current_native() -> Self {
+        Self {
+            archived: Some(Vec::new().into_iter()),
+            ..Self::default()
+        }
+    }
+
     fn open(&mut self, options: &Options, root: InputRoot, relative: String) -> io::Result<()> {
         let path = root.home(options).join(&relative);
         // Match native discovery's custody boundary: never follow symlinks.

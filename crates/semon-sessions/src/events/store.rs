@@ -6182,6 +6182,113 @@ impl<'c> Readers<'c> {
     }
 }
 
+fn read_events(
+    statement: &mut Statement<'_>,
+    file_id: i64,
+) -> rusqlite::Result<(Vec<Event>, Vec<Event>)> {
+    let mut events = Vec::new();
+    let mut extras = Vec::new();
+    let mut rows = statement.query([file_id])?;
+    while let Some(event_row) = rows.next()? {
+        crate::selected_read::row(event_row, std::mem::size_of::<Event>() + 32)?;
+        crate::selected_read::checkpoint("selected_event")
+            .map_err(crate::selected_read::sql_error)?;
+        let (extra, seq, event) = read_event(event_row)?;
+        let list = if extra { &mut extras } else { &mut events };
+        if seq != list.len() {
+            return Err(gap("events"));
+        }
+        list.push(event);
+    }
+
+    Ok((events, extras))
+}
+
+fn read_signals(statement: &mut Statement<'_>, file_id: i64) -> rusqlite::Result<Vec<Signal>> {
+    let mut signals = Vec::new();
+    let mut rows = statement.query([file_id])?;
+    while let Some(signal_row) = rows.next()? {
+        crate::selected_read::row(signal_row, std::mem::size_of::<Signal>() + 32)?;
+        if seq_of(signal_row.get(0)?) != signals.len() {
+            return Err(gap("signals"));
+        }
+        signals.push(Signal {
+            native_record: signal_row
+                .get::<_, Option<String>>(7)?
+                .map(|value| from_json(7, &value))
+                .transpose()?,
+            k: untag(1, signal_row.get(1)?)?,
+            o: uint(signal_row.get(2)?),
+            t: signal_row.get(3)?,
+            at: signal_row.get(4)?,
+            n: signal_row.get(5)?,
+            v: signal_row.get::<_, Option<i64>>(6)?.map(uint),
+        });
+    }
+
+    Ok(signals)
+}
+
+fn read_message_usage(
+    statement: &mut Statement<'_>,
+    file_id: i64,
+) -> rusqlite::Result<BTreeMap<String, MessageUsage>> {
+    let mut usage_by_id = BTreeMap::new();
+    let mut rows = statement.query([file_id])?;
+    while let Some(usage_row) = rows.next()? {
+        crate::selected_read::row(usage_row, std::mem::size_of::<MessageUsage>() + 64)?;
+        let (id, usage) = read_usage(usage_row)?;
+        usage_by_id.insert(id, usage);
+    }
+
+    Ok(usage_by_id)
+}
+
+/// Native Codex can have a qualified usage cohort with zero accepted steps.
+pub(crate) fn warehouse_has_codex_usage(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<bool> {
+    native_usage::normalized(connection, path, ledger)
+}
+
+/// Activity needs normalized metadata only. Never load body rows, transcript
+/// extras, runtime facts, or semantic projections for an analytics input.
+pub(crate) fn warehouse_activity_file(
+    connection: &Connection,
+    path: &str,
+    expected: &Ledger,
+) -> rusqlite::Result<Option<FileIndex>> {
+    let Some((file_id, ledger)) = ledger_row(connection, path)? else {
+        return Ok(None);
+    };
+    if &ledger != expected {
+        return Ok(None);
+    }
+    let mut events = connection.prepare_cached(&format!(
+        "SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND NOT extra ORDER BY seq"
+    ))?;
+    let mut signals = connection.prepare_cached(&format!(
+        "SELECT {SIGNAL_COLUMNS} FROM signals WHERE file_id=?1 ORDER BY seq"
+    ))?;
+    let mut usage = connection.prepare_cached(&format!(
+        "SELECT {USAGE_COLUMNS} FROM usage WHERE file_id=?1"
+    ))?;
+    let links: String = connection.query_row(
+        "SELECT links FROM files WHERE file_id=?1",
+        [file_id],
+        |row| row.get(0),
+    )?;
+    Ok(Some(FileIndex {
+        events: read_events(&mut events, file_id)?.0,
+        signals: read_signals(&mut signals, file_id)?,
+        usage_by_id: read_message_usage(&mut usage, file_id)?,
+        links: from_json(0, &links)?,
+        ..Default::default()
+    }))
+}
+
 /// One `files` row (selected as [`FILE_COLUMNS`]) and its child rows.
 fn read_file(
     readers: &mut Readers<'_>,
@@ -6205,49 +6312,9 @@ fn read_file(
         tail: row.get(8)?,
     };
 
-    let mut events = Vec::new();
-    let mut extras = Vec::new();
-    let mut rows = readers.events.query([file_id])?;
-    while let Some(event_row) = rows.next()? {
-        crate::selected_read::row(event_row, std::mem::size_of::<Event>() + 32)?;
-        crate::selected_read::checkpoint("selected_event")
-            .map_err(crate::selected_read::sql_error)?;
-        let (extra, seq, event) = read_event(event_row)?;
-        let list = if extra { &mut extras } else { &mut events };
-        if seq != list.len() {
-            return Err(gap("events"));
-        }
-        list.push(event);
-    }
-
-    let mut signals = Vec::new();
-    let mut rows = readers.signals.query([file_id])?;
-    while let Some(signal_row) = rows.next()? {
-        crate::selected_read::row(signal_row, std::mem::size_of::<Signal>() + 32)?;
-        if seq_of(signal_row.get(0)?) != signals.len() {
-            return Err(gap("signals"));
-        }
-        signals.push(Signal {
-            native_record: signal_row
-                .get::<_, Option<String>>(7)?
-                .map(|value| from_json(7, &value))
-                .transpose()?,
-            k: untag(1, signal_row.get(1)?)?,
-            o: uint(signal_row.get(2)?),
-            t: signal_row.get(3)?,
-            at: signal_row.get(4)?,
-            n: signal_row.get(5)?,
-            v: signal_row.get::<_, Option<i64>>(6)?.map(uint),
-        });
-    }
-
-    let mut usage_by_id = BTreeMap::new();
-    let mut rows = readers.usage.query([file_id])?;
-    while let Some(usage_row) = rows.next()? {
-        crate::selected_read::row(usage_row, std::mem::size_of::<MessageUsage>() + 64)?;
-        let (id, usage) = read_usage(usage_row)?;
-        usage_by_id.insert(id, usage);
-    }
+    let (events, extras) = read_events(&mut readers.events, file_id)?;
+    let signals = read_signals(&mut readers.signals, file_id)?;
+    let usage_by_id = read_message_usage(&mut readers.usage, file_id)?;
 
     let mut codex_usage_events = Vec::new();
     let mut rows = readers.codex_usage.query([file_id])?;

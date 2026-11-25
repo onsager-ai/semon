@@ -85,7 +85,7 @@ pub fn analytics_index_path(cache: &Path) -> PathBuf {
     events::EventCache::path(cache)
 }
 pub use causal_trace::session_causal_trace;
-pub use origin_projection::SqliteAnalyticsInput;
+pub use origin_projection::{SqliteAnalyticsInput, WarehouseAnalyticsInput, admit_warehouse};
 pub use overview::{
     OverviewSource, overview_source_key, session_home_details_with_mode, session_overview_reply,
 };

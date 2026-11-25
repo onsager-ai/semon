@@ -4,6 +4,9 @@
 //! rather than their backing rows.  Those readers are where current-format,
 //! source cohort, rules, and pricing admission is enforced.
 
+mod warehouse;
+pub use warehouse::{WarehouseAnalyticsInput, admit_warehouse};
+
 use std::{collections::BTreeMap, path::Path};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -18,15 +21,14 @@ use semon_asi::input::{
 use crate::{
     events::session_activity as native_activity,
     facts::RepoId,
-    model::summary::{CatalogLifecycle, CatalogRow},
+    model::summary::{CatalogLifecycle, CatalogRow, CatalogSource},
 };
 
-fn indexed_source_witness(row: &CatalogRow) -> rusqlite::Result<SourceWitness> {
+fn indexed_source_witness(sources: &[CatalogSource]) -> rusqlite::Result<SourceWitness> {
     Ok(SourceWitness {
-        generation: crate::retention::source_generation(&row.sources)
+        generation: crate::retention::source_generation(sources)
             .map_err(|_| rusqlite::Error::InvalidQuery)?,
-        sources: row
-            .sources
+        sources: sources
             .iter()
             .map(|source| Source {
                 native_id: source.native_id.clone(),
@@ -395,7 +397,11 @@ fn prices(
         params![key, generation, fingerprint],
         |row| row.get(0),
     )?;
-    let rates = crate::pricing::runtime::recorded_rates(&snapshot)
+    decode_prices(&snapshot, fingerprint)
+}
+
+fn decode_prices(snapshot: &str, fingerprint: &str) -> rusqlite::Result<Vec<Price>> {
+    let rates = crate::pricing::runtime::recorded_rates(snapshot)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
     rates
         .into_iter()
@@ -666,17 +672,59 @@ fn admitted(
         return Err(rusqlite::Error::InvalidQuery);
     }
     let session_uid = session_uid(namespace, &native_session_identity(&row)?);
-    let fact_by_id: BTreeMap<_, _> = facts.into_iter().map(|(_, id, fact)| (id, fact)).collect();
-    if fact_by_id.len() != steps.len() {
+    let repo = repo(tx, &row)?;
+    let Some(compactions) = read_compactions(tx, &session_uid, &row, generation, &price_version)?
+    else {
+        return Ok(None);
+    };
+    let mut projected = project_session(SessionEvidence {
+        session_uid: session_uid.clone(),
+        session: session_input(tx, namespace, &session_uid, &row, repo)?,
+        sources: &row.sources,
+        price_version,
+        generation,
+        steps,
+        facts: facts.into_iter().map(|(_, id, fact)| (id, fact)).collect(),
+        compactions,
+        prices,
+    })?;
+    if let Some(session) = &mut projected {
+        session.source_witness = indexed_source_witness(&witness.sources)?;
+    }
+    Ok(projected)
+}
+
+struct SessionEvidence<'a> {
+    session_uid: String,
+    session: Session,
+    sources: &'a [CatalogSource],
+    price_version: String,
+    generation: &'a str,
+    steps: Vec<native_activity::ActivityStep>,
+    facts: BTreeMap<native_activity::ActivityStepId, native_activity::StepFacts>,
+    compactions: Vec<Compaction>,
+    prices: Vec<Price>,
+}
+
+fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<AdmittedSession>> {
+    let SessionEvidence {
+        session_uid,
+        session,
+        sources,
+        price_version,
+        generation,
+        steps,
+        facts,
+        compactions,
+        prices,
+    } = evidence;
+    if facts.len() != steps.len() {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let repo = repo(tx, &row)?;
     let mut projected_steps = Vec::with_capacity(steps.len());
     for step in &steps {
-        let fact = fact_by_id
-            .get(&step.id)
-            .ok_or(rusqlite::Error::InvalidQuery)?;
-        let Some(projected) = step_input(&session_uid, &row, step, fact, &price_version)? else {
+        let fact = facts.get(&step.id).ok_or(rusqlite::Error::InvalidQuery)?;
+        let Some(projected) = step_input(&session_uid, sources, step, fact, &price_version)? else {
             return Ok(None);
         };
         projected_steps.push(projected);
@@ -693,16 +741,12 @@ fn admitted(
         .iter()
         .filter(|step| step.activity.is_none())
         .count() as u64;
-    let Some(compactions) = read_compactions(tx, &session_uid, &row, generation, &price_version)?
-    else {
-        return Ok(None);
-    };
     let usage_complete = projected_steps
         .iter()
         .all(|step| !step.billing.split_unknown);
     Ok(Some(AdmittedSession {
-        session_uid: session_uid.clone(),
-        source_witness: indexed_source_witness(&witness)?,
+        session_uid,
+        source_witness: indexed_source_witness(sources)?,
         derivation: semon_asi::input::Derivation {
             activity_generation: generation.to_owned(),
             producer_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -723,7 +767,7 @@ fn admitted(
                 unclassified_step_count: unclassified,
             },
         },
-        session: session_input(tx, namespace, &session_uid, &row, repo)?,
+        session,
         steps: projected_steps,
         compactions,
         usage_complete,
@@ -772,6 +816,14 @@ fn read_compactions(
     if native_compactions.len() as i64 != declared {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    project_compactions(session_uid, &row.sources, native_compactions)
+}
+
+fn project_compactions(
+    session_uid: &str,
+    sources: &[CatalogSource],
+    native_compactions: Vec<native_activity::Compaction>,
+) -> rusqlite::Result<Option<Vec<Compaction>>> {
     let mut compactions: Vec<Compaction> = Vec::new();
     let mut identities: BTreeMap<String, usize> = BTreeMap::new();
     for compact in native_compactions {
@@ -781,7 +833,7 @@ fn read_compactions(
             .ok_or(rusqlite::Error::InvalidQuery)?;
         let Some(anchor) = (match native_record.id.as_deref().filter(|id| !id.is_empty()) {
             Some(id) => Some(id.to_owned()),
-            None => record_anchor(row, &compact.position, native_record.ordinal)?,
+            None => record_anchor(sources, &compact.position, native_record.ordinal)?,
         }) else {
             return Ok(None);
         };
@@ -915,7 +967,7 @@ fn repo(tx: &rusqlite::Transaction<'_>, row: &CatalogRow) -> rusqlite::Result<Re
 
 fn step_input(
     session_uid: &str,
-    row: &CatalogRow,
+    sources: &[CatalogSource],
     step: &native_activity::ActivityStep,
     fact: &native_activity::StepFacts,
     price_version: &str,
@@ -938,7 +990,7 @@ fn step_input(
             let Some(ordinal) = fact.record_ordinal else {
                 return Ok(None);
             };
-            record_anchor(row, &step.position, ordinal)?
+            record_anchor(sources, &step.position, ordinal)?
         }
     }) else {
         return Ok(None);
@@ -1006,13 +1058,12 @@ fn step_input(
 /// An unrepresentable stem returns `None`; a broken position/source binding
 /// remains an integrity error.
 fn record_anchor(
-    row: &CatalogRow,
+    sources: &[CatalogSource],
     position: &native_activity::SourcePosition,
     record_ordinal: u64,
 ) -> rusqlite::Result<Option<String>> {
     let source_path = Path::new(&position.source);
-    let matching = row
-        .sources
+    let matching = sources
         .iter()
         .filter(|source| source.path == source_path)
         .collect::<Vec<_>>();
@@ -1035,8 +1086,7 @@ fn record_anchor(
     // The ASI record-anchor contract names the file stem.  Two physical
     // contributors with the same stem cannot be represented distinctly by
     // that contract, so refuse rather than smuggle a path into a key.
-    if row
-        .sources
+    if sources
         .iter()
         .filter(|candidate| {
             candidate.path.file_stem().and_then(|value| value.to_str()) == Some(stem)
@@ -1471,7 +1521,7 @@ mod tests {
         };
         row.sources = vec![source("/private/first-root/record.jsonl", "root")];
         let first = record_anchor(
-            &row,
+            &row.sources,
             &native_activity::SourcePosition {
                 source: "/private/first-root/record.jsonl".into(),
                 offset: 900,
@@ -1482,7 +1532,7 @@ mod tests {
         .unwrap();
         row.sources = vec![source("/different/parent/record.jsonl", "root")];
         let moved = record_anchor(
-            &row,
+            &row.sources,
             &native_activity::SourcePosition {
                 source: "/different/parent/record.jsonl".into(),
                 offset: 900,
@@ -1504,7 +1554,7 @@ mod tests {
             source("/different/parent/cleared.jsonl", "cleared"),
         ];
         let cleared = record_anchor(
-            &row,
+            &row.sources,
             &native_activity::SourcePosition {
                 source: "/different/parent/cleared.jsonl".into(),
                 offset: 900,
@@ -1525,19 +1575,19 @@ mod tests {
         };
         row.sources.push(source("/another/record.jsonl", "root"));
         assert!(
-            record_anchor(&row, &position, 3).unwrap().is_none(),
+            record_anchor(&row.sources, &position, 3).unwrap().is_none(),
             "duplicate stems are ambiguous"
         );
         row.sources.pop();
         row.sources.push(row.sources[0].clone());
         assert!(
-            record_anchor(&row, &position, 3).is_err(),
+            record_anchor(&row.sources, &position, 3).is_err(),
             "duplicate contributors are ambiguous"
         );
         row.sources.pop();
         assert!(
             record_anchor(
-                &row,
+                &row.sources,
                 &native_activity::SourcePosition {
                     source: "/unwitnessed/record.jsonl".into(),
                     offset: 900,
@@ -1550,7 +1600,7 @@ mod tests {
         row.sources = vec![source("/different/parent/invalid stem.jsonl", "root")];
         assert!(
             record_anchor(
-                &row,
+                &row.sources,
                 &native_activity::SourcePosition {
                     source: "/different/parent/invalid stem.jsonl".into(),
                     offset: 900

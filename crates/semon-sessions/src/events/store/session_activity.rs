@@ -46,8 +46,8 @@ pub(crate) struct Projection {
     pub(crate) activity: SessionActivity,
     // Kept outside Catalog JSON and keyed by the same exact native step identity.
     inputs: BTreeMap<activity::ActivityStepId, Usage>,
-    facts: BTreeMap<activity::ActivityStepId, activity::StepFacts>,
-    pricing_snapshot: String,
+    pub(crate) facts: BTreeMap<activity::ActivityStepId, activity::StepFacts>,
+    pub(crate) pricing_snapshot: String,
 }
 
 impl Projection {
