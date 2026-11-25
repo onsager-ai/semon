@@ -1512,6 +1512,9 @@ html.viewer-open, html.viewer-open body { overflow: hidden; }
 .manage-lane-next { grid-column: 1 / 3; }
 .manage-lane :is(.manage-lane-name, .manage-lane-next) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .manage-disclosure[open] .manage-lane-name { white-space: normal; }
+@media (max-width: 760px) {
+  .manage-lane .manage-lane-next { white-space: normal; overflow: visible; text-overflow: clip; }
+}
 .manage-budget-line {
   display: flex;
   flex-wrap: wrap;
