@@ -420,6 +420,16 @@ export class CatalogNativeTranscriptStore {
     if (this.pending === request) this.pending = undefined;
   }
 
+  saveRanges(): () => void {
+    const pages = this.pages.slice();
+    return () => {
+      if (this.disposed) return;
+      this.pending = undefined;
+      this.pages = pages;
+      ++this.revision;
+    };
+  }
+
   earlierCursor(): string | null {
     return this.pages[0]?.earlierCursor ?? null;
   }

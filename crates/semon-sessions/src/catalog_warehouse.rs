@@ -1392,6 +1392,28 @@ fn selected_details(
     }))
 }
 
+fn focused_transcript_observation(
+    source: &Source<'_>,
+    key: &str,
+) -> Result<Option<selected::TranscriptObservation>, ReadError> {
+    let view = selected::ReadView::open(source)?;
+    let tx = view.lock()?;
+    let Some(identity) = current_identity(&tx, source, key, None)? else {
+        return Ok(None);
+    };
+    let Some(references) = focused_members(&tx, source, &identity)? else {
+        return Ok(None);
+    };
+    let generation = current_identity_witness(&tx, source, key, &identity, &references)?;
+    let status = selected_runtime_status(&tx, source, identity.0, &view)?;
+    let total = selected::entry_count(&tx, source, &identity)?;
+    Ok(Some(selected::TranscriptObservation {
+        errors_generation: selected::current_errors_generation(&generation, status),
+        generation,
+        total,
+    }))
+}
+
 fn focused_metadata(source: &Source<'_>, key: &str) -> Result<Option<(Row, String)>, ReadError> {
     let view = selected::ReadView::open(source)?;
     let (identity, references, witness) = {

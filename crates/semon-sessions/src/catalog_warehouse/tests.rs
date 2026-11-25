@@ -4008,6 +4008,74 @@ fn warehouse_list_qualifies_codex_prompt_title_for_search() {
 }
 
 #[test]
+fn warehouse_transcript_observation_tracks_committed_entries_without_body_text() {
+    let mut fixture = Fixture::new("transcript-observation");
+    let path = fixture.claude("native", "Visible fixture title");
+    let configured = host_source(&fixture.options, fixture.namespace.as_str());
+    let observe = || {
+        let reply = http::list(
+            std::slice::from_ref(&configured),
+            "workspace",
+            "sid=native&scope=current&observe=transcript",
+            false,
+        );
+        assert_eq!(reply.status, 200);
+        serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()
+    };
+    let before = observe();
+    let private = "Private assistant body witness";
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"appended","sessionId":"native",
+            "timestamp":"2026-09-24T00:00:01Z",
+            "message":{"role":"assistant","content":[{"type":"text","text":private}]}}),
+    );
+    let unpublished = observe();
+    // Live runtime status may change before the Index publishes the append.
+    assert_eq!(
+        unpublished["transcript"]["generation"],
+        before["transcript"]["generation"]
+    );
+    assert_eq!(
+        unpublished["transcript"]["total"],
+        before["transcript"]["total"]
+    );
+    assert!(!unpublished.to_string().contains(private));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let after = observe();
+    let page = http::transcript(&configured, "sid=native", None, None);
+    assert_eq!(page.status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+    assert!(page.to_string().contains(private));
+    assert_eq!(
+        after,
+        json!({"api":1,"machine":configured.key,"catalog_key":"native","read_scope":"current",
+            "transcript":{"generation":page["identity"]["generation"],
+                          "errors_generation":page["errors_generation"],
+                          "total":before["transcript"]["total"].as_i64().unwrap()+1}})
+    );
+    assert_ne!(
+        before["transcript"]["generation"],
+        after["transcript"]["generation"]
+    );
+    assert_ne!(
+        before["transcript"]["errors_generation"],
+        after["transcript"]["errors_generation"]
+    );
+    assert!(!after.to_string().contains(private));
+    for query in [
+        "observe=transcript",
+        "sid=native&scope=retained_history&observe=transcript",
+        "sid=native&observe=transcript&q=body",
+    ] {
+        assert_eq!(
+            http::list(std::slice::from_ref(&configured), "workspace", query, false).status,
+            400
+        );
+    }
+}
+
+#[test]
 fn warehouse_home_previews_a_native_human_ask() {
     let mut fixture = Fixture::new("home-ask");
     let path = fixture.claude("native", "Initial prompt");

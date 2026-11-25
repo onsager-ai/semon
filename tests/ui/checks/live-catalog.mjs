@@ -101,9 +101,34 @@ export default async function liveCatalog(browser) {
           await page.goto(fixture.base + '/session/local/harbor');
           await page.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
           const root = await page.locator('[aria-label="Transcript"]').elementHandle();
-          await page.waitForTimeout(200);
           const idleReads = reads.length;
-          await page.waitForTimeout(3500);
+          const observe = () =>
+            page.waitForResponse((response) => {
+              const url = new URL(response.url());
+              return (
+                response.ok() &&
+                url.pathname === '/api/sessions' &&
+                url.searchParams.get('sid') === 'harbor' &&
+                url.searchParams.get('observe') === 'transcript'
+              );
+            });
+          const idle = await (await observe()).json();
+          assert.deepEqual(Object.keys(idle.transcript).sort(), [
+            'errors_generation',
+            'generation',
+            'total',
+          ]);
+          assert.equal(typeof idle.transcript.total, 'number');
+          assert.match(idle.transcript.generation, /^[a-f0-9]{64}$/);
+          assert.match(idle.transcript.errors_generation, /^[a-f0-9]{64}$/);
+          assert.deepEqual(Object.keys(idle).sort(), [
+            'api',
+            'catalog_key',
+            'machine',
+            'read_scope',
+            'refresh',
+            'transcript',
+          ]);
           assert.equal(
             reads.length,
             idleReads,

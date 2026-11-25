@@ -520,11 +520,53 @@ impl Component {
         if self.identity.read_scope == CatalogReadScope::RetainedHistory {
             return self.identity.generation.clone();
         }
-        let mut digest = Sha256::new();
-        digest.update(self.identity.generation.as_bytes());
-        digest.update(self.runtime_status.unwrap_or("off").as_bytes());
-        format!("{:x}", digest.finalize())
+        current_errors_generation(&self.identity.generation, self.runtime_status)
     }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct TranscriptObservation {
+    pub(super) generation: String,
+    pub(super) errors_generation: String,
+    pub(super) total: i64,
+}
+
+pub(super) fn current_errors_generation(generation: &str, status: Option<&str>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(generation.as_bytes());
+    digest.update(status.unwrap_or("off").as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+/// Count committed entry positions before display rendering. The same UUID
+/// suppression as transcript paging excludes records copied by continuation.
+pub(super) fn entry_count(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    (owner, harness, _): &super::Identity,
+) -> Result<i64, ReadError> {
+    db.query_row(
+        "WITH members AS MATERIALIZED (
+          SELECT m.source,CAST(json_extract(s.ledger,'$.offset') AS INTEGER) AS prefix_end
+          FROM lineage_member root JOIN lineage_member m ON m.component=root.component
+          JOIN warehouse_source s ON s.source=m.source AND s.origin=?2 AND s.harness=?3
+          WHERE root.source=?1
+        ), predecessors AS MATERIALIZED (
+          SELECT target.source AS target, prior.source, prior.prefix_end
+          FROM members target JOIN dim_session d ON d.source=target.source AND d.harness='claude'
+          JOIN fact_relation_observation e ON e.target=d.native_id AND e.kind='continued-in'
+          JOIN members prior ON prior.source=e.source AND e.pos<prior.prefix_end
+          JOIN dim_session original ON original.source=prior.source AND original.lineage
+        )
+        SELECT count(*) FROM members m JOIN fact_record r ON r.source=m.source
+        WHERE r.pos>=0 AND r.pos<m.prefix_end AND NOT EXISTS (
+          SELECT 1 FROM predecessors p JOIN fact_record old ON old.source=p.source
+            AND old.uuid=r.uuid AND old.pos<p.prefix_end WHERE p.target=m.source
+        )",
+        params![owner, source.namespace.binding(), harness],
+        |row| row.get(0),
+    )
+    .map_err(index)
 }
 
 #[derive(Debug)]
