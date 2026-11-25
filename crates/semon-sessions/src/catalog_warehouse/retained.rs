@@ -731,15 +731,6 @@ pub(super) fn read_frozen(
     };
     for (position, (kind, reference, prefix, revision)) in candidates {
         let offset = u64::try_from(position.offset).map_err(index)?;
-        let images = prompt_images(view, position.source, offset, kind.as_deref())?;
-        let native = read(
-            position.source,
-            &reference,
-            offset,
-            images.as_ref(),
-            BodyMode::transcript(kind.as_deref()),
-        )?;
-        let event_id = crate::tx::native_event_id(&native);
         let turn = turns.remove(&position).flatten();
         let address = Address {
             path: reference.path.clone(),
@@ -760,9 +751,23 @@ pub(super) fn read_frozen(
             };
             (
                 prompt_anchor,
-                causal::Inputs::load(&tx, &reference, position, revision)?,
+                causal::Inputs::load(
+                    &tx,
+                    &reference,
+                    position,
+                    revision,
+                    direction == Direction::Reverse && harness == "claude",
+                )?,
             )
         };
+        let images = prompt_images(view, position.source, offset, kind.as_deref())?;
+        let mode = if inputs.has_background_finish() {
+            BodyMode::Complete
+        } else {
+            BodyMode::transcript(kind.as_deref())
+        };
+        let native = read(position.source, &reference, offset, images.as_ref(), mode)?;
+        let event_id = crate::tx::native_event_id(&native);
         let operation = inputs.operation();
         let causal = inputs.render(source, key, &reference, event_id.as_deref(), turn);
         if let Some(turn) = home_event_origin(&target, &causal, &reference, offset, &native)
@@ -818,6 +823,19 @@ pub(super) fn read_frozen(
                         BodyMode::Transcript,
                     )?);
                 }
+            }
+        }
+        for offset in causal.background_bodies() {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                reply_records.entry((reference.path.clone(), offset))
+            {
+                entry.insert(read(
+                    position.source,
+                    &reference,
+                    offset,
+                    None,
+                    BodyMode::Complete,
+                )?);
             }
         }
         touched

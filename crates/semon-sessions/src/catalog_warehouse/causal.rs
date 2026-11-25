@@ -18,7 +18,7 @@ const CALLS_AT: &str = "SELECT c.block,c.tool,c.call_id,EXISTS (
     ), (SELECT count(*) FROM fact_tool_call a
         WHERE a.source=c.source AND a.pos=c.pos AND a.block=c.block)=1
        AND (SELECT count(*) FROM fact_tool_call a INDEXED BY tool_call_identity
-        WHERE a.source=c.source AND a.call_id=c.call_id AND a.pos<?3)=1
+        WHERE a.source=c.source AND a.call_id=c.call_id AND a.pos<?3)=1, c.flags
     FROM fact_tool_call c WHERE c.source=?1 AND c.pos=?2 AND NOT EXISTS (
         SELECT 1 FROM fact_tool_result r INDEXED BY tool_result_identity
         WHERE r.source=c.source AND r.call_id=c.call_id AND r.pos<?3
@@ -31,11 +31,35 @@ const POLLS_AT: &str = "SELECT pos FROM fact_tool_result INDEXED BY tool_result_
 const OPERATION_AT: &str = "SELECT call_pos,ok FROM fact_operation
     WHERE source=?1 AND pos=?2 AND block=?3 ORDER BY occurrence LIMIT 1";
 
+// These are metadata lookups inside one committed native log prefix. Read the
+// notification summary and launch label separately through the native reader.
+const BACKGROUND_END: &str = "SELECT pos,occurrence,ts,name,flags FROM fact_subagent_event
+    WHERE source=?1 AND pos>?2 AND pos<?3 AND kind='tn' AND id=?4
+      AND name NOT IN ('running','started') ORDER BY pos,block,occurrence LIMIT 1";
+const BACKGROUND_CALLS_ENDING_AT: &str = "SELECT n.id,c.pos,c.block,c.ts,n.occurrence
+    FROM fact_subagent_event n
+    JOIN fact_tool_call c INDEXED BY tool_call_identity ON c.source=n.source AND c.call_id=n.id
+    WHERE n.source=?1 AND n.pos=?2 AND n.kind='tn' AND n.name NOT IN ('running','started')
+      AND c.pos<n.pos AND c.flags & ?4<>0
+      AND (SELECT count(*) FROM fact_tool_call a INDEXED BY tool_call_identity
+           WHERE a.source=c.source AND a.call_id=c.call_id AND a.pos<?3)=1
+    ORDER BY n.occurrence LIMIT 129";
+
 #[derive(Debug, Default)]
 pub(in super::super) struct Context {
     pub(in super::super) turn: Option<TurnStart>,
     pub(in super::super) signals: Vec<SignalSlot>,
     pub(in super::super) calls: Vec<CallSlot>,
+    pub(super) background_ends: Vec<BackgroundFinish>,
+}
+
+impl Context {
+    pub(super) fn background_bodies(&self) -> impl Iterator<Item = u64> + '_ {
+        self.calls
+            .iter()
+            .filter_map(|call| call.background_end.as_ref().map(|end| end.offset))
+            .chain(self.background_ends.iter().map(|finish| finish.launch))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -317,6 +341,92 @@ pub(in super::super) struct CallSlot {
     pub(super) polls: Vec<u64>,
     pub(super) polls_cut: bool,
     pub(super) qualified: bool,
+    pub(super) background: bool,
+    pub(super) background_end: Option<BackgroundEnd>,
+}
+
+#[derive(Debug)]
+pub(super) struct BackgroundEnd {
+    pub(super) offset: u64,
+    pub(super) occurrence: u32,
+    pub(super) at: Option<i64>,
+    pub(super) status: String,
+    pub(super) failed: bool,
+}
+
+#[derive(Debug)]
+pub(super) struct BackgroundFinish {
+    pub(super) id: String,
+    pub(super) launch: u64,
+    pub(super) block: u32,
+    pub(super) start: Option<i64>,
+    pub(super) end: BackgroundEnd,
+}
+
+fn background_end(
+    db: &Connection,
+    source: i64,
+    launch: i64,
+    end: i64,
+    id: &str,
+) -> Result<Option<BackgroundEnd>, ReadError> {
+    db.prepare_cached(BACKGROUND_END)
+        .map_err(index)?
+        .query_row(params![source, launch, end, id], |row| {
+            let offset: i64 = row.get(0)?;
+            Ok(BackgroundEnd {
+                offset: u64::try_from(offset)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, offset))?,
+                occurrence: row.get(1)?,
+                at: row.get(2)?,
+                status: row.get(3)?,
+                failed: row.get::<_, u8>(4)? & crate::events::BACKGROUND_FAILED != 0,
+            })
+        })
+        .optional()
+        .map_err(index)
+}
+
+fn background_finishes(
+    db: &Connection,
+    at: Position,
+    end: i64,
+) -> Result<Vec<BackgroundFinish>, ReadError> {
+    let mut query = db
+        .prepare_cached(BACKGROUND_CALLS_ENDING_AT)
+        .map_err(index)?;
+    let mut rows = query
+        .query(params![
+            at.source,
+            at.offset,
+            end,
+            crate::events::BACKGROUND
+        ])
+        .map_err(index)?;
+    let mut finishes = Vec::new();
+    let mut examined = 0;
+    while let Some(row) = rows.next().map_err(index)? {
+        if examined == 128 {
+            return Err(index("Selected background notification budget exhausted"));
+        }
+        examined += 1;
+        let id: String = row.get(0).map_err(index)?;
+        let launch: i64 = row.get(1).map_err(index)?;
+        let occurrence: u32 = row.get(4).map_err(index)?;
+        if let Some(notification) = background_end(db, at.source, launch, end, &id)?
+            && notification.offset == u64::try_from(at.offset).map_err(index)?
+            && notification.occurrence == occurrence
+        {
+            finishes.push(BackgroundFinish {
+                id,
+                launch: u64::try_from(launch).map_err(index)?,
+                block: row.get(2).map_err(index)?,
+                start: row.get(3).map_err(index)?,
+                end: notification,
+            });
+        }
+    }
+    Ok(finishes)
 }
 
 impl CallSlot {
@@ -345,9 +455,14 @@ pub(super) struct Inputs {
     signals: Vec<crate::events::Signal>,
     calls: Vec<CallSlot>,
     operation: Option<Operation>,
+    background_ends: Vec<BackgroundFinish>,
 }
 
 impl Inputs {
+    pub(super) fn has_background_finish(&self) -> bool {
+        !self.background_ends.is_empty()
+    }
+
     pub(super) fn operation(&self) -> Option<Operation> {
         self.operation
     }
@@ -357,6 +472,7 @@ impl Inputs {
         reference: &SessionSourceRef,
         at: Position,
         revision: i64,
+        transcript: bool,
     ) -> Result<Self, ReadError> {
         let mut signal_query = db.prepare_cached(SIGNALS_AT).map_err(index)?;
         let mut signal_rows = signal_query
@@ -437,6 +553,14 @@ impl Inputs {
                     polls.push(u64::try_from(row.get::<_, i64>(0).map_err(index)?).map_err(index)?);
                 }
             }
+            let qualified = row.get(4).map_err(index)?;
+            let background =
+                transcript && row.get::<_, u8>(5).map_err(index)? & crate::events::BACKGROUND != 0;
+            let background_end = if background && qualified {
+                background_end(db, at.source, at.offset, end, &id)?
+            } else {
+                None
+            };
             let call = CallSlot {
                 id,
                 tool,
@@ -446,7 +570,9 @@ impl Inputs {
                 yield_open: yield_started.is_some() && !yield_closed,
                 polls,
                 polls_cut,
-                qualified: row.get(4).map_err(index)?,
+                qualified,
+                background,
+                background_end,
             };
             let has_operations: bool = row.get(3).map_err(index)?;
             if !has_operations
@@ -476,6 +602,11 @@ impl Inputs {
             signals,
             calls,
             operation,
+            background_ends: if transcript {
+                background_finishes(db, at, end)?
+            } else {
+                Vec::new()
+            },
         })
     }
 
@@ -507,6 +638,7 @@ impl Inputs {
             turn,
             signals,
             calls: self.calls,
+            background_ends: self.background_ends,
         }
     }
 }

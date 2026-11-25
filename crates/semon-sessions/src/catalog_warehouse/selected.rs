@@ -2533,7 +2533,13 @@ fn read_current(
         for (position, (_, member, _)) in &candidates {
             causal.insert(
                 *position,
-                causal::Inputs::load(db, &member.reference, *position, view)?,
+                causal::Inputs::load(
+                    db,
+                    &member.reference,
+                    *position,
+                    view,
+                    direction == Direction::Reverse && harness == "claude",
+                )?,
             );
         }
     }
@@ -2706,14 +2712,17 @@ fn read_current(
     let mut touched = BTreeMap::new();
     for (position, (kind, member, mut prefix)) in candidates {
         let offset = u64::try_from(position.offset).map_err(index)?;
+        let inputs = causal.remove(&position);
         let images = prompt_images(read_view, position.source, offset, kind.as_deref())?;
-        let (native, pin) = read_body(
-            position.source,
-            &member,
-            offset,
-            images.as_ref(),
-            BodyMode::transcript(kind.as_deref()),
-        )?;
+        let mode = if inputs
+            .as_ref()
+            .is_some_and(causal::Inputs::has_background_finish)
+        {
+            BodyMode::Complete
+        } else {
+            BodyMode::transcript(kind.as_deref())
+        };
+        let (native, pin) = read_body(position.source, &member, offset, images.as_ref(), mode)?;
         prefix.provider = pin;
         touched.entry(position.source).or_insert(prefix);
         let reference = &member.reference;
@@ -2729,7 +2738,6 @@ fn read_current(
         if starts_handoff && let Some(turn) = &turn {
             anchors.insert(position, turn.id.clone());
         }
-        let inputs = causal.remove(&position);
         let operation = inputs.as_ref().and_then(causal::Inputs::operation);
         let entry_kind = match kind.as_deref() {
             _ if starts_handoff && turn.as_ref().is_some_and(|turn| !turn.head) => Some("h"),
@@ -2826,6 +2834,15 @@ fn read_current(
                     )?;
                     entry.insert(body);
                 }
+            }
+        }
+        for offset in causal.background_bodies() {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                reply_records.entry((reference.path.clone(), offset))
+            {
+                let (body, _) =
+                    read_body(position.source, &member, offset, None, BodyMode::Complete)?;
+                entry.insert(body);
             }
         }
         records.push(Record {
