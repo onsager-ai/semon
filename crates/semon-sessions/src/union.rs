@@ -28,6 +28,8 @@ use crate::{
 };
 
 const INITIAL_CATALOG_WAIT: Duration = Duration::from_secs(20);
+// Leave time to deliver a retryable response before the browser's 15s abort.
+const HOME_READ_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Clone, Copy)]
 struct CatalogReadContext {
@@ -1211,6 +1213,8 @@ impl ViewerCore {
         if method != "GET" {
             return text(405, "Method not allowed");
         }
+        let home_deadline =
+            (path == "/api/viewer/home").then(|| deadline.min(Instant::now() + HOME_READ_TIMEOUT));
         let Some(_entered) = self.open.enter() else {
             return text(404, "Not found");
         };
@@ -1306,14 +1310,18 @@ impl ViewerCore {
                 },
                 query,
                 crate::model::now_ms(),
-                (path == "/api/viewer/home").then_some(deadline),
+                home_deadline,
             );
             return match overview {
                 Ok(reply) => reply,
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => retryable(text(
-                    503,
-                    "Home took too long to read. Try again or select a machine.",
-                )),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    retryable(crate::catalog::error(
+                        503,
+                        "home_read_timeout",
+                        "Home took too long to read. Try again or select a machine.",
+                        true,
+                    ))
+                }
                 Err(error) => failed(&error),
             };
         }
@@ -2030,6 +2038,9 @@ mod tests {
         );
         assert_eq!(reply.status, 503);
         assert!(reply.extra_headers.contains(&("Retry-After", "1".into())));
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["error"]["code"], "home_read_timeout");
+        assert_eq!(body["error"]["retryable"], true);
     }
 
     #[test]
