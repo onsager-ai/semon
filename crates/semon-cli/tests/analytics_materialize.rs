@@ -322,7 +322,10 @@ fn warehouse_cutover_preserves_published_rows_and_export() {
         String::from_utf8_lossy(&output.stderr)
     );
     let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
-    assert_eq!(manifest.schema_version, 5);
+    assert_eq!(
+        manifest.schema_version,
+        semon_asi::schema::ASI_SCHEMA_VERSION
+    );
     assert_eq!(manifest.durable_revision, 1);
     assert_eq!(live_rows(&store_root), expected);
     #[cfg(feature = "asi-query")]
