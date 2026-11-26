@@ -253,6 +253,122 @@ fn pair_fixture(dir: &Path) -> String {
     token
 }
 
+#[cfg(feature = "asi-query")]
+#[test]
+fn push_carries_only_typed_card_text_in_facts_and_query_merges_hosts() {
+    let mut fixture = Fixture::new();
+    let token = pair_fixture(&fixture.dir());
+    fixture.write("token", token.as_bytes());
+    private(&fixture.path("token"));
+    let url = fixture.start_receiver();
+    let private = "UNRELATED-PRIVATE-PROMPT";
+    let write_card = |home: &str, title: &str, stream: &str, now: &str| {
+        let title = line(json!({"type":"custom-title", "sessionId":"lane", "customTitle":title}));
+        let card = format!(
+            "Stream: {stream}\nLane goal: Ship the query\nNumber: 1\nNow: {now}\nNext owner decision: none"
+        );
+        fixture.write(
+            &format!("{home}/{LOG}"),
+            (claude(private) + &title + &assistant(&card)).as_bytes(),
+        );
+    };
+    write_card("home", "Remote Manager", "Remote", SECRET);
+    write_card("viewer", "Local Manager", "Local", "review");
+    fixture.write("viewer/proc/sys/kernel/hostname", b"desktop\n");
+
+    let command = |home: &str, cache: &str| {
+        let mut command = semon();
+        command
+            .env("HOME", fixture.path(home))
+            .env("XDG_STATE_HOME", fixture.path(cache))
+            .stdin(Stdio::null());
+        command
+    };
+    let home_flags = |home: &str, cache: &str| {
+        [
+            ("--claude-home", format!("{home}/claude")),
+            ("--codex-home", format!("{home}/codex")),
+            ("--proc-root", format!("{home}/proc")),
+            ("--cache", format!("{cache}/index.json")),
+        ]
+        .into_iter()
+        .flat_map(|(flag, path)| [PathBuf::from(flag), fixture.path(&path)])
+        .collect::<Vec<_>>()
+    };
+    for (home, cache) in [("home", "state"), ("viewer", "viewer/state")] {
+        let output = command(home, cache)
+            .args(["analytics", "materialize", "--all"])
+            .args(home_flags(home, cache))
+            .output()
+            .unwrap();
+        assert_ok(&output, "materialize cards");
+    }
+
+    assert_ok(&fixture.push(&url), "push without card opt-in");
+    let facts: serde_json::Value = serde_json::from_slice(&fixture.copy("facts.json")).unwrap();
+    assert!(facts.get("stream_cards").is_none());
+    let output = fixture
+        .push_command(&url)
+        .arg("--stream-cards")
+        .output()
+        .unwrap();
+    assert_ok(&output, "push with cards");
+    let facts = String::from_utf8(fixture.copy("facts.json")).unwrap();
+    assert!(!facts.contains(private));
+    assert!(!facts.contains(SECRET));
+    let facts: serde_json::Value = serde_json::from_str(&facts).unwrap();
+    let remote = &facts["stream_cards"][0];
+    assert_eq!(facts["stream_cards"].as_array().unwrap().len(), 1);
+    let namespace = semon_sessions::read_analytics_namespace(&fixture.path("state"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *remote,
+        json!({
+            "session_uid": format!("{namespace}/claude/lane"),
+            "title": "Remote Manager", "state": "ended",
+            "last_message_at": 1790676001000_i64, "card_posted_at": 1790676001000_i64,
+            "stream": "Remote", "lane_goal": "Ship the query", "number": "1",
+            "now": "*".repeat(SECRET.len()), "next_owner_decision": "none"
+        })
+    );
+    assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
+
+    let query = || {
+        let output = command("viewer", "viewer/state")
+            .args(["query", "stream_cards", "--all", "--received-cards"])
+            .arg(fixture.dir())
+            .args(home_flags("viewer", "viewer/state"))
+            .output()
+            .unwrap();
+        assert_ok(&output, "query merged cards");
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let merged = query();
+    let cards = merged["cards"].as_array().unwrap();
+    assert_eq!(cards.len(), 2);
+    let local = cards.iter().find(|card| card["host"] == "desktop").unwrap();
+    assert_eq!(local["stream"], "Local");
+    let mut received = remote.clone();
+    received["host"] = json!("laptop");
+    assert!(cards.contains(&received));
+
+    let file = fs::File::options()
+        .write(true)
+        .open(
+            fixture
+                .dir()
+                .join("machines/machine-6754a9c1e83f27b4/facts.json"),
+        )
+        .unwrap();
+    file.set_times(
+        fs::FileTimes::new().set_modified(std::time::SystemTime::now() - Duration::from_secs(180)),
+    )
+    .unwrap();
+    received["state"] = json!("offline");
+    assert!(query()["cards"].as_array().unwrap().contains(&received));
+}
+
 #[test]
 fn push_copies_a_home_into_semon_receive() {
     let mut fixture = Fixture::new();

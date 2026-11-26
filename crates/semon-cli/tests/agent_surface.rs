@@ -1004,10 +1004,10 @@ fn stream_cards_return_only_latest_well_formed_root_cards() {
         .unwrap()
         .unwrap();
     let expected = json!({"cards":[
-        {"session_uid":format!("{namespace}/claude/stream-claude"),"title":"Claude Manager","state":"idle",
+        {"session_uid":format!("{namespace}/claude/stream-claude"),"title":"Claude Manager","state":"idle","host":"testbox",
          "last_message_at":at(9,5),"card_posted_at":at(9,2),"stream":"Index","lane_goal":"Ship the query",
          "number":"2 sources","now":"parked until review","next_owner_decision":"none"},
-        {"session_uid":format!("{namespace}/codex/stream-codex"),"title":"Codex Manager","state":"ended",
+        {"session_uid":format!("{namespace}/codex/stream-codex"),"title":"Codex Manager","state":"ended","host":"testbox",
          "last_message_at":at(10,4),"card_posted_at":at(10,3),"stream":"Warehouse","lane_goal":"Ship the query",
          "number":"数".repeat(300),"now":"parked until review","next_owner_decision":"none"}
     ], "data_notice":semon_sessions::body_query::DATA_NOTICE});

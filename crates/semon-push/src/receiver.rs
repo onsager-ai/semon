@@ -646,6 +646,7 @@ impl Receiver {
             || !status.runtime.repos.is_empty()
             || !status.runtime.repo_ids.is_empty()
             || !status.runtime.reported_runs.is_empty()
+            || !status.runtime.stream_cards.is_empty()
         {
             return Err(Refusal::Invalid("invalid partial observation".into()));
         }
@@ -754,6 +755,11 @@ impl Receiver {
     fn try_facts(&self, machine: &str, facts: &Facts) -> Result<Reply, Refusal> {
         let _write = self.custody.admit_write().ok_or(Refusal::Rebuilding)?;
         check_machine(machine)?;
+        if !facts.stream_cards.is_empty() && facts.version != semon_sessions::FACTS_VERSION {
+            return Err(Refusal::Invalid(
+                "unsupported stream card facts version".into(),
+            ));
+        }
         if facts.codex_provisional_rollouts.is_some() {
             return Err(Refusal::Invalid(
                 "authoritative facts cannot carry a provisional overlay".into(),
@@ -1671,6 +1677,40 @@ mod tests {
             leftovers, expected,
             "only the original and derived projection remain"
         );
+    }
+
+    #[test]
+    fn facts_refuse_oversized_and_unknown_card_fields() {
+        let (_dir, receiver) = receiver();
+        let mut body = serde_json::to_value(Facts {
+            version: semon_sessions::FACTS_VERSION,
+            hostname: "laptop".into(),
+            ..Facts::default()
+        })
+        .unwrap();
+        let card = json!({
+            "session_uid": "origin-test/claude/lane", "title": "Manager", "state": "idle",
+            "card_posted_at": 123, "last_message_at": 456, "stream": "Warehouse",
+            "lane_goal": "Ship the query", "number": "数".repeat(300), "now": "review",
+            "next_owner_decision": "none"
+        });
+        body["stream_cards"] = json!([card]);
+        let post = |body: &Value| {
+            receiver.handle(
+                "laptop",
+                Endpoint::Facts,
+                &serde_json::to_vec(body).unwrap(),
+            )
+        };
+        assert_eq!(post(&body).status, 200);
+        let path = receiver.machine_dir("laptop").join(FACTS_FILE);
+        let stored = fs::read(&path).unwrap();
+        body["stream_cards"][0]["number"] = json!("数".repeat(301));
+        assert_eq!(post(&body).status, 400);
+        body["stream_cards"] = json!([card]);
+        body["stream_cards"][0]["body"] = json!("extra text");
+        assert_eq!(post(&body).status, 400);
+        assert_eq!(fs::read(&path).unwrap(), stored);
     }
 
     #[test]

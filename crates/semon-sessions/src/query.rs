@@ -1433,8 +1433,12 @@ impl Query {
     }
 
     /// Attach native metadata to the card candidates returned by the local body worker.
-    pub fn qualify_stream_cards(&self, indexed: Value) -> Result<Value, Value> {
-        use crate::body_query::DATA_NOTICE;
+    pub fn qualify_stream_cards(
+        &self,
+        indexed: Value,
+        received: Option<&std::path::Path>,
+    ) -> Result<Value, Value> {
+        use crate::body_query::{DATA_NOTICE, stream_cards};
 
         let local_only = || json!({"error":{"code":"capability_unavailable","message":"Stream cards require a local SQLite source"}});
         let [(_, source)] = self.sources.machines.as_slice() else {
@@ -1444,14 +1448,24 @@ impl Query {
             return Err(local_only());
         }
         let unavailable = || json!({"error":{"code":"store_unavailable","message":"Stream card evidence unavailable"}});
-        let cards: Vec<crate::body_query::stream_cards::Candidate> =
-            serde_json::from_value(indexed).map_err(|_| unavailable())?;
-        let rows = if cards.is_empty() {
-            Vec::new()
-        } else {
-            crate::catalog::warehouse::qualify_stream_cards(&source.options, cards)
-                .map_err(|_| unavailable())?
-        };
+        let cards = serde_json::from_value(indexed).map_err(|_| unavailable())?;
+        let host = crate::model::local_hostname(&source.options);
+        let mut rows: Vec<_> = stream_cards::qualify(&source.options, cards)?
+            .into_iter()
+            .map(|card| card.with_host(&host, false))
+            .collect();
+        if let Some(dir) = received {
+            rows.extend(
+                crate::ReceivedMachines::new(dir, &source.options)
+                    .stream_cards()
+                    .map_err(|_| unavailable())?,
+            );
+        }
+        rows.sort_by(|left, right| {
+            left["session_uid"]
+                .as_str()
+                .cmp(&right["session_uid"].as_str())
+        });
         Ok(json!({"cards": rows, "data_notice": DATA_NOTICE}))
     }
 

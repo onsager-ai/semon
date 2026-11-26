@@ -5618,6 +5618,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         runs: BTreeMap::new(),
         reported_runs: Vec::new(),
         native_names: Vec::new(),
+        stream_cards: Vec::new(),
         process_ancestors: BTreeMap::new(),
     };
     crate::write_facts(&path, &facts).unwrap();

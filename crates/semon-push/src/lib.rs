@@ -88,6 +88,8 @@ pub struct PushOptions {
     pub url: String,
     pub credential: Credential,
     pub sessions: Options,
+    /// Publish typed stream cards to this configured receiver.
+    pub stream_cards: bool,
     /// Where to keep the cursor state (0600). A push holds the lock beside
     /// it ([`StateLock`]) while it runs.
     pub state: PathBuf,
@@ -1674,9 +1676,14 @@ fn push_running(
     if !watch {
         let sessions = options.sessions.clone();
         let lock = hold.share();
+        let stream_cards = options.stream_cards;
         let Some(facts) = stop.run("facts", move || {
             let _lock = lock;
-            semon_sessions::local_facts(&sessions, "").map_err(|error| error.to_string())
+            collect_push_facts(
+                &mut FactsSource::new(&sessions, ""),
+                &sessions,
+                stream_cards,
+            )
         })?
         else {
             return Ok(());
@@ -1693,7 +1700,7 @@ fn push_running(
         };
     }
 
-    let mut facts = FactsWorker::start(&options.sessions, hold.share())?;
+    let mut facts = FactsWorker::start(options, hold.share())?;
     let mut backoff = WatchBackoff::default();
     let mut pass = initial_pass;
     let mut last_facts = Instant::now() - FACTS_EVERY;
@@ -1881,6 +1888,22 @@ fn after_pass(result: Result<Report>, stop: &Stop) -> Option<Result<()>> {
     }
 }
 
+fn collect_push_facts(
+    source: &mut FactsSource,
+    options: &Options,
+    stream_cards: bool,
+) -> Result<Facts> {
+    let mut facts = source.facts().map_err(|error| error.to_string())?;
+    if stream_cards {
+        facts.stream_cards = semon_sessions::body_query::collect_stream_cards(options)
+            .map_err(|error| format!("stream cards: {error}"))?;
+        for card in &mut facts.stream_cards {
+            card.redact(redact::redact);
+        }
+    }
+    Ok(facts)
+}
+
 /// Collects `--watch`'s facts on a thread of its own, where its
 /// [`FactsSource`] lives, so a stop doesn't wait for a collection (the
 /// first can read every log's metadata). A collection a stop leaves behind
@@ -1893,11 +1916,12 @@ struct FactsWorker {
 }
 
 impl FactsWorker {
-    fn start(sessions: &Options, lock: Arc<StateLock>) -> Result<Self> {
-        let sessions = sessions.clone();
+    fn start(options: &PushOptions, lock: Arc<StateLock>) -> Result<Self> {
+        let sessions = options.sessions.clone();
+        let stream_cards = options.stream_cards;
         Self::start_with(lock, move || {
             let mut source = FactsSource::new(&sessions, "");
-            move || source.facts().map_err(|error| error.to_string())
+            move || collect_push_facts(&mut source, &sessions, stream_cards)
         })
     }
 
@@ -2027,6 +2051,7 @@ mod tests {
                 url: url.to_owned(),
                 credential: Credential::File(self.root.join("token")),
                 sessions: self.options.clone(),
+                stream_cards: false,
                 state: self.root.join("state/push.json"),
             }
         }
@@ -3146,6 +3171,7 @@ mod sync_status_tests {
                 cache: root.join("cache"),
                 ..Options::default()
             },
+            stream_cards: false,
             state: root.join("push.json"),
         };
         let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
@@ -3233,6 +3259,7 @@ mod sync_status_tests {
                 cache: root.join("cache"),
                 ..Options::default()
             },
+            stream_cards: false,
             state: root.join("push.json"),
         };
         let stop = Stop::new();
@@ -3299,6 +3326,7 @@ mod sync_status_tests {
                 cache: root.join("cache"),
                 ..Options::default()
             },
+            stream_cards: false,
             state: root.join("push.json"),
         };
         let stop = Stop::new();
@@ -3329,6 +3357,7 @@ mod sync_status_tests {
             url: "http://127.0.0.1:1".into(),
             credential: Credential::Memory(Token::new("test-status-token").unwrap()),
             sessions: Options::default(),
+            stream_cards: false,
             state: std::env::temp_dir().join("semon-phase-unwritten.json"),
         };
         let mut client = Client::new(&options).unwrap();

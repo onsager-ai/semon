@@ -1,20 +1,119 @@
 use super::{Index, sql_error};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, btree_map::Entry},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct Candidate {
     pub(crate) owner: i64,
     pub(crate) catalog_key: String,
-    pub(crate) session_uid: String,
+    session_uid: String,
     card_posted_at: Option<i64>,
     last_message_at: Option<i64>,
     #[serde(flatten)]
     fields: Fields,
+}
+
+const FIELD_CHARS: usize = 300;
+
+/// The allowlisted card projection carried in full pushed facts.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamCard {
+    session_uid: String,
+    #[serde(deserialize_with = "bounded_text")]
+    title: String,
+    state: Option<State>,
+    last_message_at: Option<i64>,
+    card_posted_at: Option<i64>,
+    #[serde(deserialize_with = "bounded_text")]
+    stream: String,
+    #[serde(deserialize_with = "bounded_text")]
+    lane_goal: String,
+    #[serde(deserialize_with = "bounded_text")]
+    number: String,
+    #[serde(deserialize_with = "bounded_text")]
+    now: String,
+    #[serde(deserialize_with = "bounded_text")]
+    next_owner_decision: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum State {
+    Active,
+    Idle,
+    Ended,
+}
+
+fn bounded_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.chars().nth(FIELD_CHARS).is_some() {
+        return Err(de::Error::custom("stream card text exceeds 300 characters"));
+    }
+    Ok(value)
+}
+
+impl StreamCard {
+    /// Apply the sender's text redaction to the allowlisted text values.
+    pub fn redact(&mut self, mut redact: impl FnMut(&mut [u8])) {
+        for text in [
+            &mut self.title,
+            &mut self.stream,
+            &mut self.lane_goal,
+            &mut self.number,
+            &mut self.now,
+            &mut self.next_owner_decision,
+        ] {
+            let mut bytes = std::mem::take(text).into_bytes();
+            redact(&mut bytes);
+            *text = String::from_utf8(bytes).expect("push redaction preserves UTF-8");
+        }
+    }
+
+    pub(crate) fn with_host(self, host: &str, offline: bool) -> Value {
+        let mut row = json!(self);
+        row["host"] = json!(host);
+        if offline {
+            row["state"] = json!("offline");
+        }
+        row
+    }
+}
+
+/// Read the same qualified cards as the local query for an opted-in push.
+/// An origin that has not published analytics has no cards to send yet.
+pub fn collect(options: &crate::Options) -> Result<Vec<StreamCard>, Value> {
+    super::admit(if options.facts.is_some() {
+        super::Access::Receiver
+    } else {
+        super::Access::Origin
+    })?;
+    let deadline = Instant::now() + Duration::from_millis(super::TIMEOUT_MS);
+    let path = crate::analytics_index_path(&options.cache);
+    let index = match super::open(&path, deadline) {
+        Ok(index) => index,
+        Err(error) if error["error"]["code"] == "not_materialized" => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let cards = read(&index, deadline)?;
+    drop(index);
+    qualify(options, cards)
+}
+
+pub(crate) fn qualify(
+    options: &crate::Options,
+    cards: Vec<Candidate>,
+) -> Result<Vec<StreamCard>, Value> {
+    if cards.is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::catalog::warehouse::qualify_stream_cards(options, cards).map_err(|_| {
+        json!({"error":{"code":"store_unavailable","message":"Stream card evidence unavailable"}})
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -46,30 +145,30 @@ fn capped_text(value: &str) -> String {
     value
         .trim()
         .chars()
-        .take(300)
+        .take(FIELD_CHARS)
         .collect::<String>()
         .trim_end()
         .to_owned()
 }
 
 impl Candidate {
-    pub(crate) fn finish(self, title: &str, state: Option<&str>) -> Value {
-        json!({
-            "session_uid": self.session_uid,
-            "title": capped_text(title),
-            "state": state,
-            "last_message_at": self.last_message_at,
-            "card_posted_at": self.card_posted_at,
-            "stream": self.fields.stream,
-            "lane_goal": self.fields.lane_goal,
-            "number": self.fields.number,
-            "now": self.fields.now,
-            "next_owner_decision": self.fields.next_owner_decision,
-        })
+    pub(crate) fn finish(self, title: &str, state: Option<State>) -> StreamCard {
+        StreamCard {
+            session_uid: self.session_uid,
+            title: capped_text(title),
+            state,
+            last_message_at: self.last_message_at,
+            card_posted_at: self.card_posted_at,
+            stream: self.fields.stream,
+            lane_goal: self.fields.lane_goal,
+            number: self.fields.number,
+            now: self.fields.now,
+            next_owner_decision: self.fields.next_owner_decision,
+        }
     }
 }
 
-pub(super) fn read(index: &Index, deadline: Instant) -> Result<Value, Value> {
+pub(super) fn read(index: &Index, deadline: Instant) -> Result<Vec<Candidate>, Value> {
     let db = &index.connection;
     let fail = |error| sql_error(error, deadline, false);
     // Match each body to a committed local source and the source's current
@@ -120,5 +219,5 @@ pub(super) fn read(index: &Index, deadline: Instant) -> Result<Value, Value> {
     }
     let mut cards = latest.into_values().collect::<Vec<_>>();
     cards.sort_unstable_by(|a, b| a.session_uid.cmp(&b.session_uid));
-    Ok(json!(cards))
+    Ok(cards)
 }

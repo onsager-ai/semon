@@ -1446,7 +1446,9 @@ fn focused_metadata(source: &Source<'_>, key: &str) -> Result<Option<(Row, Strin
 pub(crate) fn qualify_stream_cards(
     options: &crate::Options,
     cards: Vec<crate::body_query::stream_cards::Candidate>,
-) -> std::io::Result<Vec<serde_json::Value>> {
+) -> std::io::Result<Vec<crate::body_query::StreamCard>> {
+    use crate::body_query::stream_cards::State;
+
     let path = crate::events::EventCache::path(&options.cache);
     let namespace = Namespace::new("local").map_err(std::io::Error::other)?;
     let source = Source::focused(namespace, &path, options, None).map_err(std::io::Error::other)?;
@@ -1465,9 +1467,9 @@ pub(crate) fn qualify_stream_cards(
             continue;
         }
         let state = match row.status {
-            Some("work" | "wait") => Some("active"),
-            Some("idle") => Some("idle"),
-            Some("done") => Some("ended"),
+            Some("work" | "wait") => Some(State::Active),
+            Some("idle") => Some(State::Idle),
+            Some("done") => Some(State::Ended),
             _ => None,
         };
         rows.push(card.finish(&row.title, state));
