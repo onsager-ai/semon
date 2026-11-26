@@ -406,7 +406,8 @@ fn warehouse_actual_reader_plans_use_indexed_exact_probes_and_local_usage() {
         ],
     );
     let exact = plan(&db, EXACT, params![":claude:same", "[]", "reader-plan"]);
-    let usage = plan(&db, USAGE, ["[1]", "[]"]);
+    let usage_sql = crate::events::store::warehouse::usage_query(USAGE);
+    let usage = plan(&db, &usage_sql, params!["[1]", "[]", "reader-plan"]);
     for plan in [&list, &exact, &usage] {
         assert!(
             !plan.contains("CORRELATED SCALAR SUBQUERY")

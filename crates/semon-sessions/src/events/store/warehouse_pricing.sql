@@ -4,12 +4,9 @@ WITH members AS MATERIALIZED (
  SELECT member FROM family_members WHERE root=?1
 ), steps AS (
  SELECT u.owner,u.message_id,s.owner AS shared,
-   semon_step_usd(u.model,b.billing) AS usd
+   semon_step_usd(u.model,u.billing) AS usd
  FROM members m JOIN current_usage u ON u.owner=m.member
  LEFT JOIN shared_messages s ON s.owner=u.owner AND s.message_id=u.message_id
- LEFT JOIN fact_step_billing b
-   ON b.source=u.source AND b.pos=u.pos AND b.block=u.block
-   AND b.kind=u.kind AND b.occurrence=u.occurrence
 ), session_cost AS (
  SELECT k.owner,CASE WHEN k.harness='claude'
    AND count(s.message_id)=count(s.usd) AND count(s.shared)=0
@@ -21,9 +18,8 @@ WITH members AS MATERIALIZED (
    AND count(*)=count(c.usd) THEN sum(c.usd) END AS usd
  FROM members m LEFT JOIN session_cost c ON c.owner=m.member
 ), priced_shared AS (
- SELECT semon_step_usd(u.model,b.billing) AS usd
- FROM family_shared_usage f JOIN fact_step_observation u USING(source,pos,block,kind,occurrence)
- LEFT JOIN fact_step_billing b USING(source,pos,block,kind,occurrence)
+ SELECT semon_step_usd(u.model,u.billing) AS usd
+ FROM family_shared_usage f JOIN fact_usage_observation u USING(source,pos,block,kind,occurrence)
  WHERE f.root=?1
 ), shared_cost AS (
  SELECT coalesce(sum(usd),0.0) AS known,count(*)-count(usd) AS unknown_steps FROM priced_shared

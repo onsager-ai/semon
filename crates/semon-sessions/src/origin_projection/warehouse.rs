@@ -1,11 +1,6 @@
 //! Runtime-free Index admission and a full scan of committed warehouse input.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, io, path::PathBuf, sync::Arc};
 
 use sha2::{Digest, Sha256};
 
@@ -508,26 +503,23 @@ impl WarehouseAnalyticsInput {
         let mut inputs = ActivityInputs::default();
         for (index, (member, file)) in members.iter().zip(&files).enumerate() {
             let copied = copied_events(index, &members, &files);
-            inputs.add(&member.path, &owner.harness, file, |i| copied.contains(&i));
-            if owner.harness == "codex" {
-                let usage = self.codex_usage(member)?;
-                if usage.is_empty()
-                    && !store::warehouse_has_codex_usage(
-                        &self.connection,
-                        &member.path,
-                        &member.ledger,
-                    )?
-                {
-                    return Ok(None);
-                }
-                inputs.usage.extend(usage);
+            inputs.add(&member.path, file, |i| copied.contains(&i));
+            let usage = self.accepted_responses(member)?;
+            // Native Codex can have a qualified response cohort without any
+            // accepted response. Retain the existing source admission fence.
+            if usage.is_empty()
+                && owner.harness == "codex"
+                && !store::warehouse_has_codex_usage(
+                    &self.connection,
+                    &member.path,
+                    &member.ledger,
+                )?
+            {
+                return Ok(None);
             }
+            inputs.usage.extend(usage);
         }
-        let shared = if owner.harness == "claude" {
-            self.shared(owner.source)?
-        } else {
-            BTreeMap::new()
-        };
+        let shared = self.shared(owner.source)?;
         let projection = inputs.derive(owner.native_id.clone(), &shared, self.table.clone());
         let price_version = projection.activity.pricing_fingerprint.clone();
         let prices = decode_prices(&projection.pricing_snapshot, &price_version)?;
@@ -603,15 +595,14 @@ impl WarehouseAnalyticsInput {
         Ok(result)
     }
 
-    fn codex_usage(
+    fn accepted_responses(
         &self,
         member: &Member,
     ) -> rusqlite::Result<Vec<events::session_activity::UsageStep>> {
         use events::session_activity::{SourcePosition, UsageStep};
         let mut query = self.connection.prepare_cached(
-            "SELECT u.pos,u.message_id,u.model,b.billing,u.ts FROM fact_step_observation u
-             JOIN fact_step_billing b USING(source,pos,block,kind,occurrence)
-             WHERE u.source=?1 AND u.kind='codex-response' AND u.accepted AND u.pos<?2
+            "SELECT u.pos,u.message_id,u.model,u.billing,u.ts FROM fact_usage_observation u
+             WHERE u.source=?1 AND u.kind='accepted_response' AND u.accepted AND u.pos<?2
              ORDER BY u.pos,u.block,u.occurrence",
         )?;
         query
@@ -634,8 +625,16 @@ impl WarehouseAnalyticsInput {
                         },
                         events::CodexUsageEvent {
                             model: row.get(2)?,
-                            tokens: serde_json::from_str(&billing)
-                                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                            tokens: {
+                                let billing: events::BillingUsage = serde_json::from_str(&billing)
+                                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                                events::ModelTokens {
+                                    input: billing.input,
+                                    output: billing.output,
+                                    cache_read: billing.cache_read,
+                                    cache_write: 0,
+                                }
+                            },
                             timestamp: row.get(4)?,
                         },
                     ))
@@ -645,23 +644,19 @@ impl WarehouseAnalyticsInput {
     }
 
     fn shared(&self, owner: i64) -> rusqlite::Result<crate::claude_usage::Shared> {
-        let mut statement = self.connection.prepare_cached(
-            "SELECT u.message_id,min(u.uuid) FROM lineage_member root
-             CROSS JOIN lineage_member member ON member.component=root.component
-             CROSS JOIN fact_step_observation u ON u.source=member.source AND u.kind='claude'
-             WHERE root.source=?1 AND u.uuid IS NOT NULL AND EXISTS (
-               SELECT 1 FROM fact_step_observation other INDEXED BY usage_message
-               CROSS JOIN lineage_member om ON om.source=other.source
-               CROSS JOIN warehouse_current oc ON oc.source=other.source
-               CROSS JOIN warehouse_source os ON os.source=other.source AND os.origin=?2
-               WHERE other.message_id=u.message_id AND other.uuid=u.uuid AND other.kind='claude'
-                 AND om.component<>root.component
-             ) GROUP BY u.message_id",
-        )?;
+        let owners = serde_json::to_string(&[owner]).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut statement = self.connection.prepare_cached(&store::warehouse::usage_query(
+            "SELECT message_id,evidence_uuid FROM shared WHERE owner IN (SELECT owner FROM page)",
+        ))?;
         statement
-            .query_map(params![owner, self.storage_namespace.binding()], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?
+            .query_map(
+                params![
+                    owners,
+                    Option::<&str>::None,
+                    self.storage_namespace.binding()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
             .collect()
     }
 

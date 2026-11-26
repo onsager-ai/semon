@@ -937,6 +937,7 @@ mod sqlite_tests {
             cost: crate::pricing::Cost {
                 pricing_fingerprint: String::new(),
                 usd: None,
+                provenance: crate::CostProvenance::Unknown,
                 unpriced_models: Vec::new(),
                 priced_tokens: 0,
                 unpriced_tokens: 0,

@@ -1,7 +1,7 @@
 use super::*;
 use crate::events::{
     EventCache, scan_file,
-    warehouse::{Fact, Observation},
+    warehouse::{Fact, Observation, UsageMeasurement},
 };
 use rusqlite::types::Value as Sql;
 use std::io::Write;
@@ -65,7 +65,11 @@ fn assert_committed_facts(home: &Home, expected: &Connection, harness: &str) {
         let production = if harness == "codex" && table == "record" {
             "SELECT r.pos,CASE WHEN EXISTS(SELECT 1 FROM fact_prompt p WHERE p.source=r.source AND p.pos=r.pos) THEN 'prompt' ELSE r.kind END,r.uuid,r.message_id,r.ts FROM fact_record r WHERE gap=0".to_owned()
         } else {
-            format!("SELECT {projection} FROM fact_{table} {filter}")
+            let production_table = match table {
+                "step_observation" | "step_billing" => "usage_observation",
+                _ => table,
+            };
+            format!("SELECT {projection} FROM fact_{production_table} {filter}")
         };
         let prototype_projection = projection.strip_prefix("DISTINCT ").unwrap_or(projection);
         assert_eq!(
@@ -183,27 +187,32 @@ fn assert_claude_facts(database: &Connection, observations: &[Observation]) {
                 text(id),
                 string(call_id),
             ]),
-            Fact::ClaudeUsage {
-                message_id,
-                model,
-                tokens,
-                billing,
-            } => {
+            Fact::Usage(usage) => {
+                let UsageMeasurement::PerResponse {
+                    model,
+                    tokens,
+                    billing,
+                } = &usage.measurement
+                else {
+                    continue;
+                };
+                let message_id = usage.identity.as_deref().unwrap();
                 let uuid = observations
                     .iter()
                     .find_map(|item| match &item.fact {
                         Fact::Record { uuid, .. }
                             if item.position.offset == observation.position.offset =>
                         {
-                            Some(string(uuid))
+                            Some(uuid)
                         }
                         _ => None,
                     })
                     .unwrap();
+                assert_eq!(&usage.record_id, uuid);
                 facts.entry("step_observation").or_default().push(vec![
                     pos.clone(),
                     text(message_id),
-                    uuid,
+                    string(uuid),
                     string(model),
                     integer(tokens.input),
                     integer(tokens.cached_input),
@@ -669,19 +678,23 @@ fn codex_observations_match_prototype_at_admission() {
         .observations
         .iter()
         .filter_map(|o| match &o.fact {
-            Fact::CodexUsage {
-                tokens,
-                model_tokens,
-                accepted,
-                ..
-            } => Some((tokens.input, model_tokens.input, *accepted)),
+            Fact::Usage(usage) => match &usage.measurement {
+                UsageMeasurement::ResponseWithAcceptance {
+                    tokens,
+                    billing,
+                    accepted,
+                    ..
+                } => Some((tokens.input, billing.input, *accepted)),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(accepted, [(7, 4, true), (7, 4, false)]);
     assert!(
         batch.observations.iter().any(
-            |o| matches!(&o.fact, Fact::CodexTokenSnapshot { tokens, .. } if tokens.input == 7)
+            |o| matches!(&o.fact, Fact::Usage(usage) if matches!(
+                &usage.measurement, UsageMeasurement::ThreadSnapshot { tokens, .. } if tokens.input == 7))
         )
     );
     assert!(
@@ -725,7 +738,7 @@ fn codex_observations_match_prototype_at_admission() {
 const COPILOT_FIXTURE: &str = include_str!("../../../../tests/fixtures/star-catalog/copilot.jsonl");
 const COPILOT_PATH: &str = "copilot/session-state/copilot-fixture/events.jsonl";
 
-fn copilot_facts(db: &Connection) -> [Vec<Vec<Sql>>; 11] {
+fn copilot_facts(db: &Connection) -> [Vec<Vec<Sql>>; 10] {
     [
         "fact_session_observation",
         "fact_record",
@@ -733,8 +746,7 @@ fn copilot_facts(db: &Connection) -> [Vec<Vec<Sql>>; 11] {
         "fact_tool_call",
         "fact_tool_result",
         "fact_compaction",
-        "fact_copilot_shutdown",
-        "fact_copilot_usage",
+        "fact_usage_observation",
         "fact_prompt",
         "dim_session",
         "maintenance_cursor",
@@ -760,6 +772,22 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
     let exact = built.facts[&session.key].tokens.as_ref();
     let query = &built.sessions[&session.key];
     let usage = query.copilot.as_ref().unwrap().usage.as_ref();
+    let common = query.usage.as_ref().unwrap();
+    assert_eq!(common.ownership, crate::UsageOwnership::Unknown);
+    assert_eq!(
+        common.coverage,
+        if usage.is_some() {
+            crate::UsageCoverage::Snapshot
+        } else if query.copilot.as_ref().unwrap().usage_source.is_some() {
+            crate::UsageCoverage::Partial
+        } else {
+            crate::UsageCoverage::None
+        }
+    );
+    assert_eq!(common.cost_provenance, crate::CostProvenance::Snapshot);
+    assert!(common.fresh.is_none());
+    assert_eq!(query.cost.provenance, crate::CostProvenance::Snapshot);
+    assert!(query.cost.usd.is_none());
     let counts = |tokens: &crate::Tokens| [tokens.input, tokens.cached_input, tokens.output];
     assert_eq!(exact.map(counts), usage.map(|usage| counts(&usage.tokens)));
     let totals = exact.map(counts).unwrap_or_default();
@@ -809,7 +837,7 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
     assert_eq!(
         rows(
             db,
-            "SELECT model,input,output,cached,cache_write,reasoning FROM current_copilot_usage ORDER BY model"
+            "SELECT model,input,output,cached,cache_write,reasoning FROM current_session_usage_snapshot WHERE item>0 ORDER BY model"
         ),
         models
     );
@@ -828,7 +856,7 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
     assert_eq!(
         rows(
             db,
-            "SELECT pos,event_id,ts,complete FROM fact_copilot_shutdown ORDER BY pos DESC LIMIT 1"
+            "SELECT pos,message_id,ts,coverage='snapshot' FROM fact_usage_observation WHERE scope='session' AND item=0 AND coverage<>'none' ORDER BY pos DESC LIMIT 1"
         ),
         expected
     );

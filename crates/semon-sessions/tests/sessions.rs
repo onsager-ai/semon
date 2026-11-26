@@ -1579,9 +1579,12 @@ fn native_claude_copied_usage_tree_preserves_observed_and_unknown_owner() {
             .unwrap();
         assert_eq!(parent.tokens.input, 0);
         assert_eq!(child.tokens.input, 5);
-        let p = parent.claude_usage.as_ref().unwrap();
-        let c = child.claude_usage.as_ref().unwrap();
-        assert_eq!(p.observed.input + c.observed.input, 25);
+        let p = parent.usage.as_ref().unwrap();
+        let c = child.usage.as_ref().unwrap();
+        assert_eq!(
+            p.observed.as_ref().unwrap().input + c.observed.as_ref().unwrap().input,
+            25
+        );
         assert_eq!(p.shared, c.shared);
         assert!(p.fresh.is_none() && c.fresh.is_none());
         assert!(p.shared_owner.is_none() && c.shared_owner.is_none());

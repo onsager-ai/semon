@@ -396,6 +396,7 @@ pub(super) struct Row {
     kind: &'static str,
     presentation_kind: Option<&'static str>,
     pub(super) usage: [i64; 6],
+    usage_evidence: Option<crate::UsageEvidence>,
     pub(super) cost: Option<crate::pricing::Cost>,
     pub(super) status: Option<&'static str>,
     details: Option<serde_json::Value>,
@@ -559,13 +560,48 @@ impl ChildRun {
 
 struct Usage {
     shared: bool,
+    cumulative_session: bool,
+    coverage: Option<crate::UsageCoverage>,
+    ownership: Option<crate::UsageOwnership>,
+    reasoning: u64,
+    copies: BTreeMap<String, crate::Tokens>,
+    copy_models: BTreeMap<String, Option<String>>,
     tokens: [i64; 6],
     pricing: crate::pricing::CostBuild,
 }
 
 impl Usage {
-    fn account(&mut self, row: &rusqlite::Row<'_>) -> Result<(), ReadError> {
-        let shared: bool = row.get(6).map_err(index)?;
+    fn account(
+        &mut self,
+        row: &rusqlite::Row<'_>,
+        include_evidence: bool,
+    ) -> Result<(), ReadError> {
+        use crate::{UsageCoverage, UsageOwnership};
+        let ownership = match row.get::<_, String>(6).map_err(index)?.as_str() {
+            "exclusive" => UsageOwnership::Exclusive,
+            "copied" => UsageOwnership::Copied,
+            "unknown" => UsageOwnership::Unknown,
+            _ => return Err(index("Unknown warehouse usage ownership")),
+        };
+        let coverage = match row.get::<_, String>(12).map_err(index)?.as_str() {
+            "response" => UsageCoverage::Response,
+            "snapshot" => UsageCoverage::Snapshot,
+            "partial" => UsageCoverage::Partial,
+            "none" => UsageCoverage::None,
+            _ => return Err(index("Unknown warehouse usage coverage")),
+        };
+        if self.coverage != Some(UsageCoverage::Partial) {
+            self.coverage = Some(coverage);
+        }
+        if self.ownership != Some(UsageOwnership::Copied) {
+            self.ownership = Some(ownership);
+        }
+        let reasoning: u64 = u64::try_from(row.get::<_, i64>(13).map_err(index)?).map_err(index)?;
+        self.reasoning = self
+            .reasoning
+            .checked_add(reasoning)
+            .ok_or_else(|| index("Warehouse reasoning usage exceeds the supported range"))?;
+        let shared = ownership == UsageOwnership::Copied;
         let start = usize::from(shared) * 3;
         for (column, total) in self.tokens[start..start + 3].iter_mut().enumerate() {
             let tokens: i64 = row.get(column + 3).map_err(index)?;
@@ -575,39 +611,107 @@ impl Usage {
         }
         if shared {
             self.shared = true;
+            if !include_evidence {
+                return Ok(());
+            }
+            let message_id: String = row.get(9).map_err(index)?;
+            let evidence: String = row.get(14).map_err(index)?;
+            let key = format!(
+                "{:x}",
+                Sha256::digest(encode(&(message_id, evidence))?.as_bytes())
+            );
+            let [input, cached_input, output] = [row.get::<_, i64>(3), row.get(4), row.get(5)]
+                .map(|value| value.map(|value| value as u64).map_err(index));
+            let (input, cached_input, output) = (input?, cached_input?, output?);
+            self.copies.insert(
+                key.clone(),
+                crate::Tokens {
+                    input,
+                    cached_input,
+                    output,
+                    reasoning_output: reasoning,
+                    total: input.saturating_add(output),
+                },
+            );
+            self.copy_models.insert(key, row.get(2).map_err(index)?);
             return Ok(());
         }
-        let kind: String = row.get(1).map_err(index)?;
+        let scope: String = row.get(1).map_err(index)?;
         let model: Option<String> = row.get(2).map_err(index)?;
-        match kind.as_str() {
-            "claude" => self.pricing.message(&crate::events::MessageUsage {
-                model,
-                billing: billing(row)?,
-                ..Default::default()
-            }),
-            "codex-snapshot" if model.is_none() => {}
-            "codex-response" | "codex-snapshot" => {
-                self.pricing.codex(&crate::events::CodexUsageEvent {
-                    model: model.unwrap_or_else(|| "unknown".into()),
-                    tokens: billing(row)?,
-                    timestamp: row.get(7).map_err(index)?,
-                })
-            }
-            "copilot" => {
-                let model = model.unwrap_or_else(|| "unknown".into());
-                self.pricing
-                    .unpriced_models
-                    .insert(crate::pricing::normalize_model_id(&model).to_owned());
-            }
-            _ => return Err(index("Unknown warehouse pricing fact")),
+        let provider: Option<String> = row.get(10).map_err(index)?;
+        let billing: Option<String> = row.get(8).map_err(index)?;
+        let provenance: String = row.get(11).map_err(index)?;
+        self.cumulative_session |= scope == "session";
+        if let (Some(provider), Some(billing)) = (provider, billing)
+            && (provenance != "snapshot" || model.is_some())
+        {
+            self.pricing.observe(
+                &provider,
+                model.as_deref(),
+                &serde_json::from_str(&billing).map_err(index)?,
+            );
+        } else if self.cumulative_session
+            && let Some(model) = model
+        {
+            self.pricing
+                .unpriced_models
+                .insert(crate::pricing::normalize_model_id(&model).to_owned());
         }
         Ok(())
     }
 }
 
-fn billing<T: serde::de::DeserializeOwned>(row: &rusqlite::Row<'_>) -> Result<T, ReadError> {
-    let billing: String = row.get(8).map_err(index)?;
-    serde_json::from_str(&billing).map_err(index)
+impl Usage {
+    fn new(table: &std::sync::Arc<crate::pricing::EffectiveTable>) -> Self {
+        Self {
+            shared: false,
+            cumulative_session: false,
+            coverage: None,
+            ownership: None,
+            tokens: [0; 6],
+            reasoning: 0,
+            copies: BTreeMap::new(),
+            copy_models: BTreeMap::new(),
+            pricing: crate::pricing::CostBuild::with_table(table.clone()),
+        }
+    }
+
+    fn summary(&mut self, provenance: crate::CostProvenance) -> Option<crate::UsageEvidence> {
+        let coverage = self.coverage?;
+        let ownership = self.ownership?;
+        let [
+            input,
+            cached_input,
+            output,
+            copied_input,
+            copied_cached,
+            copied_output,
+        ] = self.tokens.map(|value| value as u64);
+        let tokens = |input: u64, cached_input, output| crate::Tokens {
+            input,
+            cached_input,
+            output,
+            reasoning_output: self.reasoning,
+            total: input.saturating_add(output),
+        };
+        let observed = (coverage != crate::UsageCoverage::None
+            && (!self.cumulative_session || coverage != crate::UsageCoverage::Partial))
+            .then(|| {
+                tokens(
+                    input.saturating_add(copied_input),
+                    cached_input.saturating_add(copied_cached),
+                    output.saturating_add(copied_output),
+                )
+            });
+        let mut summary =
+            crate::UsageEvidence::aggregate(coverage, observed, ownership, provenance);
+        if self.shared {
+            summary.exclusive = Some(tokens(input, cached_input, output));
+            summary.shared = std::mem::take(&mut self.copies);
+            summary.shared_models = std::mem::take(&mut self.copy_models);
+        }
+        Some(summary)
+    }
 }
 
 impl<'a> Snapshot<'a> {
@@ -936,19 +1040,20 @@ impl<'a> Snapshot<'a> {
         paths: &str,
         owners: &str,
         table: &std::sync::Arc<crate::pricing::EffectiveTable>,
+        include_evidence: bool,
     ) -> Result<BTreeMap<i64, Usage>, ReadError> {
-        let mut usage = transaction.prepare_cached(USAGE).map_err(index)?;
-        let mut facts = usage.query(params![owners, paths]).map_err(index)?;
+        let mut usage = transaction
+            .prepare_cached(&warehouse::usage_query(USAGE))
+            .map_err(index)?;
+        let mut facts = usage
+            .query(params![owners, paths, Option::<&str>::None])
+            .map_err(index)?;
         let mut priced = BTreeMap::<i64, Usage>::new();
         while let Some(fact) = facts.next().map_err(index)? {
             priced
                 .entry(fact.get(0).map_err(index)?)
-                .or_insert_with(|| Usage {
-                    tokens: [0; 6],
-                    shared: false,
-                    pricing: crate::pricing::CostBuild::with_table(table.clone()),
-                })
-                .account(fact)?;
+                .or_insert_with(|| Usage::new(table))
+                .account(fact, include_evidence)?;
         }
         Ok(priced)
     }
@@ -964,20 +1069,27 @@ impl<'a> Snapshot<'a> {
         }
         let owners = rows.iter().map(|row| row.owner).collect::<Vec<_>>();
         let status = self.runtime_status(&owners, selected, view.runtime())?;
-        self.enrich_with_status(rows, &status)
+        self.enrich_with_status(rows, &status, selected)
     }
 
     fn enrich_with_status(
         &self,
         rows: &mut [Row],
         status: &BTreeMap<i64, &'static str>,
+        include_evidence: bool,
     ) -> Result<(), ReadError> {
         if rows.is_empty() {
             return Ok(());
         }
         let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
         let table = crate::pricing::snapshot();
-        let mut priced = Self::priced_usage(self.transaction, &self.paths, &owners, &table)?;
+        let mut priced = Self::priced_usage(
+            self.transaction,
+            &self.paths,
+            &owners,
+            &table,
+            include_evidence,
+        )?;
         let mut members = self
             .transaction
             .prepare_cached(PAGE_MEMBERS)
@@ -1032,23 +1144,29 @@ impl<'a> Snapshot<'a> {
         parents.sort_by(|a, b| b.1.cmp(&a.1));
         let mut parents = parents.into_iter().collect::<BTreeMap<_, _>>();
         for row in rows {
-            let usage = priced.remove(&row.owner).unwrap_or_else(|| Usage {
-                tokens: [0; 6],
-                shared: false,
-                pricing: crate::pricing::CostBuild::with_table(table.clone()),
-            });
+            let mut usage = priced
+                .remove(&row.owner)
+                .unwrap_or_else(|| Usage::new(&table));
             row.usage = usage.tokens;
-            let mut cost = usage.pricing.finish();
-            let copilot = row.harness == "copilot";
-            if copilot && cost.unpriced_models.is_empty() {
+            let mut cost = std::mem::take(&mut usage.pricing).finish();
+            let cumulative_session = usage.cumulative_session;
+            if cumulative_session && cost.unpriced_models.is_empty() {
                 cost.unpriced_models.push(if row.model == "—" {
                     "unknown".into()
                 } else {
                     row.model.clone()
                 });
             }
-            if copilot || usage.shared {
+            if cumulative_session || usage.shared {
                 cost.usd = None;
+                cost.provenance = if cumulative_session {
+                    crate::CostProvenance::Snapshot
+                } else {
+                    crate::CostProvenance::Unknown
+                };
+            }
+            if include_evidence {
+                row.usage_evidence = usage.summary(cost.provenance);
             }
             row.cost = Some(cost);
             if let Some((parent, method)) = parents.remove(&row.owner) {
@@ -1390,7 +1508,7 @@ fn selected_details(
         "turns": turns, "calls": calls, "errors": errors, "tool_calls": tools,
         "signals": signals, "cost": row.cost, "copied_usage": row.usage[3..].iter().any(|count| *count > 0),
         "live_observation": row.status.is_some(),
-        "copilot": copilot, "reported_runs": [], "cost_check": [],
+        "copilot": copilot, "usage": row.usage_evidence, "reported_runs": [], "cost_check": [],
     }))
 }
 
@@ -1514,6 +1632,7 @@ fn read_row(
         },
         presentation_kind: None,
         usage: [0; 6],
+        usage_evidence: None,
         cost: None,
         status: None,
         details: None,
@@ -3136,27 +3255,24 @@ fn selected_family_price(
     }
     let fold = encode(&fold)?;
     let table = crate::pricing::snapshot();
-    let mut priced = Snapshot::priced_usage(tx, &paths, &owners, &table)?;
+    let mut priced = Snapshot::priced_usage(tx, &paths, &owners, &table, false)?;
     let usd = family
-        .into_iter()
-        .map(|(owner, harness)| {
-            if harness == "copilot" {
-                return None;
-            }
-            match priced.remove(&owner) {
-                Some(usage) if usage.shared => None,
-                Some(usage) => usage.pricing.finish().usd,
-                None => Some(0.0),
-            }
+        .into_keys()
+        .map(|owner| match priced.remove(&owner) {
+            Some(usage) if usage.shared || usage.cumulative_session => None,
+            Some(usage) => usage.pricing.finish().usd,
+            None => Some(0.0),
         })
         .sum();
 
     let mut shared_usage = tx
-        .prepare_cached(include_str!(
+        .prepare_cached(&warehouse::usage_query(include_str!(
             "events/store/warehouse_selected_family_shared.sql"
-        ))
+        )))
         .map_err(index)?;
-    let mut steps = shared_usage.query(params![fold, paths]).map_err(index)?;
+    let mut steps = shared_usage
+        .query(params![fold, paths, Option::<&str>::None])
+        .map_err(index)?;
     while let Some(step) = steps.next().map_err(index)? {
         let billing = step.get::<_, Option<String>>(1).map_err(index)?;
         let usd = billing

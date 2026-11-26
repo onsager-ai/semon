@@ -82,30 +82,17 @@ CREATE TABLE fact_relation_observation (
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER, target TEXT NOT NULL,
   PRIMARY KEY(source,pos,block,kind,occurrence)
 ) STRICT, WITHOUT ROWID;
-CREATE TABLE fact_step_observation (
+CREATE TABLE fact_usage_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
-  kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, item INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('per_response','accepted_response','cumulative_snapshot')),
+  scope TEXT NOT NULL CHECK(scope IN ('response','thread','session')),
   message_id TEXT, uuid TEXT, model TEXT, input INTEGER NOT NULL, cached INTEGER NOT NULL,
-  output INTEGER NOT NULL, ts INTEGER, accepted INTEGER NOT NULL,
-  PRIMARY KEY(source,pos,block,kind,occurrence)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE fact_step_billing (
-  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
-  kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER, billing TEXT NOT NULL,
-  PRIMARY KEY(source,pos,block,kind,occurrence)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE fact_copilot_shutdown (
-  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
-  occurrence INTEGER NOT NULL, ordinal INTEGER, event_id TEXT NOT NULL,
-  ts INTEGER, complete INTEGER NOT NULL,
-  PRIMARY KEY(source,pos,block,occurrence)
-) STRICT, WITHOUT ROWID;
-CREATE TABLE fact_copilot_usage (
-  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
-  occurrence INTEGER NOT NULL, ordinal INTEGER, model TEXT NOT NULL,
-  input INTEGER NOT NULL, output INTEGER NOT NULL, cached INTEGER NOT NULL,
-  cache_write INTEGER NOT NULL, reasoning INTEGER NOT NULL,
-  PRIMARY KEY(source,pos,block,occurrence,model)
+  output INTEGER NOT NULL, cache_write INTEGER NOT NULL, reasoning INTEGER NOT NULL,
+  ts INTEGER, accepted INTEGER, billing TEXT, provider TEXT,
+  coverage TEXT NOT NULL CHECK(coverage IN ('response','snapshot','partial','none')),
+  cost_provenance TEXT NOT NULL CHECK(cost_provenance IN ('list_priced','gateway_billed','snapshot','unknown')),
+  PRIMARY KEY(source,pos,block,occurrence,item)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_label_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
@@ -264,7 +251,8 @@ CREATE INDEX record_gap ON fact_record(source,coalesce(ts,-9223372036854775808),
 CREATE INDEX prompt_position ON fact_prompt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
 CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
   WHERE pos>=0;
-CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
+CREATE INDEX usage_message ON fact_usage_observation(message_id,uuid,source) WHERE kind='per_response';
+CREATE INDEX usage_scope ON fact_usage_observation(source,scope,pos DESC) WHERE kind='cumulative_snapshot';
 CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
 CREATE INDEX claude_call_identity ON fact_claude_call(call_id,source);
 CREATE INDEX agent_storage_parent ON fact_agent_observation(storage_parent,source,revision);
@@ -326,9 +314,9 @@ CREATE VIEW current_usage AS
 WITH ranked AS (
   SELECT m.usage_owner AS owner,u.*,row_number() OVER (PARTITION BY m.usage_owner,u.message_id
     ORDER BY d.first_ts DESC,d.continued,d.native_id DESC,u.pos DESC,u.block DESC,u.occurrence DESC) AS n
-  FROM fact_step_observation u JOIN bridge_session_owner m USING(source)
+  FROM fact_usage_observation u JOIN bridge_session_owner m USING(source)
   JOIN dim_session d USING(source)
-  WHERE u.kind='claude' OR (u.kind='codex-response' AND u.accepted)
+  WHERE u.kind='per_response' OR (u.kind='accepted_response' AND u.accepted)
 )
 SELECT * FROM ranked WHERE n=1;
 
@@ -336,18 +324,19 @@ SELECT * FROM ranked WHERE n=1;
 CREATE VIEW shared_messages AS
 WITH identities AS MATERIALIZED (
   SELECT DISTINCT m.usage_owner AS owner,u.message_id,u.uuid
-  FROM fact_step_observation u JOIN bridge_session_owner m USING(source)
-  WHERE u.kind='claude' AND u.uuid IS NOT NULL
+  FROM fact_usage_observation u JOIN bridge_session_owner m USING(source)
+  WHERE u.kind='per_response' AND u.uuid IS NOT NULL
 ), shared AS (
   SELECT message_id,uuid FROM identities GROUP BY message_id,uuid HAVING count(*)>1
 )
 SELECT DISTINCT i.owner,i.message_id FROM identities i JOIN shared s USING(message_id,uuid);
 -- Select the whole latest shutdown before selecting models. An incomplete
 -- shutdown, or a model omitted from a later snapshot, clears earlier usage.
-CREATE VIEW current_copilot_usage AS
+CREATE VIEW current_session_usage_snapshot AS
 SELECT m.usage_owner AS owner,u.* FROM bridge_session_owner m
-JOIN fact_copilot_usage u ON u.source=m.source
- AND u.pos=(SELECT max(s.pos) FROM fact_copilot_shutdown s WHERE s.source=m.source);
+JOIN fact_usage_observation u ON u.source=m.source AND u.kind='cumulative_snapshot' AND u.scope='session'
+ AND u.pos=(SELECT max(s.pos) FROM fact_usage_observation s
+    WHERE s.source=m.source AND s.kind='cumulative_snapshot' AND s.scope='session' AND s.item=0);
 CREATE VIEW usage_totals AS
 SELECT u.owner,
   sum(CASE WHEN s.owner IS NULL THEN u.input ELSE 0 END) AS input,
@@ -360,7 +349,7 @@ FROM current_usage u LEFT JOIN shared_messages s
   ON s.owner=u.owner AND s.message_id=u.message_id GROUP BY u.owner
 UNION ALL
 SELECT owner,sum(input),sum(cached),sum(output),0,0,0
-FROM current_copilot_usage GROUP BY owner;
+FROM current_session_usage_snapshot WHERE item>0 GROUP BY owner;
 
 CREATE VIEW session_list AS
 WITH keys AS MATERIALIZED (SELECT * FROM catalog_keys),
@@ -583,8 +572,8 @@ SELECT * FROM precedence;
 -- message, transitively. The minimum shared UUID is its evidence identity.
 CREATE VIEW shared_components AS
 WITH RECURSIVE identities AS MATERIALIZED (
- SELECT DISTINCT m.owner,u.message_id,u.uuid FROM fact_step_observation u
- JOIN bridge_session_owner m USING(source) WHERE u.kind='claude' AND u.uuid IS NOT NULL
+ SELECT DISTINCT m.owner,u.message_id,u.uuid FROM fact_usage_observation u
+ JOIN bridge_session_owner m USING(source) WHERE u.kind='per_response' AND u.uuid IS NOT NULL
 ), edges AS MATERIALIZED (
  SELECT a.message_id,a.owner,b.owner AS other,a.uuid FROM identities a
  JOIN identities b ON b.message_id=a.message_id AND b.uuid=a.uuid AND b.owner<>a.owner

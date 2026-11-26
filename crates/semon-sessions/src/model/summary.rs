@@ -6,7 +6,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 /// Bump when description, identity or pricing derivation rules change.
-pub(super) const VERSION: u32 = 2;
+pub(super) const VERSION: u32 = 3;
 
 pub(super) fn fingerprint(inputs: &DescriptionInputs) -> String {
     format!("{:x}", Sha256::digest(format!("{inputs:?}").as_bytes()))
@@ -25,7 +25,7 @@ pub(super) struct Summary {
     effort: Option<String>,
     tokens: [f64; 3],
     tokens_by_model: BTreeMap<String, events::ModelTokens>,
-    claude_usage: Option<crate::ClaudeUsageEvidence>,
+    usage: Option<crate::UsageEvidence>,
     copilot: Option<crate::copilot::CopilotEvidence>,
     incomplete_usage_days: BTreeSet<i64>,
     incomplete_usage_time: bool,
@@ -55,7 +55,7 @@ impl Summary {
             effort: session.out.effort.clone(),
             tokens: session.out.tokens,
             tokens_by_model: session.out.tokens_by_model.clone(),
-            claude_usage: session.out.claude_usage.clone(),
+            usage: session.out.usage.clone(),
             copilot: session.out.copilot.clone(),
             incomplete_usage_days: session.out.incomplete_usage_days.clone(),
             incomplete_usage_time: session.out.incomplete_usage_time,
@@ -83,7 +83,7 @@ impl Summary {
         session.out.effort = self.effort;
         session.out.tokens = self.tokens;
         session.out.tokens_by_model = self.tokens_by_model;
-        session.out.claude_usage = self.claude_usage;
+        session.out.usage = self.usage;
         session.out.copilot = self.copilot;
         session.out.incomplete_usage_days = self.incomplete_usage_days;
         session.out.incomplete_usage_time = self.incomplete_usage_time;
@@ -224,7 +224,7 @@ impl CatalogSource {
     }
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 12;
+pub(crate) const CATALOG_VERSION: u32 = 13;
 
 pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
     let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
