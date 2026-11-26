@@ -811,7 +811,7 @@ fn star_catalog_fixture_parity() {
             "{} exclusive usage",
             row.id
         );
-        let expected_shared = expected.claude_usage.as_ref().map_or([0; 3], |e| {
+        let expected_shared = expected.usage.as_ref().map_or([0; 3], |e| {
             e.shared.values().fold([0; 3], |mut total, t| {
                 total[0] += t.input;
                 total[1] += t.cached_input;
@@ -820,7 +820,9 @@ fn star_catalog_fixture_parity() {
             })
         });
         assert_eq!(row.shared, expected_shared, "{} shared usage", row.id);
-        if let Some(evidence) = &expected.claude_usage {
+        if let Some(evidence) = &expected.usage
+            && evidence.ownership == crate::UsageOwnership::Copied
+        {
             assert!(evidence.shared_owner.is_none());
             assert!(evidence.fresh.is_none());
         }
@@ -3522,20 +3524,17 @@ fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
         }
         folds.insert(
             id,
-            session
-                .claude_usage
-                .as_ref()
-                .map_or_else(BTreeMap::new, |e| {
-                    e.shared
-                        .iter()
-                        .map(|(key, tokens)| {
-                            (
-                                key.clone(),
-                                [tokens.input, tokens.cached_input, tokens.output],
-                            )
-                        })
-                        .collect()
-                }),
+            session.usage.as_ref().map_or_else(BTreeMap::new, |e| {
+                e.shared
+                    .iter()
+                    .map(|(key, tokens)| {
+                        (
+                            key.clone(),
+                            [tokens.input, tokens.cached_input, tokens.output],
+                        )
+                    })
+                    .collect()
+            }),
         );
     }
     let mut ready: std::collections::VecDeque<_> = pending

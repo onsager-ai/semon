@@ -122,7 +122,10 @@ pub(crate) enum UsageMeasurement {
         model: Option<String>,
         tokens: Tokens,
     },
-    SessionSnapshot(Option<crate::copilot::CopilotUsage>),
+    SessionSnapshot {
+        usage: Option<crate::copilot::CopilotUsage>,
+        observed: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

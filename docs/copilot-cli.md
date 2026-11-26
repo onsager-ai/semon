@@ -66,11 +66,11 @@ Shutdown `modelMetrics` replaces the previous cumulative per-model usage snapsho
 separate observations. Child `agentMetrics` and compaction usage are not added
 again. Missing or incomplete metrics yield a null snapshot. Snapshot totals do
 not establish fresh branch work, USD billing or original copied-history ownership.
-Complete Copilot costs remain unknown, including in analytics; native request
-cost units are not converted to dollars. Consumers needing usage presence should
-read `copilot.usage`, rather than interpreting legacy numeric zero as an observed
-zero. The snapshot's legacy `Tokens.total` is derived input plus output, not a
-separately reported native billing field.
+Copilot costs remain unknown, including in analytics. Native request cost units
+have no USD conversion. The common `usage` field carries the observed snapshot,
+coverage and unknown ownership, with fresh usage null. ASI publishes these
+sessions with `step_coverage = none` and `usage_coverage` of `snapshot`, `partial`,
+or `none`. Snapshot `Tokens.total` is derived input plus output.
 
 ## Redacted viewing copies
 

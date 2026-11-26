@@ -325,6 +325,40 @@ fn both_harnesses_preserve_evidence_turns_and_usage() {
 }
 
 #[test]
+fn copilot_admission_distinguishes_snapshot_partial_and_missing_usage() {
+    use semon_asi::{
+        input::{StepCoverage, UsageCoverage},
+        projection::Cell,
+    };
+
+    let input = include_str!("../../../tests/fixtures/star-catalog/copilot.jsonl");
+    let lines: Vec<_> = input.lines().collect();
+    for (name, count, usage) in [
+        ("copilot-none", 1, UsageCoverage::None),
+        ("copilot-partial", lines.len() - 1, UsageCoverage::Partial),
+        ("copilot-snapshot", lines.len(), UsageCoverage::Snapshot),
+    ] {
+        let fixture = Fixture::new(name);
+        let path = fixture
+            .options
+            .copilot_home
+            .join("session-state/copilot-fixture/events.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{}\n", lines[..count].join("\n"))).unwrap();
+        fixture.admit();
+        let sessions = drain(&mut fixture.open());
+        let session = &sessions["fixture/copilot/copilot-fixture"];
+        assert_eq!(session.step_coverage, StepCoverage::None);
+        assert_eq!(session.usage_coverage, usage);
+        assert!(session.steps.is_empty());
+        let rows = project(session).unwrap();
+        let fact = &rows.tables["fact_session"][0];
+        assert_eq!(fact["input_tokens"], Cell::Integer(None));
+        assert_eq!(fact["usd_est"], Cell::Float(None));
+    }
+}
+
+#[test]
 fn claude_agent_without_sidecar_keeps_storage_parent() {
     let fixture = Fixture::new("storage-parent");
     let parent = fixture.seed("parent");

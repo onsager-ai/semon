@@ -9564,7 +9564,7 @@ mod tests {
             "name": "project", "harness": "claude", "lane": true,
             "machine": "synthetic-catalog", "state": "done", "model": "—",
             "tokens": [0.0, 0.0, 0.0], "tokens_by_model": {},
-            "cost": {"usd": 0.0, "unpriced_models": [], "priced_tokens": 0, "unpriced_tokens": 0,
+            "cost": {"usd": 0.0, "provenance": "unknown", "unpriced_models": [], "priced_tokens": 0, "unpriced_tokens": 0,
                 "split_unknown_messages": 0,
                 "by_model": {}, "by_day": {},
                 "pricing_fingerprint": crate::pricing::snapshot().fingerprint},

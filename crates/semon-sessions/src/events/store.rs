@@ -269,7 +269,7 @@ fn emit_catalog_publish_attempt(
 // v60: native operation tool labels for selected call totals.
 // v61: source-relative image ranges and scalar checkpoints for selected reads.
 // v62: assistant result positions for warehouse Home metadata and hydration.
-pub(crate) const SCHEMA_VERSION: i64 = 63;
+pub(crate) const SCHEMA_VERSION: i64 = 64;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -6280,9 +6280,45 @@ pub(crate) fn warehouse_activity_file(
     let mut signals = connection.prepare_cached(&format!(
         "SELECT {SIGNAL_COLUMNS} FROM signals WHERE file_id=?1 ORDER BY seq"
     ))?;
-    let mut usage = connection.prepare_cached(&format!(
-        "SELECT {USAGE_COLUMNS} FROM usage WHERE file_id=?1"
-    ))?;
+    let mut usage = connection.prepare_cached(
+        "SELECT message_id,pos,ordinal,model,input,cached,output,reasoning,billing FROM (
+           SELECT u.*,row_number() OVER(PARTITION BY u.message_id ORDER BY u.pos DESC,u.block DESC,u.occurrence DESC) AS n
+           FROM warehouse_current c CROSS JOIN fact_usage_observation u USING(source)
+           WHERE c.path=?1 AND u.kind='per_response' AND u.pos<?2
+         ) WHERE n=1",
+    )?;
+    let usage_by_id = usage
+        .query_map(params![path, int(ledger.offset)], |row| {
+            let billing: BillingUsage = from_json(8, &row.get::<_, String>(8)?)?;
+            let input = uint(row.get(4)?);
+            let output = uint(row.get(6)?);
+            Ok((
+                row.get(0)?,
+                MessageUsage {
+                    offset: uint(row.get(1)?),
+                    record_ordinal: row.get::<_, Option<i64>>(2)?.map(uint),
+                    model: row.get(3)?,
+                    tokens: Tokens {
+                        input,
+                        output,
+                        cached_input: uint(row.get(5)?),
+                        reasoning_output: uint(row.get(7)?),
+                        total: input.saturating_add(output),
+                    },
+                    model_tokens: ModelTokens {
+                        input: billing.input,
+                        output: billing.output,
+                        cache_write: billing
+                            .cache_write_5m
+                            .saturating_add(billing.cache_write_1h),
+                        cache_read: billing.cache_read,
+                    },
+                    billing,
+                    ..Default::default()
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
     let links: String = connection.query_row(
         "SELECT links FROM files WHERE file_id=?1",
         [file_id],
@@ -6291,7 +6327,7 @@ pub(crate) fn warehouse_activity_file(
     Ok(Some(FileIndex {
         events: read_events(&mut events, file_id)?.0,
         signals: read_signals(&mut signals, file_id)?,
-        usage_by_id: read_message_usage(&mut usage, file_id)?,
+        usage_by_id,
         links: from_json(0, &links)?,
         ..Default::default()
     }))

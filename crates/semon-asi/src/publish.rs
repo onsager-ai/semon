@@ -694,7 +694,8 @@ mod tests {
                 })
                 .collect(),
             compactions: Vec::new(),
-            usage_complete: true,
+            step_coverage: crate::input::StepCoverage::Response,
+            usage_coverage: crate::input::UsageCoverage::Response,
             prices: if step.is_some() {
                 vec![Price {
                     price_version,

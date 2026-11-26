@@ -9938,29 +9938,50 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
         alone.sessions["native-claude-parent"].tokens_by_model["claude-sonnet-4-6"].input,
         10
     );
-    assert!(
+    assert_eq!(
         alone.sessions["native-claude-parent"]
-            .claude_usage
-            .is_none()
+            .usage
+            .as_ref()
+            .unwrap()
+            .ownership,
+        crate::UsageOwnership::Exclusive
     );
     let path = home.write("claude/projects/fixture/native-claude-child.jsonl", child);
     let assert_evidence = |built: &QueryData| {
         let parent = &built.sessions["native-claude-parent"];
         let child = &built.sessions["native-claude-child"];
         assert!(parent.parent.is_none() && child.parent.is_none());
-        let p = parent.claude_usage.as_ref().unwrap();
-        let c = child.claude_usage.as_ref().unwrap();
-        assert_eq!((p.observed.input, p.observed.output), (10, 6));
-        assert_eq!((c.observed.input, c.observed.output), (15, 9));
-        assert_eq!(p.exclusive, crate::Tokens::default());
-        assert_eq!((c.exclusive.input, c.exclusive.output), (5, 3));
+        let p = parent.usage.as_ref().unwrap();
+        let c = child.usage.as_ref().unwrap();
+        assert_eq!(
+            (
+                p.observed.as_ref().unwrap().input,
+                p.observed.as_ref().unwrap().output
+            ),
+            (10, 6)
+        );
+        assert_eq!(
+            (
+                c.observed.as_ref().unwrap().input,
+                c.observed.as_ref().unwrap().output
+            ),
+            (15, 9)
+        );
+        assert_eq!(p.exclusive, Some(crate::Tokens::default()));
+        assert_eq!(
+            (
+                c.exclusive.as_ref().unwrap().input,
+                c.exclusive.as_ref().unwrap().output
+            ),
+            (5, 3)
+        );
         assert_eq!(p.shared, c.shared);
         assert_eq!(
-            p.shared.values().map(|t| t.input).sum::<u64>() + c.exclusive.input,
+            p.shared.values().map(|t| t.input).sum::<u64>() + c.exclusive.as_ref().unwrap().input,
             15
         );
         assert_eq!(
-            p.shared.values().map(|t| t.output).sum::<u64>() + c.exclusive.output,
+            p.shared.values().map(|t| t.output).sum::<u64>() + c.exclusive.as_ref().unwrap().output,
             9
         );
         assert!(p.fresh.is_none() && c.fresh.is_none());
@@ -9984,7 +10005,7 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
     .unwrap();
     assert!(
         home.build_query().sessions["native-claude-parent"]
-            .claude_usage
+            .usage
             .is_none()
     );
 }

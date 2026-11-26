@@ -890,7 +890,7 @@ mod tests {
             );
             let db = rusqlite::Connection::open(active_path(&options.cache)).unwrap();
             let usage = db.prepare(
-                "SELECT d.native_id,u.input FROM dim_session d JOIN current_copilot_usage u USING(source) ORDER BY d.native_id",
+                "SELECT d.native_id,u.input FROM dim_session d JOIN current_session_usage_snapshot u USING(source) WHERE u.item>0 ORDER BY d.native_id",
             ).unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
                 .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             assert_eq!(

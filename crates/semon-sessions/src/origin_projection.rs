@@ -17,8 +17,8 @@ use semon_asi::input::{
     Activity, AdmittedBatch, AdmittedSession, AnalyticsInput, BillingUsage, Compaction,
     ContextBand, Coverage, InputBudget, Model, ParentMethod, Price, PriceUnit, RateKind,
     Reconciliation, RecordedCost, RecordedVersions, Repo, Role, Session, SessionChange, Source,
-    SourceWitness, Status, Step, ToolCall, Trigger, UNKNOWN_REPO_KEY, UsageOwner, WasteKind,
-    encode_component,
+    SourceWitness, Status, Step, StepCoverage, ToolCall, Trigger, UNKNOWN_REPO_KEY, UsageCoverage,
+    UsageOwner, WasteKind, encode_component,
 };
 
 use crate::{
@@ -662,6 +662,7 @@ fn admitted(
         steps,
         facts,
         prices,
+        snapshot,
     } = evidence;
     if row.key != witness.key || steps.len() != facts.len() {
         return Err(rusqlite::Error::InvalidQuery);
@@ -691,6 +692,7 @@ fn admitted(
         facts: facts.into_iter().map(|(_, id, fact)| (id, fact)).collect(),
         compactions,
         prices,
+        snapshot: None,
     })?;
     if let Some(session) = &mut projected {
         session.source_witness = indexed_source_witness(&witness.sources)?;
@@ -708,6 +710,7 @@ struct SessionEvidence<'a> {
     facts: BTreeMap<native_activity::ActivityStepId, native_activity::StepFacts>,
     compactions: Vec<Compaction>,
     prices: Vec<Price>,
+    snapshot: Option<bool>,
 }
 
 fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<AdmittedSession>> {
@@ -721,6 +724,7 @@ fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<Adm
         facts,
         compactions,
         prices,
+        snapshot,
     } = evidence;
     if facts.len() != steps.len() {
         return Err(rusqlite::Error::InvalidQuery);
@@ -745,9 +749,24 @@ fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<Adm
         .iter()
         .filter(|step| step.activity.is_none())
         .count() as u64;
-    let usage_complete = projected_steps
-        .iter()
-        .all(|step| !step.billing.split_unknown);
+    let step_coverage = if projected_steps.is_empty() {
+        StepCoverage::None
+    } else {
+        StepCoverage::Response
+    };
+    let usage_coverage = match (step_coverage, snapshot) {
+        (StepCoverage::Response, _)
+            if projected_steps
+                .iter()
+                .any(|step| step.billing.split_unknown) =>
+        {
+            UsageCoverage::Partial
+        }
+        (StepCoverage::Response, _) => UsageCoverage::Response,
+        (StepCoverage::None, Some(true)) => UsageCoverage::Snapshot,
+        (StepCoverage::None, Some(false)) => UsageCoverage::Partial,
+        (StepCoverage::None, None) => UsageCoverage::None,
+    };
     Ok(Some(AdmittedSession {
         session_uid,
         source_witness: indexed_source_witness(sources)?,
@@ -774,7 +793,8 @@ fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<Adm
         session,
         steps: projected_steps,
         compactions,
-        usage_complete,
+        step_coverage,
+        usage_coverage,
         prices,
     }))
 }

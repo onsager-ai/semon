@@ -82,7 +82,7 @@ pub(crate) struct Session {
     pub(crate) tokens: [f64; 3],
     pub(crate) tokens_by_model: BTreeMap<String, events::ModelTokens>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) claude_usage: Option<crate::ClaudeUsageEvidence>,
+    pub(crate) usage: Option<crate::UsageEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) copilot: Option<crate::copilot::CopilotEvidence>,
     #[serde(skip)]
@@ -785,12 +785,11 @@ impl ActivityInputs {
     pub(crate) fn add(
         &mut self,
         path: &str,
-        harness: &str,
         index: &events::FileIndex,
         is_copy: impl Fn(usize) -> bool,
     ) {
         use events::session_activity::{SourcePosition, UsageStep};
-        if harness == "claude" {
+        if !index.usage().is_empty() {
             let mut turns: Vec<_> = index
                 .events
                 .iter()
@@ -2134,7 +2133,7 @@ impl<'a> Builder<'a> {
             effort: None,
             tokens: [0.0; 3],
             tokens_by_model: BTreeMap::new(),
-            claude_usage: None,
+            usage: None,
             copilot: None,
             incomplete_usage_days: BTreeSet::new(),
             incomplete_usage_time: false,
@@ -2683,7 +2682,7 @@ impl<'a> Builder<'a> {
                 .path
                 .to_str()
                 .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
-            inputs.add(path, file.harness(), &file.summary, |at| {
+            inputs.add(path, &file.summary, |at| {
                 self.copied.contains(&(*position, at))
             });
             if file.summary.has_native_usage() {
@@ -3005,10 +3004,13 @@ impl<'a> Builder<'a> {
         } else {
             crate::pricing::calculate_cost(&billing_messages, &[])
         };
-        if usage_evidence.is_some() || harness == "copilot" {
+        if usage_evidence.is_some() {
             cost.usd = None;
+            cost.provenance = crate::CostProvenance::Unknown;
         }
-        if harness == "copilot" {
+        if last_file.summary.copilot.is_some() {
+            cost.usd = None;
+            cost.provenance = crate::CostProvenance::Snapshot;
             cost.unpriced_models = tokens_by_model.keys().cloned().collect();
             if cost.unpriced_models.is_empty() {
                 cost.unpriced_models
@@ -3108,7 +3110,39 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         out.tokens_by_model = tokens_by_model;
-        out.claude_usage = usage_evidence;
+        out.usage = usage_evidence.or_else(|| {
+            let native = &last_file.summary;
+            if let Some(index) = &native.copilot {
+                Some(crate::UsageEvidence::snapshot(
+                    index.usage.as_ref(),
+                    index.usage_source.is_some(),
+                ))
+            } else if !billing_messages.is_empty() || native.has_native_usage() {
+                let coverage = if billing_messages
+                    .iter()
+                    .any(|message| message.billing.split_unknown)
+                {
+                    crate::UsageCoverage::Partial
+                } else {
+                    crate::UsageCoverage::Response
+                };
+                Some(crate::UsageEvidence::aggregate(
+                    coverage,
+                    Some(tokens.clone()),
+                    crate::UsageOwnership::Exclusive,
+                    cost.provenance,
+                ))
+            } else if !native.codex_usage().is_empty() {
+                Some(crate::UsageEvidence::aggregate(
+                    crate::UsageCoverage::Snapshot,
+                    Some(tokens.clone()),
+                    crate::UsageOwnership::Unknown,
+                    crate::CostProvenance::Snapshot,
+                ))
+            } else {
+                None
+            }
+        });
         out.copilot = last_file
             .summary
             .copilot

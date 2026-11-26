@@ -65,7 +65,11 @@ fn assert_committed_facts(home: &Home, expected: &Connection, harness: &str) {
         let production = if harness == "codex" && table == "record" {
             "SELECT r.pos,CASE WHEN EXISTS(SELECT 1 FROM fact_prompt p WHERE p.source=r.source AND p.pos=r.pos) THEN 'prompt' ELSE r.kind END,r.uuid,r.message_id,r.ts FROM fact_record r WHERE gap=0".to_owned()
         } else {
-            format!("SELECT {projection} FROM fact_{table} {filter}")
+            let production_table = match table {
+                "step_observation" | "step_billing" => "usage_observation",
+                _ => table,
+            };
+            format!("SELECT {projection} FROM fact_{production_table} {filter}")
         };
         let prototype_projection = projection.strip_prefix("DISTINCT ").unwrap_or(projection);
         assert_eq!(
@@ -734,7 +738,7 @@ fn codex_observations_match_prototype_at_admission() {
 const COPILOT_FIXTURE: &str = include_str!("../../../../tests/fixtures/star-catalog/copilot.jsonl");
 const COPILOT_PATH: &str = "copilot/session-state/copilot-fixture/events.jsonl";
 
-fn copilot_facts(db: &Connection) -> [Vec<Vec<Sql>>; 11] {
+fn copilot_facts(db: &Connection) -> [Vec<Vec<Sql>>; 10] {
     [
         "fact_session_observation",
         "fact_record",
@@ -742,8 +746,7 @@ fn copilot_facts(db: &Connection) -> [Vec<Vec<Sql>>; 11] {
         "fact_tool_call",
         "fact_tool_result",
         "fact_compaction",
-        "fact_copilot_shutdown",
-        "fact_copilot_usage",
+        "fact_usage_observation",
         "fact_prompt",
         "dim_session",
         "maintenance_cursor",
@@ -818,7 +821,7 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
     assert_eq!(
         rows(
             db,
-            "SELECT model,input,output,cached,cache_write,reasoning FROM current_copilot_usage ORDER BY model"
+            "SELECT model,input,output,cached,cache_write,reasoning FROM current_session_usage_snapshot WHERE item>0 ORDER BY model"
         ),
         models
     );
@@ -837,7 +840,7 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
     assert_eq!(
         rows(
             db,
-            "SELECT pos,event_id,ts,complete FROM fact_copilot_shutdown ORDER BY pos DESC LIMIT 1"
+            "SELECT pos,message_id,ts,coverage='snapshot' FROM fact_usage_observation WHERE scope='session' AND item=0 AND coverage<>'none' ORDER BY pos DESC LIMIT 1"
         ),
         expected
     );

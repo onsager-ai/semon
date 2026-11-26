@@ -2691,7 +2691,7 @@ fn catalog_changes_log_a_change_without_rewriting_unchanged_activity() {
     for (field, value) in [
         ("reported_runs", serde_json::json!([{"cost_usd":2.0}])),
         ("cost_check", serde_json::json!([{"reported_usd":2.0}])),
-        ("claude_usage", serde_json::json!({"complete":false})),
+        ("usage", serde_json::json!({"complete":false})),
         ("copilot", serde_json::json!({"usage":null})),
         ("incomplete_usage_days", serde_json::json!([123])),
         ("incomplete_usage_time", serde_json::json!(true)),

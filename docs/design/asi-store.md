@@ -218,7 +218,7 @@ column declares a class: `key`, `enum`, `number`, `time`, `name`, `path` or
 | `fact_step` | One model invocation | step, turn and session keys; `model`, `repo_key`, `date_key`; billing inputs; `usage_owner` (`exclusive`, `copied`); `context_tokens`, `context_band`; `model_ms`, `tool_ms`; `usd_est`, `price_status`; `activity`, `waste_kind`, `trigger`, `ok` |
 | `fact_tool_call` | One tool call | `step_uid`, `ord`, `tool_key`, `target_path` (class `path`), `command_tag`, `ok`, `exit_code`, `tool_ms` |
 | `fact_turn` | One turn | `initiator`, `started_at`, `ended_at`, step count |
-| `fact_session` | One session (aggregate grain) | Totals by token class over exclusive usage, `usd_est`, `reported_usd`, wall and model time, step and failure counts, `usage_complete` |
+| `fact_session` | One session (aggregate grain) | Totals by token class over exclusive usage, `usd_est`, `reported_usd`, wall and model time, step and failure counts, `step_coverage` and `usage_coverage` |
 | `fact_compaction` | One compaction | `step_uid` (nullable), `ts` |
 | `fact_label` | One label assertion | Target UID, field, value, labeller, taxonomy version, confidence, `created_at` (exported from the durable file; no free text) |
 
@@ -239,6 +239,12 @@ commutative, associative and idempotent within batches and across publication
 cycles. A different `usd_per_unit` for the same key refuses the entire
 publication without advancing its checkpoint. Different price versions retain
 their separate SCD2 rows.
+
+The origin Index observes per-response, acceptance-qualified response and
+cumulative usage at ingest. Ownership uses native identity and copy evidence
+within the authorized source cohort. Cumulative session snapshots carry
+`snapshot` cost provenance and cannot establish fresh usage or USD. Gateway-only
+models have `unknown` provenance until billing evidence is available.
 
 The SQLite activity projection is the only derivation of steps, L0 labels,
 context, StepFacts, cost components and prices. Analytics is a pure projection of

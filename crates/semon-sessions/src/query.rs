@@ -727,8 +727,8 @@ impl View {
         if let Some(evidence) = session.get("turn_lifecycle") {
             row["turn_lifecycle"] = evidence.clone();
         }
-        if let Some(evidence) = session.get("claude_usage") {
-            row["claude_usage"] = evidence.clone();
+        if let Some(evidence) = session.get("usage") {
+            row["usage"] = evidence.clone();
         }
         if let Some(signals) = session.get("signals") {
             row["signals"] = signals.clone();
@@ -748,8 +748,8 @@ fn session_fields(session: &crate::model::Session, machine: Option<&str>) -> Val
     if let Some(evidence) = &session.copilot {
         row["copilot"] = json!(evidence);
     }
-    if let Some(evidence) = &session.claude_usage {
-        row["claude_usage"] = json!(evidence);
+    if let Some(evidence) = &session.usage {
+        row["usage"] = json!(evidence);
     }
     if !session.signals.is_empty() {
         row["signals"] = json!(session.signals);

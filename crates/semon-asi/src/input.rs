@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version of the pure ASI projection. It is independent of the native Event
 /// Index parser/cache version.
-pub const ANALYTICS_TRANSFORM_VERSION: u32 = 1;
+pub const ANALYTICS_TRANSFORM_VERSION: u32 = 2;
 
 /// Shared repository key when no remote or origin-owned local identity is known.
 pub const UNKNOWN_REPO_KEY: &str = "unknown";
@@ -131,11 +131,25 @@ pub struct AdmittedSession {
     pub session: Session,
     pub steps: Vec<Step>,
     pub compactions: Vec<Compaction>,
-    /// Every projected step carried a complete StepFacts usage observation.
-    pub usage_complete: bool,
+    pub step_coverage: StepCoverage,
+    pub usage_coverage: UsageCoverage,
     /// The exact historical price rows referenced by `steps`. It is empty only
     /// when every step is unpriced; callers must not fill it from current rates.
     pub prices: Vec<Price>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepCoverage {
+    Response,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsageCoverage {
+    Response,
+    Snapshot,
+    Partial,
+    None,
 }
 
 /// Producer evidence recorded in the admitted SQLite snapshot. Unknown derivation
@@ -281,6 +295,7 @@ pub struct BillingUsage {
 pub enum UsageOwner {
     Exclusive,
     Copied,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -67,11 +67,14 @@ activity identifies that exact tool and start time; after that observation ends,
 the same pending recipe reports a result not recorded. Retained history cannot
 gain runtime authority from this display metadata.
 
-Exact selected details retain Claude copied-usage evidence and Copilot shutdown
-usage with its native observation. These recorded facts remain bound to the
-header's source generation and do not enter list pages. Unknown original usage
-ownership, approvals and lineage remain unknown; a usage snapshot grants no
-runtime or control authority.
+The Index records one usage observation contract for response usage and
+cumulative snapshots. It preserves native usage identity, record identity,
+acceptance, timestamp, billing dimensions, coverage and cost provenance. The
+warehouse resolves copied ownership using authorized sources at read time.
+Selected details expose `usage` with observed, exclusive and fresh totals and
+copy evidence when available. A session snapshot supplies observed totals and
+leaves fresh usage and USD null. Usage evidence remains bound to the source
+generation and grants no runtime or control authority.
 
 Current list indexes are partial B-trees (`WHERE lifecycle='current'`) ordered
 by their filter and keyset keys. Retained rows do not enter those trees.

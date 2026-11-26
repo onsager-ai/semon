@@ -210,7 +210,7 @@ fn append_rates(
 // Bump when model alias or provider resolution rules change.
 const LOOKUP_RULES_VERSION: u32 = 3;
 
-pub(super) fn gateway_billing_only(id: &str) -> bool {
+pub(crate) fn gateway_billing_only(id: &str) -> bool {
     id.starts_with("onsager/codex/gpt-6")
 }
 

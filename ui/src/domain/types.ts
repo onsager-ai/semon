@@ -16,8 +16,10 @@ export interface ModelCost {
   tokens?: Usage;
   usd_by_kind?: Usage;
 }
+export type CostProvenance = 'list_priced' | 'gateway_billed' | 'snapshot' | 'unknown';
 export interface Cost {
   usd: number | null;
+  provenance?: CostProvenance;
   unpriced_models?: string[];
   split_unknown_messages?: number;
   by_model?: Record<string, ModelCost>;
@@ -50,9 +52,12 @@ export interface TokenObservation {
   reasoning_output: number;
   total: number;
 }
-export interface ClaudeUsageEvidence {
-  observed: TokenObservation;
-  exclusive: TokenObservation;
+export interface UsageEvidence {
+  coverage: 'response' | 'snapshot' | 'partial' | 'none';
+  ownership: 'exclusive' | 'copied' | 'unknown';
+  cost_provenance: CostProvenance;
+  observed: TokenObservation | null;
+  exclusive: TokenObservation | null;
   shared: Record<string, TokenObservation>;
   shared_models: Record<string, string | null>;
   fresh: TokenObservation | null;
@@ -119,7 +124,7 @@ export interface Session {
   waiting_for?: string;
   tokens?: number[];
   tokens_by_model?: Record<string, Usage>;
-  claude_usage?: ClaudeUsageEvidence;
+  usage?: UsageEvidence;
   copilot?: CopilotEvidence;
   cost?: Cost;
   activity?: [string, string, number, number?];

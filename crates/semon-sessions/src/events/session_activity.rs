@@ -156,6 +156,39 @@ pub(crate) enum Usage {
     Codex(CodexUsageEvent),
 }
 
+impl Usage {
+    pub(crate) fn dimensions(
+        &self,
+    ) -> (
+        &'static str,
+        Option<&str>,
+        &super::ModelTokens,
+        super::BillingUsage,
+    ) {
+        match self {
+            Self::Claude(usage) => (
+                "anthropic",
+                usage.model.as_deref(),
+                &usage.model_tokens,
+                usage.billing.clone(),
+            ),
+            Self::Codex(event) => (
+                "openai",
+                Some(&event.model),
+                &event.tokens,
+                super::BillingUsage {
+                    input: event.tokens.input,
+                    output: event.tokens.output,
+                    cache_read: event.tokens.cache_read,
+                    prompt_size: event.tokens.input.saturating_add(event.tokens.cache_read),
+                    timestamp: event.timestamp,
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+}
+
 impl UsageStep {
     pub(crate) fn claude(
         message_id: String,
@@ -553,24 +586,10 @@ pub(crate) fn derive(
         .into_values()
         .map(|row| {
             let mut cost = pricing::CostBuild::with_table(table.clone());
-            let (model, tokens, timestamp) = match &row.usage {
-                Usage::Claude(usage) => {
-                    cost.message(usage);
-                    (
-                        usage.model.clone(),
-                        usage.model_tokens.clone(),
-                        usage.billing.timestamp,
-                    )
-                }
-                Usage::Codex(event) => {
-                    cost.codex(event);
-                    (
-                        Some(event.model.clone()),
-                        event.tokens.clone(),
-                        event.timestamp,
-                    )
-                }
-            };
+            let (provider, model, tokens, billing) = row.usage.dimensions();
+            cost.observe(provider, model, &billing);
+            let (model, tokens, timestamp) =
+                (model.map(str::to_owned), tokens.clone(), billing.timestamp);
             let cost = cost.finish_step();
             let context_tokens = tokens
                 .input

@@ -249,7 +249,7 @@ establish copying. Multiple streamed blocks of one API request still count once.
 When exact records appear in different modeled Claude sessions on one machine,
 Semon excludes their shared usage from the primary token and model-token fields.
 Those fields describe **exclusive observations**, not a complete fresh-work total.
-Optional `claude_usage` evidence preserves `observed`, `exclusive`, shared usage
+Optional `usage` evidence preserves `observed`, `exclusive`, shared usage
 under stable hashed request groups, and its recorded model attribution. `fresh`
 and `shared_owner` are explicitly null: the recordings do not establish original
 branch ownership. Do not add session observations to obtain fresh usage, assign

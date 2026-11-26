@@ -9,7 +9,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
 /// Bumped on any change to a table, column, type, class or enum set. A store whose
 /// manifest carries another version is refused (asi-store.md, Version bumps).
-pub const ASI_SCHEMA_VERSION: u32 = 5;
+pub const ASI_SCHEMA_VERSION: u32 = 6;
 
 /// Name of the generation column the writer appends to every file.
 pub const GEN_COLUMN: &str = "_gen";
@@ -237,7 +237,7 @@ const fn path_opt(name: &'static str, doc: &'static str) -> Column {
     col(name, Type::Text, true, Class::Path, doc)
 }
 
-pub(crate) const USAGE_OWNER: &[&str] = &["exclusive", "copied"];
+pub(crate) const USAGE_OWNER: &[&str] = &["exclusive", "copied", "unknown"];
 pub(crate) const CONTEXT_BAND: &[&str] = &["under_50k", "50k_to_150k", "over_150k"];
 pub(crate) const PRICE_STATUS: &[&str] = &["priced", "unpriced"];
 pub(crate) const ACTIVITY: &[&str] = &[
@@ -469,27 +469,27 @@ pub static FACT_SESSION: Table = Table {
         int_key_opt("date_key", "UTC start date as yyyymmdd; key into dim_date."),
         ts_opt("started_at", "Start of the session, when known."),
         ts_opt("ended_at", "End of the session; null while it runs."),
-        num(
+        num_opt(
             "input_tokens",
             "tokens",
             "Uncached input tokens over exclusive usage.",
         ),
-        num(
+        num_opt(
             "output_tokens",
             "tokens",
             "Output tokens over exclusive usage.",
         ),
-        num(
+        num_opt(
             "cache_read_tokens",
             "tokens",
             "Cache-read tokens over exclusive usage.",
         ),
-        num(
+        num_opt(
             "cache_write_5m_tokens",
             "tokens",
             "5-minute cache-write tokens, exclusive usage.",
         ),
-        num(
+        num_opt(
             "cache_write_1h_tokens",
             "tokens",
             "1-hour cache-write tokens, exclusive usage.",
@@ -499,7 +499,7 @@ pub static FACT_SESSION: Table = Table {
             "tokens",
             "Reasoning tokens over exclusive usage, when complete.",
         ),
-        num(
+        num_opt(
             "web_search_requests",
             "requests",
             "Web-search requests over exclusive usage.",
@@ -522,7 +522,16 @@ pub static FACT_SESSION: Table = Table {
         ),
         num("step_count", "steps", "Steps in the session."),
         num("failure_count", "steps", "Steps with ok = false."),
-        flag("usage_complete", "True when every step reported its usage."),
+        en(
+            "step_coverage",
+            &["response", "none"],
+            "Whether response steps are available.",
+        ),
+        en(
+            "usage_coverage",
+            &["response", "snapshot", "partial", "none"],
+            "Grain and completeness of observed usage.",
+        ),
         en(
             "source_status",
             SOURCE_STATUS,

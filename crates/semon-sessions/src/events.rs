@@ -7521,10 +7521,21 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
     };
     match field(record, "type").unwrap_or("") {
         "session.start" => {
-            if offset == 0
-                && let Some(id) = field(data, "sessionId")
-            {
-                summary.warehouse_fact(offset, 0, || Fact::SessionId(id.to_owned()));
+            if offset == 0 {
+                summary.warehouse_fact(offset, 0, || {
+                    Fact::usage(warehouse::UsageObservation {
+                        identity: Some(identity.to_owned()),
+                        record_id: Some(identity.to_owned()),
+                        timestamp: time,
+                        measurement: warehouse::UsageMeasurement::SessionSnapshot {
+                            usage: None,
+                            observed: false,
+                        },
+                    })
+                });
+                if let Some(id) = field(data, "sessionId") {
+                    summary.warehouse_fact(offset, 0, || Fact::SessionId(id.to_owned()));
+                }
             }
             summary.cwd = data
                 .get("context")
@@ -7712,9 +7723,10 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                         identity: Some(identity.to_owned()),
                         record_id: Some(identity.to_owned()),
                         timestamp: time,
-                        measurement: warehouse::UsageMeasurement::SessionSnapshot(
-                            index.usage.clone(),
-                        ),
+                        measurement: warehouse::UsageMeasurement::SessionSnapshot {
+                            usage: index.usage.clone(),
+                            observed: true,
+                        },
                     }),
                 );
             }

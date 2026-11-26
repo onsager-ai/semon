@@ -118,7 +118,8 @@ pub use native_resolution::{
 pub use session_bookmark::session_bookmark;
 mod claude_usage;
 pub mod copilot;
-pub use claude_usage::ClaudeUsageEvidence;
+pub use claude_usage::{UsageCoverage, UsageEvidence, UsageOwnership};
+pub use pricing::CostProvenance;
 pub mod archive;
 mod attachments;
 pub mod comparison;
@@ -348,7 +349,7 @@ pub struct Node {
     pub last_activity_age_seconds: Option<u64>,
     pub tokens: Tokens,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude_usage: Option<ClaudeUsageEvidence>,
+    pub usage: Option<UsageEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copilot: Option<copilot::CopilotEvidence>,
     pub malformed_lines: u64,
@@ -381,7 +382,7 @@ impl Node {
             last_activity: None,
             last_activity_age_seconds: None,
             tokens: Tokens::default(),
-            claude_usage: None,
+            usage: None,
             copilot: None,
             malformed_lines: 0,
             open_tools: Vec::new(),
@@ -1287,6 +1288,9 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
                 .into_iter()
                 .collect();
             node.copilot = summary.copilot.as_ref().map(|index| index.evidence());
+            node.usage = summary.copilot.as_ref().map(|index| {
+                UsageEvidence::snapshot(index.usage.as_ref(), index.usage_source.is_some())
+            });
             node.first_activity = summary
                 .copilot
                 .as_ref()
@@ -1471,7 +1475,11 @@ pub fn render_text(nodes: &[Node]) -> String {
             unlinked,
             malformed
         );
-        if node.claude_usage.is_some() {
+        if node
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.ownership == UsageOwnership::Copied)
+        {
             line.push_str(" usage=exclusive-observations fresh=unknown copied-owner=unknown");
         }
         if let Some(agent_type) = &node.agent_type {
@@ -1545,8 +1553,9 @@ fn apply_claude_usage(
                 &ids,
             )
         {
-            evidence.observed = summary.tokens("claude");
-            evidence.exclusive = evidence.observed.clone();
+            let observed = summary.tokens("claude");
+            let mut exclusive = observed.clone();
+            evidence.observed = Some(observed);
             let subtract = |total: u64, used: u64| {
                 total.checked_sub(used).ok_or_else(|| {
                     io::Error::new(
@@ -1556,16 +1565,16 @@ fn apply_claude_usage(
                 })
             };
             for used in evidence.shared.values() {
-                evidence.exclusive.input = subtract(evidence.exclusive.input, used.input)?;
-                evidence.exclusive.cached_input =
-                    subtract(evidence.exclusive.cached_input, used.cached_input)?;
-                evidence.exclusive.output = subtract(evidence.exclusive.output, used.output)?;
-                evidence.exclusive.reasoning_output =
-                    subtract(evidence.exclusive.reasoning_output, used.reasoning_output)?;
-                evidence.exclusive.total = subtract(evidence.exclusive.total, used.total)?;
+                exclusive.input = subtract(exclusive.input, used.input)?;
+                exclusive.cached_input = subtract(exclusive.cached_input, used.cached_input)?;
+                exclusive.output = subtract(exclusive.output, used.output)?;
+                exclusive.reasoning_output =
+                    subtract(exclusive.reasoning_output, used.reasoning_output)?;
+                exclusive.total = subtract(exclusive.total, used.total)?;
             }
-            node.tokens = evidence.exclusive.clone();
-            node.claude_usage = Some(evidence);
+            node.tokens = exclusive.clone();
+            evidence.exclusive = Some(exclusive);
+            node.usage = Some(evidence);
         }
     }
     Ok(())

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 pub(crate) mod runtime;
-pub(crate) use runtime::{EffectiveTable, snapshot};
+pub(crate) use runtime::{EffectiveTable, gateway_billing_only, snapshot};
 pub use runtime::{initialize, initialize_default, start_default_refresh, start_refresh};
 
 use serde::{Deserialize, Serialize};
@@ -172,11 +172,22 @@ pub(crate) struct ModelCost {
     pub(crate) usd_by_kind: BTreeMap<&'static str, f64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostProvenance {
+    ListPriced,
+    GatewayBilled,
+    Snapshot,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Cost {
     #[serde(default)]
     pub(crate) pricing_fingerprint: String,
     pub(crate) usd: Option<f64>,
+    pub(crate) provenance: CostProvenance,
     pub(crate) unpriced_models: Vec<String>,
     #[serde(default)]
     pub(crate) priced_tokens: u64,
@@ -215,6 +226,7 @@ impl Default for Cost {
         Self {
             pricing_fingerprint: snapshot().fingerprint.clone(),
             usd: Some(0.0),
+            provenance: CostProvenance::Unknown,
             unpriced_models: Vec::new(),
             priced_tokens: 0,
             unpriced_tokens: 0,
@@ -304,16 +316,20 @@ impl CostBuild {
         }
     }
 
-    pub(crate) fn message(&mut self, message: &MessageUsage) {
-        let model = message.model.as_deref().unwrap_or("unknown");
-        let price = self.lookup("anthropic", model);
+    pub(crate) fn observe(&mut self, provider: &str, model: Option<&str>, billing: &BillingUsage) {
+        let model = model.unwrap_or("unknown");
+        let price = self.lookup(provider, model);
         self.add(
             model,
-            &message.billing,
-            message.billing.timestamp,
-            message.billing.split_unknown,
+            billing,
+            billing.timestamp,
+            billing.split_unknown,
             price,
         );
+    }
+
+    pub(crate) fn message(&mut self, message: &MessageUsage) {
+        self.observe("anthropic", message.model.as_deref(), &message.billing);
     }
     pub(crate) fn codex(&mut self, event: &CodexUsageEvent) {
         let billing = BillingUsage {
@@ -324,8 +340,7 @@ impl CostBuild {
             timestamp: event.timestamp,
             ..Default::default()
         };
-        let price = self.lookup("openai", &event.model);
-        self.add(&event.model, &billing, event.timestamp, false, price);
+        self.observe("openai", Some(&event.model), &billing);
     }
 
     pub(crate) fn merge(&mut self, other: &Self) {
@@ -546,6 +561,7 @@ impl CostBuild {
     }
 
     pub(crate) fn finish(self) -> Cost {
+        let has_observations = !self.models.is_empty();
         let by_model = self
             .models
             .into_iter()
@@ -566,6 +582,11 @@ impl CostBuild {
         Cost {
             pricing_fingerprint: self.pricing_fingerprint,
             usd: (!self.has_unpriced).then_some(self.usd),
+            provenance: if self.has_unpriced || !has_observations {
+                CostProvenance::Unknown
+            } else {
+                CostProvenance::ListPriced
+            },
             unpriced_models: self.unpriced_models.into_iter().collect(),
             priced_tokens: self.priced_tokens,
             unpriced_tokens: self.unpriced_tokens,
