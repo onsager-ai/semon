@@ -40,8 +40,7 @@ export interface Chart {
     key: string;
     x: number;
     width: number;
-    claude: number;
-    codex: number;
+    segments: readonly { id: string; color?: string; y: number; height: number }[];
     barX: number;
     barWidth: number;
     active: boolean;
@@ -51,7 +50,7 @@ export interface Chart {
     value: string;
   }[];
   ago: string;
-  legend: readonly { id: string; label: string; mark?: HarnessMark }[];
+  legend: readonly { id: string; label: string; color?: string; mark?: HarnessMark }[];
   missing?: string;
 }
 export interface Breakdown {
@@ -273,26 +272,17 @@ export function renderAnalyticsScreen(
                       ))}
                       {chart.bins.map((bin) => (
                         <>
-                          {bin.claude > 0 && (
+                          {bin.segments.map((segment) => (
                             <rect
-                              key={'claude' + bin.key}
+                              key={segment.id}
                               x={bin.barX}
-                              y={151 - bin.claude}
+                              y={segment.y}
                               width={bin.barWidth}
-                              height={bin.claude}
-                              class="cost-claude"
+                              height={segment.height}
+                              class={'chart-segment' + (segment.color ? ' ' + segment.color : '')}
+                              data-harness={segment.id}
                             />
-                          )}
-                          {bin.codex > 0 && (
-                            <rect
-                              key={'codex' + bin.key}
-                              x={bin.barX}
-                              y={151 - bin.claude - bin.codex}
-                              width={bin.barWidth}
-                              height={bin.codex}
-                              class="cost-codex"
-                            />
-                          )}
+                          ))}
                           <rect
                             key={'hit' + bin.key}
                             x={bin.x}
@@ -327,7 +317,7 @@ export function renderAnalyticsScreen(
                   <div class="analytics-legend">
                     {chart.legend.map((item) => (
                       <span key={item.id}>
-                        <i class={'legend-' + item.id} />
+                        <i class={item.color} />
                         {item.mark && <Harness mark={item.mark} lead={false} />}
                         {item.label}
                       </span>
@@ -402,7 +392,7 @@ export function renderAnalyticsScreen(
                         <span class="row-track">
                           <i
                             class={
-                              'row-bar ' + width(row.width) + (row.color ? ' bar-' + row.color : '')
+                              'row-bar ' + width(row.width) + (row.color ? ' ' + row.color : '')
                             }
                           />
                         </span>

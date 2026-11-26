@@ -70,8 +70,7 @@ const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 
-const INSTRUCTIONS: &str = "Semon reads the local Claude Code and Codex session logs, read-only. \
-    list_sessions and stalls give facts about sessions (state, last log line, process, parent and children); \
+const INSTRUCTIONS: &str = "list_sessions and stalls give facts about sessions (state, last log line, process, parent and children); \
     list_sessions and get_session include compact activity analytics with measured waits, exclusive waste costs, \
     pricing and timing coverage and priced component totals; \
     get_session adds its turns and handoffs; get_session_activity pages typed activity steps and change facts or reads a bounded timeline preview, and a refusal names its error.reason; read_transcript reads what a selected session said and accepts an exact generation-qualified activity step anchor. \
@@ -184,7 +183,10 @@ fn initialize(params: &Value, has_resources: bool) -> Value {
         "protocolVersion": version,
         "capabilities": capabilities,
         "serverInfo": {"name": "semon", "version": env!("CARGO_PKG_VERSION")},
-        "instructions": INSTRUCTIONS,
+        "instructions": format!(
+            "Semon reads local session logs in read-only mode for {}. {INSTRUCTIONS}",
+            crate::harness::supported_harnesses().map(|harness| harness.name).collect::<Vec<_>>().join(", ")
+        ),
     })
 }
 

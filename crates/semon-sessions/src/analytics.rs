@@ -606,8 +606,7 @@ fn period(rows: &[Live], from: i64, to: i64, days: i64) -> (Value, BTreeMap<Stri
 /// with a cost on it.
 #[derive(Default)]
 struct Day<'a> {
-    claude: f64,
-    codex: f64,
+    usd_by_harness: BTreeMap<&'a str, f64>,
     sessions: Vec<(f64, &'a Live<'a>)>,
 }
 
@@ -752,16 +751,14 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
     let columns: Vec<Value> = (0..count)
         .map(|index| {
             let (a, b) = (from + index * width, from + (index + 1) * width);
-            let (mut claude, mut codex) = (0, 0);
+            let mut ms_by_harness = BTreeMap::<_, i64>::new();
             let mut busy: Vec<(i64, &Live)> = Vec::new();
             for row in &rows {
                 let ms = row.busy_in(a, b);
                 if ms > 0 {
-                    match row.activity().harness.as_str() {
-                        "claude" => claude += ms,
-                        "codex" => codex += ms,
-                        _ => {}
-                    }
+                    *ms_by_harness
+                        .entry(row.activity().harness.as_str())
+                        .or_default() += ms;
                     busy.push((ms, row));
                 }
             }
@@ -776,7 +773,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
                 })
                 .collect();
             json!({
-                "from": a, "to": b, "claude_ms": claude, "codex_ms": codex,
+                "from": a, "to": b, "ms_by_harness": ms_by_harness,
                 "sessions": sessions, "more": more,
             })
         })
@@ -795,11 +792,9 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
                 }
                 unpriced.extend(row.activity().unpriced_models.iter().cloned());
                 let bin = &mut bins[usize::try_from((day - first) / DAY_MS).unwrap_or(0)];
-                match row.activity().harness.as_str() {
-                    "claude" => bin.claude += usd,
-                    "codex" => bin.codex += usd,
-                    _ => {}
-                }
+                *bin.usd_by_harness
+                    .entry(row.activity().harness.as_str())
+                    .or_default() += usd;
                 bin.sessions.push((*usd, row));
             }
         }
@@ -808,8 +803,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
             .enumerate()
             .map(|(index, bin)| {
                 let Day {
-                    claude,
-                    codex,
+                    usd_by_harness,
                     mut sessions,
                 } = bin;
                 by_value(&mut sessions);
@@ -828,7 +822,7 @@ pub(crate) fn answer(rows: &[Row], request: &Request, now: i64, version: &str) -
                     })
                     .collect();
                 json!({
-                    "from": day, "to": day + DAY_MS, "claude_usd": claude, "codex_usd": codex,
+                    "from": day, "to": day + DAY_MS, "usd_by_harness": usd_by_harness,
                     "sessions": sessions, "more": more,
                 })
             })
@@ -1146,7 +1140,8 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|bin| bin["claude_usd"].as_f64().unwrap() + bin["codex_usd"].as_f64().unwrap())
+            .flat_map(|bin| bin["usd_by_harness"].as_object().unwrap().values())
+            .map(|usd| usd.as_f64().unwrap())
             .sum();
         assert_eq!(spent, 6.0);
         // The chart's columns: 24, 28 and 30, adding up to the headline.
@@ -1155,7 +1150,8 @@ mod tests {
             assert_eq!(columns.len(), count);
             let busy: i64 = columns
                 .iter()
-                .map(|c| c["claude_ms"].as_i64().unwrap() + c["codex_ms"].as_i64().unwrap())
+                .flat_map(|c| c["ms_by_harness"].as_object().unwrap().values())
+                .map(|ms| ms.as_i64().unwrap())
                 .sum();
             assert_eq!(busy, result["current"]["agent_ms"].as_i64().unwrap());
         }
@@ -1179,6 +1175,35 @@ mod tests {
         assert_eq!(repos, [&json!("atlas"), &json!("harbor"), &Value::Null]);
         assert_eq!(week["facets"]["harness"], json!(["claude", "codex"]));
         assert_eq!(day["facets"]["harness"], json!(["claude"]));
+    }
+
+    #[test]
+    fn chart_bins_include_copilot_activity_and_cost_under_its_harness_id() {
+        let mut activity = fixture();
+        let mut copilot = session("copilot", "copilot", None);
+        copilot.start = NOW - 3 * HOUR;
+        copilot.busy = vec![(NOW - 3 * HOUR, NOW - 2 * HOUR)];
+        // Model a priced contribution to exercise the series contract. Native
+        // Copilot pricing coverage is handled separately.
+        copilot.cost_by_day = vec![(day(NOW), 1.25)];
+        activity.insert("copilot".into(), copilot);
+        let week = at("range=7d", &activity);
+        let copilot_ms: i64 = week["agents"]["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|bin| bin["ms_by_harness"]["copilot"].as_i64())
+            .sum();
+        assert_eq!(copilot_ms, HOUR);
+        assert_eq!(
+            week["cost"]["days"][6]["usd_by_harness"],
+            json!({"claude": 4.0, "copilot": 1.25})
+        );
+        let filtered = at("range=7d&harness=copilot", &activity);
+        assert_eq!(
+            filtered["cost"]["days"][6]["usd_by_harness"],
+            json!({"copilot": 1.25})
+        );
     }
 
     #[test]
@@ -1297,7 +1322,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|bin| bin["claude_usd"].as_f64().unwrap())
+            .map(|bin| bin["usd_by_harness"]["claude"].as_f64().unwrap_or(0.0))
             .collect();
         assert_eq!(columns, [0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 3.0]);
         assert_eq!(week["cost"]["days"][6]["from"], day(NOW));

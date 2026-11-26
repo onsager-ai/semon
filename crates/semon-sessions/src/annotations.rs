@@ -61,7 +61,7 @@ impl Record {
             }
         }
         if self.v != 1
-            || !matches!(self.harness.as_str(), "claude" | "codex")
+            || !crate::harness::supports_native_sessions(&self.harness)
             || self.native_id.is_empty()
             || self.system.is_empty()
             || self.ticket.is_empty()
@@ -229,11 +229,21 @@ mod tests {
         assert_eq!(read(format!("{unknown}\n").as_bytes()).status.rejected, 1);
     }
     #[test]
+    fn accepts_copilot_annotations() {
+        let mut value = record();
+        value["harness"] = json!("copilot");
+        let records = read(format!("{value}\n").as_bytes());
+        assert!(records.get("copilot", "native").is_some());
+        assert_eq!(records.status.rejected, 0);
+    }
+
+    #[test]
     fn rejects_invalid_values() {
         for (key, value) in [
             ("v", json!(2)),
             ("v", json!(1.0)),
-            ("harness", json!("copilot")),
+            ("harness", json!("opencode")),
+            ("harness", json!("unknown")),
             ("native_id", json!("")),
             ("system", json!("")),
             ("ticket", json!("")),

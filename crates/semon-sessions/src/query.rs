@@ -300,7 +300,7 @@ pub fn query_tools() -> Vec<QueryTool> {
                     "repo": {"type": "string", "description": "Only sessions in this repository (its directory's name)."},
                     "since": since_property("Only sessions with a log line since then:"),
                     "parent": id_property("Only the sessions this session spawned."),
-                    "harness": {"type": "string", "enum": ["claude", "codex"], "description": "Only this harness's sessions."},
+                    "harness": {"type": "string", "enum": crate::harness::supported_harnesses().map(|harness| harness.id).collect::<Vec<_>>(), "description": "Only this harness's sessions."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": LIST_MAX, "default": LIST_LIMIT, "description": "At most this many sessions."},
                 },
                 "additionalProperties": false,

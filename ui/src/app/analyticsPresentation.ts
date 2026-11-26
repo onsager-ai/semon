@@ -1,5 +1,5 @@
 import { countText, hLabel, niceStep, shortModel, timeText } from '../domain/format';
-import { HARNESS, HARNESS_SHORT } from './registry';
+import { HARNESS, HARNESS_SHORT, HARNESSES } from './registry';
 import {
   renderAnalyticsScreen,
   type AnalyticsSnapshot,
@@ -18,6 +18,7 @@ const HOUR = 3600000;
 const hoursText = (ms: number) => (ms / HOUR).toFixed(1) + ' h';
 const nameOfSid = (data: AnalyticsData, sid: string) => data.sessions[sid]?.name ?? sid;
 const harnessOfSid = (data: AnalyticsData, sid: string) => data.sessions[sid]?.harness ?? '';
+const harnessStyle = (id: string) => (Object.hasOwn(HARNESSES, id) ? HARNESSES[id] : undefined);
 export interface AnalyticsPresentation {
   range: number;
   measure: string;
@@ -127,20 +128,32 @@ export function renderAnalyticsPresentation(
       ? A.cost!.days.map((d) => ({
           a: d.from,
           b: d.to,
-          claude: d.claude_usd,
-          codex: d.codex_usd,
+          byHarness: d.usd_by_harness,
           sessions: d.sessions,
           more: d.more,
         }))
       : A.agents.columns.map((c) => ({
           a: c.from,
           b: c.to,
-          claude: c.claude_ms / HOUR,
-          codex: c.codex_ms / HOUR,
+          byHarness: c.ms_by_harness,
           sessions: c.sessions,
           more: c.more,
         }));
-    const most = Math.max(0, ...raw.map((b) => b.claude + b.codex)),
+    const returned = new Set(raw.flatMap((bin) => Object.keys(bin.byHarness)));
+    const series = [
+      ...Object.keys(HARNESSES).filter((id) => returned.delete(id)),
+      ...[...returned].sort(),
+    ].map((id) => ({
+      id,
+      label: harnessStyle(id)?.short ?? id,
+      color: harnessStyle(id)?.chartClass,
+      mark: host.mark(id),
+    }));
+    const unit = costMode ? 1 : HOUR;
+    const totals = raw.map(
+      (bin) => Object.values(bin.byHarness).reduce((sum, value) => sum + value, 0) / unit,
+    );
+    const most = Math.max(0, ...totals),
       stepY = niceStep(most || 1),
       max = costMode ? Math.max(0.01, most) : Math.max(stepY, Math.ceil(most / stepY) * stepY);
     const grid = [];
@@ -154,18 +167,25 @@ export function renderAnalyticsPresentation(
       barWidth = Math.max(2, step * 0.64);
     const bins = raw.map((bin, i) => {
       const id = key + ':' + i,
-        total = bin.claude + bin.codex,
+        total = totals[i],
         when = host.clock(bin.a) + '–' + host.clock(bin.b),
         tip = when + ': ' + hLabel(total);
       slices.set(id, { bin, costMode });
+      let y = 151;
+      const segments = series.flatMap(({ id, color }) => {
+        const value = Object.hasOwn(bin.byHarness, id) ? bin.byHarness[id] : 0;
+        if (value <= 0) return [];
+        const height = (139 * value) / unit / max;
+        y -= height;
+        return [{ id, color, y, height }];
+      });
       return {
         key: id,
         x: left + i * step,
         width: step,
         barX: left + i * step + (step - barWidth) / 2,
         barWidth,
-        claude: (139 * bin.claude) / max,
-        codex: (139 * bin.codex) / max,
+        segments,
         active: costMode ? !!bin.sessions.length : total > 0,
         tip: costMode ? undefined : tip,
         label: costMode
@@ -192,10 +212,7 @@ export function renderAnalyticsPresentation(
         : 'Agent-hours ' + A.agents.unit + ' over the selected range, stacked by harness',
       role: costMode ? 'img' : 'group',
       ago: A.days === 1 ? '24 h ago' : A.days + ' d ago',
-      legend: [
-        ['claude', 'Claude'],
-        ['codex', 'Codex'],
-      ].map(([id, label]) => ({ id, label, mark: host.mark(id) })),
+      legend: series,
       missing:
         costMode && A.cost!.incomplete_usage
           ? 'Copied usage is omitted from bars. Its original owner and the full cost are unknown.'
@@ -368,8 +385,7 @@ export function renderAnalyticsPresentation(
           name: labelFor(keyFor(g)),
           count: g.sessions + (g.sessions === 1 ? ' session' : ' sessions'),
           width: widthOf(selected(g), max),
-          color:
-            key === 'harness' ? (keyFor(g).startsWith('claude') ? 'claude' : 'codex') : undefined,
+          color: key === 'harness' && g.harness ? harnessStyle(g.harness)?.chartClass : undefined,
           hours: hoursText(g.ms),
           cost: g.incomplete_usage || g.unpriced_models.length ? '—' : host.money(g.usd),
           missing: g.incomplete_usage

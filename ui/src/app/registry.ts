@@ -1,25 +1,29 @@
 export const HARNESSES: Record<
   string,
-  { name: string; short: string; icon: { light: string; dark: string } }
+  { name: string; short: string; icon: { light: string; dark: string }; chartClass: string }
 > = {
   claude: {
     name: 'Claude Code',
     short: 'Claude',
+    chartClass: 'h-claude',
     icon: { light: '/harness/claude-code.svg', dark: '/harness/claude-code.svg' },
   },
   codex: {
     name: 'Codex',
     short: 'Codex',
+    chartClass: 'h-codex',
     icon: { light: '/harness/codex-black.svg', dark: '/harness/codex.svg' },
   },
   copilot: {
     name: 'GitHub Copilot CLI',
     short: 'Copilot',
+    chartClass: 'h-copilot',
     icon: { light: '/harness/copilot.svg', dark: '/harness/copilot.svg' },
   },
   opencode: {
     name: 'OpenCode',
     short: 'OpenCode',
+    chartClass: 'h-opencode',
     icon: { light: '/harness/opencode-light.svg', dark: '/harness/opencode-dark.svg' },
   },
 };

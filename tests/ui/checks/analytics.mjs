@@ -99,7 +99,7 @@ export default async function analyticsCheck(browser) {
     record.charts = await page.evaluate(() =>
       [...document.querySelectorAll('.analytics-chart svg')].map((svg) => ({
         label: svg.getAttribute('aria-label'),
-        columns: [...svg.querySelectorAll('rect.cost-claude, rect.cost-codex')]
+        columns: [...svg.querySelectorAll('rect.chart-segment')]
           .map((x) => ({
             width: Number(x.getAttribute('width')),
             height: Number(x.getAttribute('height')),

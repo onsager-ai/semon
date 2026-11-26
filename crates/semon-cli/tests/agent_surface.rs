@@ -126,6 +126,7 @@ impl Home {
         [
             ("--claude-home", "claude"),
             ("--codex-home", "codex"),
+            ("--copilot-home", "copilot"),
             ("--proc-root", "proc"),
             ("--cache", "state/index.json"),
         ]
@@ -741,6 +742,12 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}));
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init["result"]["serverInfo"]["name"], "semon");
+    assert!(
+        init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("GitHub Copilot CLI")
+    );
     assert_eq!(
         init["result"]["capabilities"]["tools"]["listChanged"],
         false
@@ -781,6 +788,10 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "stalls",
     ];
     assert_eq!(names, expected_tools);
+    assert_eq!(
+        tools[0]["inputSchema"]["properties"]["harness"]["enum"],
+        json!(["claude", "codex", "copilot"])
+    );
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
         assert!(
@@ -994,6 +1005,47 @@ fn stream_cards_return_only_latest_well_formed_root_cards() {
         ],
     );
 
+    for role in ["subagent", "guardian_review"] {
+        home.lines(
+            &format!("codex/sessions/2026/09/24/rollout-stream-{role}.jsonl"),
+            &[
+                codex(
+                    0,
+                    "session_meta",
+                    json!({"id":format!("stream-{role}"),"thread_source":role}),
+                ),
+                codex_message(
+                    6,
+                    "assistant",
+                    "output_text",
+                    &card("PRIVATE-CODEX-NONROOT", "0"),
+                ),
+            ],
+        );
+    }
+
+    let copilot = |minute, kind, data| json!({"type":kind,"id":format!("copilot-{minute}"),"timestamp":ts(11,minute),"data":data});
+    home.lines(
+        "copilot/session-state/stream-copilot/events.jsonl",
+        &[
+            copilot(
+                0,
+                "session.start",
+                json!({"version":1,"copilotVersion":"1.0.91","sessionId":"stream-copilot"}),
+            ),
+            copilot(
+                1,
+                "assistant.message",
+                json!({"content":card("Collection", "3 sources")}),
+            ),
+            copilot(
+                2,
+                "user.message",
+                json!({"content":card("PRIVATE-COPILOT-USER", "0")}),
+            ),
+        ],
+    );
+
     let published = home.semon(&["analytics", "materialize"]);
     assert!(
         published.status.success(),
@@ -1009,7 +1061,10 @@ fn stream_cards_return_only_latest_well_formed_root_cards() {
          "number":"2 sources","now":"parked until review","next_owner_decision":"none"},
         {"session_uid":format!("{namespace}/codex/stream-codex"),"title":"Codex Manager","state":"ended","host":"testbox",
          "last_message_at":at(10,4),"card_posted_at":at(10,3),"stream":"Warehouse","lane_goal":"Ship the query",
-         "number":"数".repeat(300),"now":"parked until review","next_owner_decision":"none"}
+         "number":"数".repeat(300),"now":"parked until review","next_owner_decision":"none"},
+        {"session_uid":format!("{namespace}/copilot/stream-copilot"),"title":"Copilot CLI","state":null,"host":"testbox",
+         "last_message_at":at(11,2),"card_posted_at":at(11,1),"stream":"Collection","lane_goal":"Ship the query",
+         "number":"3 sources","now":"parked until review","next_owner_decision":"none"}
     ], "data_notice":semon_sessions::body_query::DATA_NOTICE});
     assert_eq!(home.query(&["query", "stream_cards"]), expected);
     let mut server = Server::start(&home);
