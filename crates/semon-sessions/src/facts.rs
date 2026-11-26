@@ -92,6 +92,9 @@ pub struct Facts {
     /// Name-only observations, qualified by this machine's source and native harness/id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_names: Vec<NativeName>,
+    /// Typed card snapshot included only in opted-in full pushes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_cards: Vec<crate::body_query::StreamCard>,
 }
 
 /// Repository origin, with local remotes explicitly classified as paths.
@@ -365,6 +368,7 @@ fn local_process_facts(
         runs,
         reported_runs: Vec::new(),
         native_names: Vec::new(),
+        stream_cards: Vec::new(),
     }
 }
 

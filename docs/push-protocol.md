@@ -183,6 +183,37 @@ The body is a `Facts` object:
 
 `repo_ids` holds, per working directory inside a repository, a sanitized identity of the repository's `origin` remote, read from the Git config without running git. A `remote` value has credentials, the scheme and a trailing `.git` removed, the host lowercased and the scheme's default port dropped (https 443, http 80, ssh 22, git 9418; every other port is kept); scp-style `git@host:owner/repo` becomes `host/owner/repo`. A `file:` URL or local path remote is `{"kind": "path", "value": "<remote as written>"}`, and a repository with no `origin` is `{"kind": "unknown"}`. A directory outside any repository has no entry.
 
+An origin started with `semon push --stream-cards` may include `stream_cards`
+in its full facts. Use this opt-in only with a receiver authorized to hold the
+cards. It reads the origin's materialized local Index and sends one record for
+the latest valid card in each root Manager session. Each record has exactly
+these fields.
+
+- Card text fields `stream`, `lane_goal`, `number`, `now`, and
+  `next_owner_decision` each hold up to 300 Unicode characters.
+- Session metadata fields `session_uid`, `title`, `state`, `last_message_at`,
+  and `card_posted_at` carry the origin-qualified ASI UID, a title capped at
+  300 Unicode characters, native liveness (`active`, `idle`, `ended`, or
+  null), and nullable UTC millisecond timestamps.
+
+The sender applies its best-effort redaction to card text and titles. No other
+message text enters the facts record. The separate redacted native log transfer
+via `/v1/push/append` continues as described above. Card records with unknown
+fields or text longer than the cap are rejected. Cards are included only in
+full facts, never partial status. Full facts replace the previous card snapshot
+atomically. An omitted `stream_cards` array means the snapshot is empty.
+Facts remain version 2 and the receiver registry remains format 9. Upgrade the
+receiver before enabling the sender opt-in, since an older receiver does not
+retain the card field. The deployment needs no receiver registry reset.
+
+On the receiving host, `semon query stream_cards --received-cards DIR` and
+`semon mcp --received-cards DIR` read cards from paired machines' facts under
+`DIR` and merge them with the origin-local query. Output adds `host` from local
+hostname or from the received machine's display name, hostname, or machine ID.
+When received facts are stale, the query reports `state` as `offline` and keeps
+the timestamps from the last snapshot. The supported body-query surfaces remain
+origin-local.
+
 The answer is 200 when it is stored. A receiver that hasn't had facts for a while may treat the machine as offline: it keeps the same hostname and repositories, but no process as live and no lock as held (`Facts::offline`).
 
 ## How the client uses it

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub(crate) mod stream_cards;
+pub use stream_cards::{StreamCard, collect as collect_stream_cards};
 
 #[cfg(test)]
 mod tests;
@@ -479,7 +480,7 @@ pub fn execute_with_timeout(
     let result = match parsed {
         Parsed::Search(request) => search(&indexes, request, deadline),
         Parsed::View(request) => view(&indexes, request, deadline),
-        Parsed::StreamCards => stream_cards::read(&indexes[0], deadline),
+        Parsed::StreamCards => stream_cards::read(&indexes[0], deadline).map(|cards| json!(cards)),
     };
     if Instant::now() >= deadline {
         return Err(timeout());

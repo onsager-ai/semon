@@ -122,6 +122,39 @@ impl ReceivedMachines {
         &self.dir
     }
 
+    /// Read only the typed cards in current received facts. No receiver Index
+    /// or mirrored native log is opened by this projection.
+    pub(crate) fn stream_cards(&self) -> io::Result<Vec<serde_json::Value>> {
+        let mut rows = Vec::new();
+        for (name, seen) in self.scan(&mut BTreeSet::new())? {
+            let Some(seen) = seen else { continue };
+            if !matches!(seen.facts, FactsSeen::File(..)) {
+                continue;
+            }
+            let path = self.dir.join("machines").join(&name).join("facts.json");
+            let facts = read_facts(&path)?;
+            if facts.version != FACTS_VERSION {
+                continue;
+            }
+            let host = seen.machine.owner_name.as_deref().unwrap_or_else(|| {
+                let hostname = facts.hostname.trim();
+                if is_hostname(hostname) {
+                    hostname
+                } else {
+                    &name
+                }
+            });
+            let offline = seen.stale || facts.offline_since.is_some();
+            rows.extend(
+                facts
+                    .stream_cards
+                    .into_iter()
+                    .map(|card| card.with_host(host, offline)),
+            );
+        }
+        Ok(rows)
+    }
+
     /// One pass over `DIR/machines/`: file types and the facts file's stamp
     /// only, nothing opened.
     pub(crate) fn scan(&self, warned: &mut BTreeSet<String>) -> io::Result<Listing> {

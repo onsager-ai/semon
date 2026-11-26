@@ -47,13 +47,13 @@ Per-task attribution and Worker dispositions are deferred. Large reports can
 hit the existing ASI query budget and are refused as a whole. See the
 [lane health guide](../../../../docs/guides/lane-health-recipe.md).
 
-## Local Manager stream cards
+## Manager stream cards
 
 With `asi-query`, `semon query stream_cards` and the stdio MCP tool
 `stream_cards` with `{}` return the same `cards` array, ordered by `session_uid`.
 Materialize local analytics first. Each row contains `stream`, `lane_goal`,
 `number`, `now`, `next_owner_decision`, `session_uid`, `title`, `state`,
-`last_message_at` and `card_posted_at`. The UID uses the ASI native session
+`last_message_at`, `card_posted_at` and `host`. The UID uses the ASI native session
 address. `active`, `idle`, and `ended` come from qualified native observations.
 When those observations are inconclusive, `state` is null. Times use UTC
 milliseconds and are null when the native messages have no timestamp.
@@ -74,8 +74,12 @@ The fields must be nonempty after trimming. Each field and the title are capped
 at 300 Unicode characters. The newest valid card wins. Claude and Codex root
 sessions with a valid card identify themselves as Managers for this query.
 Child sessions and roots without cards are omitted. Card text is read from
-current origin-local Index evidence under the existing body-read budget. Cross-host
-and archive-only reads are outside this tool's scope.
+current origin-local Index evidence under the existing body-read budget.
+Archive-only local reads are outside this tool's scope. On a receiving host,
+pass `--received-cards DIR` to `semon query stream_cards` or `semon mcp` to
+include the typed snapshots written by opted-in origins. Received timestamps
+and liveness come from the pushed facts, with `offline` substituted for stale
+hosts. [Push protocol](../../../../docs/push-protocol.md#post-urlv1pushfacts)
 
 Cards split across text parts, embedded in surrounding prose, malformed, or
 larger than 8 KiB are skipped. The Index reflects the source it has admitted;

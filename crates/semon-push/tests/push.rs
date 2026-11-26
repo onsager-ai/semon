@@ -612,6 +612,7 @@ impl Home {
             url: url.to_owned(),
             credential: Credential::File(self.root.join("token")),
             sessions: self.options.clone(),
+            stream_cards: false,
             state: self.root.join("state/push.json"),
         }
     }
