@@ -1432,6 +1432,29 @@ impl Query {
         )
     }
 
+    /// Attach native metadata to the card candidates returned by the local body worker.
+    pub fn qualify_stream_cards(&self, indexed: Value) -> Result<Value, Value> {
+        use crate::body_query::DATA_NOTICE;
+
+        let local_only = || json!({"error":{"code":"capability_unavailable","message":"Stream cards require a local SQLite source"}});
+        let [(_, source)] = self.sources.machines.as_slice() else {
+            return Err(local_only());
+        };
+        if self.embedded || source.storage.is_postgres() {
+            return Err(local_only());
+        }
+        let unavailable = || json!({"error":{"code":"store_unavailable","message":"Stream card evidence unavailable"}});
+        let cards: Vec<crate::body_query::stream_cards::Candidate> =
+            serde_json::from_value(indexed).map_err(|_| unavailable())?;
+        let rows = if cards.is_empty() {
+            Vec::new()
+        } else {
+            crate::catalog::warehouse::qualify_stream_cards(&source.options, cards)
+                .map_err(|_| unavailable())?
+        };
+        Ok(json!({"cards": rows, "data_notice": DATA_NOTICE}))
+    }
+
     /// Configured presentation labels, including duplicate-hostname aliases.
     /// This reads machine identity metadata without preparing native sources.
     pub fn source_labels(&self) -> Vec<(String, String)> {

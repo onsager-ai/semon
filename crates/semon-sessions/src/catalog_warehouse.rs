@@ -1442,6 +1442,39 @@ fn focused_metadata(source: &Source<'_>, key: &str) -> Result<Option<(Row, Strin
     Ok(Some((row, witness)))
 }
 
+/// Resolve native title and runtime only for roots that have a card.
+pub(crate) fn qualify_stream_cards(
+    options: &crate::Options,
+    cards: Vec<crate::body_query::stream_cards::Candidate>,
+) -> std::io::Result<Vec<serde_json::Value>> {
+    let path = crate::events::EventCache::path(&options.cache);
+    let namespace = Namespace::new("local").map_err(std::io::Error::other)?;
+    let source = Source::focused(namespace, &path, options, None).map_err(std::io::Error::other)?;
+    let mut rows = Vec::with_capacity(cards.len());
+    for card in cards {
+        let Some((row, _)) =
+            focused_metadata(&source, &card.catalog_key).map_err(std::io::Error::other)?
+        else {
+            continue;
+        };
+        if row.owner != card.owner
+            || row.parent.is_some()
+            || row.kind == "subagent"
+            || row.presentation_kind == Some("Approval review")
+        {
+            continue;
+        }
+        let state = match row.status {
+            Some("work" | "wait") => Some("active"),
+            Some("idle") => Some("idle"),
+            Some("done") => Some("ended"),
+            _ => None,
+        };
+        rows.push(card.finish(&row.title, state));
+    }
+    Ok(rows)
+}
+
 fn read_row(
     db: &Connection,
     source: &Source<'_>,

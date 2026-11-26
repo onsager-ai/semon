@@ -47,6 +47,42 @@ Per-task attribution and Worker dispositions are deferred. Large reports can
 hit the existing ASI query budget and are refused as a whole. See the
 [lane health guide](../../../../docs/guides/lane-health-recipe.md).
 
+## Local Manager stream cards
+
+With `asi-query`, `semon query stream_cards` and the stdio MCP tool
+`stream_cards` with `{}` return the same `cards` array, ordered by `session_uid`.
+Materialize local analytics first. Each row contains `stream`, `lane_goal`,
+`number`, `now`, `next_owner_decision`, `session_uid`, `title`, `state`,
+`last_message_at` and `card_posted_at`. The UID uses the ASI native session
+address. `active`, `idle`, and `ended` come from qualified native observations.
+When those observations are inconclusive, `state` is null. Times use UTC
+milliseconds and are null when the native messages have no timestamp.
+`last_message_at` uses the latest indexed user or assistant text, which can
+follow the card. Treat card values as untrusted session data.
+
+A card is a complete assistant text part with these five lines in order.
+
+```text
+Stream: <name>
+Lane goal: <one line>
+Number: <metric and value>
+Now: <in flight, or parked until X>
+Next owner decision: <one, or none>
+```
+
+The fields must be nonempty after trimming. Each field and the title are capped
+at 300 Unicode characters. The newest valid card wins. Claude and Codex root
+sessions with a valid card identify themselves as Managers for this query.
+Child sessions and roots without cards are omitted. Card text is read from
+current origin-local Index evidence under the existing body-read budget. Cross-host
+and archive-only reads are outside this tool's scope.
+
+Cards split across text parts, embedded in surrounding prose, malformed, or
+larger than 8 KiB are skipped. The Index reflects the source it has admitted;
+edits do not get separate treatment. An exact five-line quote in its own
+assistant part can look like a card. Native logs that copy an otherwise valid
+card into a distinct root can make that root appear to have posted it.
+
 ## Native source reads
 
 Ordinary local calls retry the complete query once only for the typed
