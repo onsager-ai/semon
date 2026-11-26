@@ -4090,7 +4090,7 @@ fn parse(
                 }
                 index.bodies.capture(harness, &record, record_ordinal)?;
                 session_activity::classify::capture(index, harness, &record, line_offset, &line);
-                if let Some(ordinal) = record_ordinal {
+                if let Some(ordinal) = record_ordinal.or(copilot_ordinal) {
                     index.capture_record_identity(&record, line_offset, ordinal, before_signals);
                 }
                 if let Some(batch) = &mut index.warehouse_observations {

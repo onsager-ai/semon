@@ -352,6 +352,13 @@ fn copilot_admission_distinguishes_snapshot_partial_and_missing_usage() {
         assert_eq!(session.step_coverage, StepCoverage::None);
         assert_eq!(session.usage_coverage, usage);
         assert!(session.steps.is_empty());
+        if usage != UsageCoverage::None {
+            assert_eq!(session.compactions.len(), 1);
+            assert_eq!(
+                session.compactions[0].compaction_uid,
+                "fixture/copilot/copilot-fixture/c/compact"
+            );
+        }
         let rows = project(session).unwrap();
         let fact = &rows.tables["fact_session"][0];
         assert_eq!(fact["input_tokens"], Cell::Integer(None));

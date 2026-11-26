@@ -374,7 +374,10 @@ fn query_cutover_rows(home: &fixture::Fixture, cache: &Path) -> serde_json::Valu
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["asi_schema_version"], 5);
+    assert_eq!(
+        value["asi_schema_version"],
+        semon_asi::schema::ASI_SCHEMA_VERSION
+    );
     let rows = value["rows"].as_array().unwrap();
     assert!(
         rows.iter()

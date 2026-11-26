@@ -3128,7 +3128,10 @@ impl<'a> Builder<'a> {
                 };
                 Some(crate::UsageEvidence::aggregate(
                     coverage,
-                    Some(tokens.clone()),
+                    Some(crate::Tokens {
+                        total: tokens.input.saturating_add(tokens.output),
+                        ..tokens.clone()
+                    }),
                     crate::UsageOwnership::Exclusive,
                     cost.provenance,
                 ))
