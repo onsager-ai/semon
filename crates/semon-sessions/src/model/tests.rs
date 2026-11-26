@@ -10012,7 +10012,8 @@ fn native_claude_copied_usage_keeps_observations_without_assigning_owner() {
             .join("claude/projects/fixture/native-claude-child.jsonl"),
     )
     .unwrap();
-    let remaining = home.build_query().sessions["native-claude-parent"]
+    let remaining_query = home.build_query();
+    let remaining = remaining_query.sessions["native-claude-parent"]
         .usage
         .as_ref()
         .unwrap();
