@@ -619,7 +619,7 @@ fn check_schema(tool: &str, schema: &Value) {
     assert_eq!(schema["type"], "object", "{tool}");
     assert_eq!(schema["additionalProperties"], false, "{tool}");
     let properties = schema["properties"].as_object().unwrap();
-    assert!(!properties.is_empty(), "{tool}");
+    assert_eq!(properties.is_empty(), tool == "stream_cards", "{tool}");
     for (name, property) in properties {
         let property = property.as_object().unwrap();
         for key in property.keys() {
