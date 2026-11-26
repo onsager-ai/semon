@@ -1,11 +1,6 @@
 //! Runtime-free Index admission and a full scan of committed warehouse input.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, io, path::PathBuf, sync::Arc};
 
 use sha2::{Digest, Sha256};
 

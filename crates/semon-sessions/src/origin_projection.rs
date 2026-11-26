@@ -662,7 +662,6 @@ fn admitted(
         steps,
         facts,
         prices,
-        snapshot,
     } = evidence;
     if row.key != witness.key || steps.len() != facts.len() {
         return Err(rusqlite::Error::InvalidQuery);

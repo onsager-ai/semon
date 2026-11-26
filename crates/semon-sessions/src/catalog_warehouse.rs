@@ -1069,10 +1069,27 @@ impl<'a> Snapshot<'a> {
         }
         let owners = rows.iter().map(|row| row.owner).collect::<Vec<_>>();
         let status = self.runtime_status(&owners, selected, view.runtime())?;
-        let owners = encode(&owners)?;
+        self.enrich_with_status(rows, &status, selected)
+    }
+
+    fn enrich_with_status(
+        &self,
+        rows: &mut [Row],
+        status: &BTreeMap<i64, &'static str>,
+        include_evidence: bool,
+    ) -> Result<(), ReadError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
         let table = crate::pricing::snapshot();
-        let mut priced =
-            Self::priced_usage(self.transaction, &self.paths, &owners, &table, selected)?;
+        let mut priced = Self::priced_usage(
+            self.transaction,
+            &self.paths,
+            &owners,
+            &table,
+            include_evidence,
+        )?;
         let mut members = self
             .transaction
             .prepare_cached(PAGE_MEMBERS)
@@ -1148,7 +1165,7 @@ impl<'a> Snapshot<'a> {
                     crate::CostProvenance::Unknown
                 };
             }
-            if selected {
+            if include_evidence {
                 row.usage_evidence = usage.summary(cost.provenance);
             }
             row.cost = Some(cost);

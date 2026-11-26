@@ -73,7 +73,7 @@ fn read_source(
                 || row.position.last >= since
                 || matches!(runtime.get(&row.owner), Some(&("work" | "wait")))
         });
-        snapshot.enrich_with_status(&mut rows, &runtime)?;
+        snapshot.enrich_with_status(&mut rows, &runtime, false)?;
         (
             rows,
             snapshot.coverage.pending == 0 && snapshot.coverage.unavailable == 0,
