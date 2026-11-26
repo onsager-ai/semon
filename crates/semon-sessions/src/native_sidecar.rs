@@ -501,6 +501,72 @@ mod tests {
         assert_eq!(Home::session(&home.query())["name"], "After derivation");
     }
 
+    #[test]
+    fn standalone_query_defers_racing_sidecar_admission_until_the_next_call() {
+        let home = Home::new(Some(metadata()));
+        let mut query = Query::new(home.options.clone());
+        let path = home.meta.clone();
+        crate::events::set_claude_sidecar_hook(move || {
+            fs::write(
+                path,
+                json!({"description":"First stable label"}).to_string(),
+            )
+            .unwrap();
+        });
+        let result = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["sessions"][0]["id"], "lead");
+        assert!(home.encoded().is_none());
+        let result = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+        assert_eq!(Home::session(&result)["name"], "First stable label");
+        let committed = home.encoded().unwrap();
+
+        fs::write(
+            &home.meta,
+            json!({"description":"Superseded label"}).to_string(),
+        )
+        .unwrap();
+        let path = home.meta.clone();
+        crate::events::set_claude_sidecar_hook(move || {
+            fs::write(path, json!({"description":"Next stable label"}).to_string()).unwrap();
+        });
+        let result = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+        assert_eq!(Home::session(&result)["name"], "First stable label");
+        assert_eq!(home.encoded().unwrap(), committed);
+
+        let result = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+        assert_eq!(Home::session(&result)["name"], "Next stable label");
+        assert_eq!(
+            home.record()["sidecar"]["metadata"]["label"],
+            "Next stable label"
+        );
+    }
+
+    #[test]
+    fn standalone_stalls_uses_the_committed_snapshot_during_a_late_sidecar_change() {
+        let home = Home::new(Some(metadata()));
+        let args = json!({"idle_minutes": 1});
+        let before = Query::new(home.options.clone())
+            .call_at("stalls", &args, NOW)
+            .unwrap();
+        let committed = home.encoded().unwrap();
+        let path = home.meta.clone();
+        crate::model::AFTER_QUERY_DERIVATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(
+                    path,
+                    json!({"description":"Changed during query"}).to_string(),
+                )
+                .unwrap();
+            }));
+        });
+        let mut query = Query::new(home.options.clone());
+        assert_eq!(query.call_at("stalls", &args, NOW).unwrap(), before);
+        assert_eq!(home.encoded().unwrap(), committed);
+        let result = query.call_at("list_sessions", &json!({}), NOW).unwrap();
+        assert_eq!(Home::session(&result)["name"], "Changed during query");
+    }
+
     #[cfg(unix)]
     #[test]
     fn claude_sidecar_links_and_oversized_inputs_keep_log_reads_but_cannot_qualify_eviction() {

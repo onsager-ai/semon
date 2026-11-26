@@ -1881,6 +1881,7 @@ pub(crate) fn native_query(
         namespace,
         cutoff,
         focus.is_some() && !activity_only,
+        true,
         |input, path| {
             if focus.is_none() {
                 return Ok(true);

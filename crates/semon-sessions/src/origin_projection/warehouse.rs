@@ -38,6 +38,7 @@ pub fn admit_warehouse(options: &Options, cancelled: impl Fn() -> bool) -> io::R
         &namespace,
         None,
         false,
+        false,
         |_, _| Ok(true),
         cancelled,
     )
@@ -49,6 +50,7 @@ pub(crate) fn admit_namespace(
     namespace: &Namespace,
     cutoff: Option<i64>,
     include_claude_parent: bool,
+    defer_sidecar_changes: bool,
     include: impl Fn(&crate::Input, &std::path::Path) -> io::Result<bool>,
     cancelled: impl Fn() -> bool,
 ) -> io::Result<BTreeSet<String>> {
@@ -72,6 +74,11 @@ pub(crate) fn admit_namespace(
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .is_none_or(|time| time.as_millis() >= u128::try_from(cutoff).unwrap_or(0))
         })
+    };
+    let scan_file = if defer_sidecar_changes {
+        events::scan_query_file
+    } else {
+        events::scan_file
     };
     let mut skipped = BTreeSet::new();
     loop {
@@ -130,7 +137,7 @@ pub(crate) fn admit_namespace(
                 if seen.contains(path.to_string_lossy().as_ref()) {
                     continue;
                 }
-                match events::scan_file(&path, input.root.as_str(), &mut cache, &mut false) {
+                match scan_file(&path, input.root.as_str(), &mut cache, &mut false) {
                     Ok(_) => {
                         cache.committed_rebuild_ledger(&path)?;
                         seen.insert(path.to_string_lossy().into_owned());
