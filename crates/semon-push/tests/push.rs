@@ -613,6 +613,8 @@ impl Home {
             credential: Credential::File(self.root.join("token")),
             sessions: self.options.clone(),
             stream_cards: false,
+            since: None,
+            max_rate: None,
             state: self.root.join("state/push.json"),
         }
     }
@@ -644,6 +646,65 @@ fn redacted(text: &str) -> Vec<u8> {
     let mut bytes = text.as_bytes().to_vec();
     semon_push::redact::redact(&mut bytes);
     bytes
+}
+
+#[test]
+fn one_shot_cutoff_keeps_receipts_and_omits_incomplete_codex_facts() {
+    use std::time::UNIX_EPOCH;
+
+    let home = Home::new();
+    let receiver = receiver();
+    let retained = "codex/sessions/rollout-retained.jsonl";
+    let skipped = "codex/sessions/rollout-skipped.jsonl";
+    let at_cutoff = "codex/sessions/rollout-at-cutoff.jsonl";
+    let options = home.push_options(&receiver.url);
+    let retained_path = home.write(retained, "{}\n");
+    semon_push::push(&options, false).unwrap();
+    assert!(
+        receiver
+            .state
+            .lock()
+            .unwrap()
+            .facts
+            .as_ref()
+            .unwrap()
+            .codex_rollouts
+            .is_some()
+    );
+    home.append(retained, "{}\n");
+    for (path, modified) in [
+        (retained_path, UNIX_EPOCH),
+        (home.write(skipped, "{}\n"), UNIX_EPOCH),
+        (
+            home.write(at_cutoff, "{}\n"),
+            UNIX_EPOCH + Duration::from_secs(86_400),
+        ),
+    ] {
+        fs::File::open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+    let options = PushOptions {
+        since: Some("1970-01-02".parse().unwrap()),
+        ..options
+    };
+    semon_push::push(&options, false).unwrap();
+
+    assert_eq!(copy(&receiver, retained), b"{}\n");
+    assert!(copy(&receiver, skipped).is_empty());
+    assert_eq!(copy(&receiver, at_cutoff), b"{}\n");
+    assert_eq!(
+        receiver
+            .state
+            .lock()
+            .unwrap()
+            .facts
+            .as_ref()
+            .unwrap()
+            .codex_rollouts,
+        None
+    );
 }
 
 #[test]

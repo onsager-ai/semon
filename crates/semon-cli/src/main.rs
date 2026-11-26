@@ -986,6 +986,8 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
     let mut state = None;
     let mut watch = false;
     let mut stream_cards = false;
+    let mut since = None;
+    let mut max_rate = None;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -1003,6 +1005,13 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
             "--cache" => sessions.cache = value()?.into(),
             "--watch" => watch = true,
             "--stream-cards" => stream_cards = true,
+            "--since" => since = Some(value()?.parse()?),
+            "--max-rate" => {
+                max_rate =
+                    Some(value()?.parse().map_err(|_| {
+                        "--max-rate requires a positive integer in KiB/s".to_owned()
+                    })?);
+            }
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown argument: {argument}")),
         }
@@ -1017,6 +1026,8 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
             credential,
             sessions,
             stream_cards,
+            since,
+            max_rate,
             state,
         },
         watch,
@@ -2619,10 +2630,12 @@ fn usage() -> String {
          run over Model Context Protocol on stdin and stdout; no listener. Native queries read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
-         Advanced: semon push [--receiver URL] [--watch] [--stream-cards] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Advanced: semon push [--receiver URL] [--watch] [--since DATE|DURATION] [--max-rate KiB/s] [--stream-cards] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a push-protocol receiver\n\
          (docs/push-protocol.md), appending as they grow. Run semon pair URL CODE first. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s. --stream-cards includes typed cards in full facts.\n\
+         --since sends inputs modified since YYYY-MM-DD (UTC) or a rolling duration such as 7d.\n\
+         --max-rate caps average append body upload speed in KiB/s, unlimited by default.\n\
          \n\
          Usage: semon archive prune [--retention-days N] [--cache PATH]\n\
          Explicit archive maintenance. Omit retention to keep every chain indefinitely; native logs are never deleted.\n\

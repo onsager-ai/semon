@@ -22,6 +22,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt, fs,
     io::{self, Read, Seek, SeekFrom},
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -29,7 +30,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use semon_sessions::{Facts, FactsSource, Input, Options};
@@ -90,9 +91,57 @@ pub struct PushOptions {
     pub sessions: Options,
     /// Publish typed stream cards to this configured receiver.
     pub stream_cards: bool,
+    /// Restrict discovery to inputs modified at or after this cutoff.
+    pub since: Option<Since>,
+    /// Average serialized append body rate in KiB/s.
+    pub max_rate: Option<NonZeroU64>,
     /// Where to keep the cursor state (0600). A push holds the lock beside
     /// it ([`StateLock`]) while it runs.
     pub state: PathBuf,
+}
+
+/// A fixed UTC date or a rolling window evaluated at the start of each sweep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Since {
+    Date(chrono::NaiveDate),
+    Duration(Duration),
+}
+
+impl std::str::FromStr for Since {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self> {
+        if let Ok(duration) = semon_sessions::parse_duration(value) {
+            return Ok(Self::Duration(duration));
+        }
+        if value.len() == 10
+            && let Ok(date) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            && date.format("%Y-%m-%d").to_string() == value
+        {
+            return Ok(Self::Date(date));
+        }
+        Err(format!(
+            "invalid --since: {value}; expected YYYY-MM-DD or a duration such as 7d"
+        ))
+    }
+}
+
+impl Since {
+    fn cutoff_ns(self, now: SystemTime) -> i128 {
+        match self {
+            Self::Date(date) => {
+                i128::from(date.and_time(chrono::NaiveTime::MIN).and_utc().timestamp())
+                    * 1_000_000_000
+            }
+            Self::Duration(duration) => {
+                let now_ns = match now.duration_since(UNIX_EPOCH) {
+                    Ok(elapsed) => elapsed.as_nanos() as i128,
+                    Err(error) => -(error.duration().as_nanos() as i128),
+                };
+                now_ns - duration.as_nanos() as i128
+            }
+        }
+    }
 }
 
 /// Where a push's bearer token comes from.
@@ -373,10 +422,13 @@ pub struct Client {
     state: State,
     chunk: usize,
     heads: BTreeMap<String, Vec<u8>>,
+    since: Option<Since>,
+    max_rate: Option<NonZeroU64>,
     generation_support: AtomicU8,
     progress: Arc<Mutex<status::Progress>>,
     completed_inventory: Option<BTreeSet<String>>,
     committed_inventory: Option<BTreeSet<String>>,
+    codex_inventory_filtered: bool,
     archives: archives::Cache,
     sources: BTreeMap<String, Source>,
     catchup_pending: bool,
@@ -400,6 +452,11 @@ impl Read for UploadBody {
         let length = output.len().min(16 * 1024);
         self.bytes.read(&mut output[..length])
     }
+}
+
+fn append_pacing_delay(rate: NonZeroU64, bytes: usize, started: Instant, now: Instant) -> Duration {
+    let budget = Duration::from_secs_f64(bytes as f64 / (rate.get() as f64 * 1024.0));
+    budget.saturating_sub(now.saturating_duration_since(started))
 }
 
 impl Client {
@@ -441,10 +498,13 @@ impl Client {
             state,
             chunk: UPLOAD_CHUNK_BYTES,
             heads: BTreeMap::new(),
+            since: options.since,
+            max_rate: options.max_rate,
             generation_support: AtomicU8::new(GenerationSupport::Unknown as u8),
             progress: Arc::new(Mutex::new(status::Progress::new(wire::new_generation()?))),
             completed_inventory: None,
             committed_inventory: None,
+            codex_inventory_filtered: false,
             archives: archives::Cache::new(&options.state),
             sources: BTreeMap::new(),
             catchup_pending: false,
@@ -487,7 +547,10 @@ impl Client {
     ) -> std::result::Result<(u16, String), Failure> {
         let mut retries = 0;
         let mut transient_retries = 0;
+        let rate = self.max_rate.filter(|_| route == "append");
+        let body_bytes = body.len();
         loop {
+            let started = rate.map(|_| Instant::now());
             let factory = Arc::clone(&self.http);
             let request_url = format!("{}/v1/push/{route}", self.url);
             let body = body.clone();
@@ -541,6 +604,14 @@ impl Client {
                 completed_transports.fetch_add(1, Ordering::SeqCst);
                 result
             });
+            if let Some((rate, started)) = rate.zip(started) {
+                // Pace every attempt outside the HTTP timeout. If a stop wakes
+                // the wait, still let the caller checkpoint an available ACK.
+                let delay = append_pacing_delay(rate, body_bytes, started, Instant::now());
+                if !delay.is_zero() {
+                    wait(delay);
+                }
+            }
             // Append (offset/head checked), facts (a snapshot) and status
             // (sequenced) are safe to repeat after a proxy or connection blip.
             let transient = |answer: &std::result::Result<(u16, String, u64), String>| {
@@ -697,6 +768,7 @@ impl Client {
     fn pass_limited(&mut self, sessions: &Options, batch_limit: Option<usize>) -> Result<Report> {
         self.catchup_pending = false;
         self.completed_inventory = None;
+        let cutoff = self.since.map(|since| since.cutoff_ns(SystemTime::now()));
         {
             let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
             progress.clear_targets();
@@ -712,18 +784,36 @@ impl Client {
         let mut local_failure = false;
         let mut batches = 0;
         let mut complete = false;
-        self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+        self.discover(
+            sessions,
+            cutoff,
+            &mut selected,
+            &mut foreground,
+            &mut history,
+        )?;
         let mut discovered = Instant::now();
         loop {
             if self.stop.is_stopped() {
                 break;
             }
             if discovered.elapsed() >= PASS_EVERY {
-                self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+                self.discover(
+                    sessions,
+                    cutoff,
+                    &mut selected,
+                    &mut foreground,
+                    &mut history,
+                )?;
                 discovered = Instant::now();
             }
             if foreground.is_empty() && history.is_empty() {
-                self.discover(sessions, &mut selected, &mut foreground, &mut history)?;
+                self.discover(
+                    sessions,
+                    cutoff,
+                    &mut selected,
+                    &mut foreground,
+                    &mut history,
+                )?;
                 if foreground.is_empty() && history.is_empty() {
                     complete = true;
                     break;
@@ -861,9 +951,18 @@ impl Client {
         }
     }
 
+    fn facts_inventory(&self) -> Option<BTreeSet<String>> {
+        if self.codex_inventory_filtered {
+            // An authoritative subset would retire already-received sources.
+            return None;
+        }
+        self.completed_inventory.clone()
+    }
+
     fn discover(
         &mut self,
         sessions: &Options,
+        cutoff: Option<i128>,
         selected: &mut BTreeMap<String, (Input, FileStat, status::TargetRank)>,
         foreground: &mut VecDeque<String>,
         history: &mut VecDeque<String>,
@@ -903,16 +1002,45 @@ impl Client {
                 );
             }
         }
-        let inputs = inputs.into_values().collect::<Vec<_>>();
-        let present = inputs
+        self.codex_inventory_filtered = false;
+        let mut filtered = false;
+        let mut eligible = Vec::new();
+        for (key, (input, source)) in inputs {
+            let stat = if cutoff.is_some() || !selected.contains_key(&key) {
+                let meta = fs::metadata(&source.path).map_err(|e| e.to_string())?;
+                Some(FileStat::from_metadata(&meta))
+            } else {
+                None
+            };
+            if let Some(cutoff) = cutoff
+                && stat
+                    .and_then(|stat| stat.mtime_ns)
+                    .is_none_or(|mtime| mtime < cutoff)
+            {
+                // Keep the normal prefix check when either representation of
+                // the same logical input has a recent modification time.
+                let mut recent_plain = false;
+                if let Some(plain) = &source.plain {
+                    let meta = fs::metadata(plain).map_err(|e| e.to_string())?;
+                    recent_plain = metadata_mtime_ns(&meta).is_some_and(|mtime| mtime >= cutoff);
+                }
+                if !recent_plain {
+                    filtered = true;
+                    self.codex_inventory_filtered |= input.root == semon_sessions::InputRoot::Codex;
+                    continue;
+                }
+            }
+            eligible.push((input, source, stat));
+        }
+        let present = eligible
             .iter()
-            .map(|(input, _)| Self::key(input))
+            .map(|(input, _, _)| Self::key(input))
             .collect::<BTreeSet<_>>();
         self.sources.retain(|key, _| present.contains(key));
         self.archives.retain(
-            &inputs
+            &eligible
                 .iter()
-                .map(|(_, source)| source.path.clone())
+                .map(|(_, source, _)| source.path.clone())
                 .collect(),
         );
         selected.retain(|key, _| present.contains(key));
@@ -922,13 +1050,12 @@ impl Client {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .prune_targets(&present);
-        for (input, source) in inputs {
+        for (input, source, stat) in eligible {
             let key = Self::key(&input);
             if selected.contains_key(&key) {
                 continue;
             }
-            let stat =
-                FileStat::from_metadata(&fs::metadata(&source.path).map_err(|e| e.to_string())?);
+            let stat = stat.expect("stat for a new input");
             let live = input.root == semon_sessions::InputRoot::Codex
                 && !runtime.codex_locks.is_empty()
                 && semon_sessions::codex_native_id_prefix(&input.full_path(sessions), stat.len)
@@ -1002,7 +1129,7 @@ impl Client {
         new_foreground.append(foreground);
         *foreground = new_foreground;
         let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
-        progress.inventory_complete = selected.len() == progress.targets.len();
+        progress.inventory_complete = !filtered && selected.len() == progress.targets.len();
         progress.phase = wire::SyncPhase::Syncing;
         Ok(())
     }
@@ -1692,7 +1819,7 @@ fn push_running(
         if client.completed_inventory.is_none() {
             return Ok(());
         }
-        facts.codex_rollouts = client.completed_inventory.clone();
+        facts.codex_rollouts = client.facts_inventory();
         facts.codex_provisional_rollouts = None;
         return match client.post_facts(&facts) {
             Err(Failure::Stopped) => Ok(()),
@@ -1756,7 +1883,7 @@ fn push_running(
         {
             match result {
                 Ok(mut current) => {
-                    current.codex_rollouts = client.completed_inventory.clone();
+                    current.codex_rollouts = client.facts_inventory();
                     current.codex_provisional_rollouts = None;
                     match client.post_facts(&current) {
                         Ok(()) => {
@@ -2052,6 +2179,8 @@ mod tests {
                 credential: Credential::File(self.root.join("token")),
                 sessions: self.options.clone(),
                 stream_cards: false,
+                since: None,
+                max_rate: None,
                 state: self.root.join("state/push.json"),
             }
         }
@@ -2177,6 +2306,85 @@ mod tests {
             upgraded,
             reference,
         )
+    }
+
+    #[test]
+    fn since_parses_a_fixed_utc_date_or_a_rolling_duration() {
+        let date = "1970-01-02".parse::<Since>().unwrap();
+        let day = Duration::from_secs(86_400);
+        assert_eq!(date.cutoff_ns(UNIX_EPOCH), day.as_nanos() as i128);
+        assert_eq!(date.cutoff_ns(UNIX_EPOCH + day), date.cutoff_ns(UNIX_EPOCH));
+        for (value, days) in [("48h", 2), ("7d", 7)] {
+            let duration = value.parse::<Since>().unwrap();
+            assert_eq!(duration, Since::Duration(day * days));
+            assert_eq!(duration.cutoff_ns(UNIX_EPOCH + day * days), 0);
+            assert_eq!(
+                duration.cutoff_ns(UNIX_EPOCH + day * (days + 1)),
+                day.as_nanos() as i128
+            );
+        }
+        for invalid in ["2025-02-29", "2026-1-02", "48", "-7d", "3fortnights"] {
+            assert!(invalid.parse::<Since>().is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn watch_discovers_recent_writes_and_does_not_publish_a_filtered_inventory() {
+        let home = Fixture::new();
+        let receiver = receiver();
+        let old = "sessions/rollout-old.jsonl";
+        let recent = "sessions/rollout-recent.jsonl";
+        let old_path = home.write(&format!("codex/{old}"), b"{}\n");
+        fs::File::open(&old_path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH)
+            .unwrap();
+        home.write(&format!("codex/{recent}"), b"{}\n");
+        let mut options = home.push_options(&receiver.url);
+        options.since = Some("7d".parse().unwrap());
+        let mut client = Client::new(&options).unwrap();
+        client.watch_pass(&options.sessions).unwrap();
+
+        let first = receiver.from(0);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].path, recent);
+        assert_eq!(
+            client.completed_inventory,
+            Some(BTreeSet::from([recent.to_owned()]))
+        );
+        assert_eq!(client.facts_inventory(), None);
+        assert!(!client.progress.lock().unwrap().inventory_complete);
+
+        home.append(&old_path, b"{}\n");
+        client.watch_pass(&options.sessions).unwrap();
+        let later = receiver.from(first.len());
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].path, old);
+        assert_eq!(
+            client.facts_inventory(),
+            Some(BTreeSet::from([old.to_owned(), recent.to_owned()]))
+        );
+        assert!(client.progress.lock().unwrap().inventory_complete);
+    }
+
+    #[test]
+    fn append_pacing_charges_encoded_bytes_and_credits_request_time() {
+        let rate = NonZeroU64::new(2).unwrap();
+        let bytes = 3 * 1024;
+        let started = Instant::now();
+        // Advance the injected reading without waiting.
+        assert_eq!(
+            append_pacing_delay(rate, bytes, started, started),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            append_pacing_delay(rate, bytes, started, started + Duration::from_millis(250)),
+            Duration::from_millis(1250)
+        );
+        assert_eq!(
+            append_pacing_delay(rate, bytes, started, started + Duration::from_secs(2)),
+            Duration::ZERO
+        );
     }
 
     #[test]
@@ -3172,6 +3380,8 @@ mod sync_status_tests {
                 ..Options::default()
             },
             stream_cards: false,
+            since: None,
+            max_rate: None,
             state: root.join("push.json"),
         };
         let lock = Arc::new(StateLock::acquire(&options.state).unwrap());
@@ -3260,6 +3470,8 @@ mod sync_status_tests {
                 ..Options::default()
             },
             stream_cards: false,
+            since: None,
+            max_rate: None,
             state: root.join("push.json"),
         };
         let stop = Stop::new();
@@ -3327,6 +3539,8 @@ mod sync_status_tests {
                 ..Options::default()
             },
             stream_cards: false,
+            since: None,
+            max_rate: None,
             state: root.join("push.json"),
         };
         let stop = Stop::new();
@@ -3358,6 +3572,8 @@ mod sync_status_tests {
             credential: Credential::Memory(Token::new("test-status-token").unwrap()),
             sessions: Options::default(),
             stream_cards: false,
+            since: None,
+            max_rate: None,
             state: std::env::temp_dir().join("semon-phase-unwritten.json"),
         };
         let mut client = Client::new(&options).unwrap();
