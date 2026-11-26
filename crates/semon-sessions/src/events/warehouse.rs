@@ -96,6 +96,35 @@ pub(crate) struct Observation {
     pub(crate) fact: Fact,
 }
 
+/// A native usage observation before source authorization and copy resolution.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct UsageObservation {
+    pub(crate) identity: Option<String>,
+    pub(crate) record_id: Option<String>,
+    pub(crate) timestamp: Option<i64>,
+    pub(crate) measurement: UsageMeasurement,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum UsageMeasurement {
+    PerResponse {
+        model: Option<String>,
+        tokens: Tokens,
+        billing: BillingUsage,
+    },
+    ResponseWithAcceptance {
+        model: Option<String>,
+        tokens: Tokens,
+        billing: ModelTokens,
+        accepted: bool,
+    },
+    ThreadSnapshot {
+        model: Option<String>,
+        tokens: Tokens,
+    },
+    SessionSnapshot(Option<crate::copilot::CopilotUsage>),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Fact {
     Record {
@@ -126,30 +155,7 @@ pub(crate) enum Fact {
         call_id: String,
         tool: String,
     },
-    ClaudeUsage {
-        message_id: String,
-        model: Option<String>,
-        tokens: Tokens,
-        billing: BillingUsage,
-    },
-    CodexUsage {
-        identity: String,
-        model: Option<String>,
-        tokens: Tokens,
-        model_tokens: ModelTokens,
-        time: Option<i64>,
-        accepted: bool,
-    },
-    CodexTokenSnapshot {
-        model: Option<String>,
-        tokens: Tokens,
-        time: Option<i64>,
-    },
-    CopilotShutdown {
-        event_id: String,
-        time: Option<i64>,
-        usage: Option<crate::copilot::CopilotUsage>,
-    },
+    Usage(Box<UsageObservation>),
     CodexTurn {
         thread_id: String,
         turn_id: String,
@@ -195,6 +201,10 @@ pub(crate) enum Fact {
 }
 
 impl Fact {
+    pub(crate) fn usage(observation: UsageObservation) -> Self {
+        Self::Usage(Box::new(observation))
+    }
+
     pub(super) fn event(event: &Event) -> Self {
         Self::Event {
             kind: event.k,

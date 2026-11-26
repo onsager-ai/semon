@@ -4075,7 +4075,10 @@ fn parse(
                 };
                 if let Some(observation) = &observation {
                     index.warehouse_fact(line_offset, 0, || {
-                        observation.warehouse_fact(usage_accepted)
+                        observation.warehouse_fact(
+                            usage_accepted,
+                            field(&record, "uuid").or_else(|| field(&record, "id")),
+                        )
                     });
                 }
                 if let Some(batch) = &mut index.warehouse_observations {
@@ -6521,11 +6524,19 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                 split_unknown,
             },
         };
-        summary.warehouse_fact(offset, 0, || Fact::ClaudeUsage {
-            message_id: id.to_owned(),
-            model: report.model.clone(),
-            tokens: report.tokens.clone(),
-            billing: report.billing.clone(),
+        summary.warehouse_fact(offset, 0, || {
+            Fact::usage(warehouse::UsageObservation {
+                identity: Some(id.to_owned()),
+                record_id: field(record, "uuid")
+                    .or_else(|| field(record, "id"))
+                    .map(str::to_owned),
+                timestamp,
+                measurement: warehouse::UsageMeasurement::PerResponse {
+                    model: report.model.clone(),
+                    tokens: report.tokens.clone(),
+                    billing: report.billing.clone(),
+                },
+            })
         });
         summary.usage_by_id.insert(id.to_owned(), report);
     }
@@ -7008,11 +7019,17 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                         batch.push(
                             offset,
                             0,
-                            Fact::CodexTokenSnapshot {
-                                model: model.clone(),
-                                tokens: current.clone(),
-                                time,
-                            },
+                            Fact::usage(warehouse::UsageObservation {
+                                identity: None,
+                                record_id: field(record, "uuid")
+                                    .or_else(|| field(record, "id"))
+                                    .map(str::to_owned),
+                                timestamp: time,
+                                measurement: warehouse::UsageMeasurement::ThreadSnapshot {
+                                    model: model.clone(),
+                                    tokens: current.clone(),
+                                },
+                            }),
                         );
                     }
                     summary.codex_tokens = current;
@@ -7691,11 +7708,14 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                 batch.push(
                     offset,
                     0,
-                    Fact::CopilotShutdown {
-                        event_id: identity.to_owned(),
-                        time,
-                        usage: index.usage.clone(),
-                    },
+                    Fact::usage(warehouse::UsageObservation {
+                        identity: Some(identity.to_owned()),
+                        record_id: Some(identity.to_owned()),
+                        timestamp: time,
+                        measurement: warehouse::UsageMeasurement::SessionSnapshot(
+                            index.usage.clone(),
+                        ),
+                    }),
                 );
             }
             index.usage_source = Some(crate::copilot::Observation {

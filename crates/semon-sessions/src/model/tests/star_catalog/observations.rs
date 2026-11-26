@@ -1,7 +1,7 @@
 use super::*;
 use crate::events::{
     EventCache, scan_file,
-    warehouse::{Fact, Observation},
+    warehouse::{Fact, Observation, UsageMeasurement},
 };
 use rusqlite::types::Value as Sql;
 use std::io::Write;
@@ -183,27 +183,32 @@ fn assert_claude_facts(database: &Connection, observations: &[Observation]) {
                 text(id),
                 string(call_id),
             ]),
-            Fact::ClaudeUsage {
-                message_id,
-                model,
-                tokens,
-                billing,
-            } => {
+            Fact::Usage(usage) => {
+                let UsageMeasurement::PerResponse {
+                    model,
+                    tokens,
+                    billing,
+                } = &usage.measurement
+                else {
+                    continue;
+                };
+                let message_id = usage.identity.as_deref().unwrap();
                 let uuid = observations
                     .iter()
                     .find_map(|item| match &item.fact {
                         Fact::Record { uuid, .. }
                             if item.position.offset == observation.position.offset =>
                         {
-                            Some(string(uuid))
+                            Some(uuid)
                         }
                         _ => None,
                     })
                     .unwrap();
+                assert_eq!(&usage.record_id, uuid);
                 facts.entry("step_observation").or_default().push(vec![
                     pos.clone(),
                     text(message_id),
-                    uuid,
+                    string(uuid),
                     string(model),
                     integer(tokens.input),
                     integer(tokens.cached_input),
@@ -669,19 +674,23 @@ fn codex_observations_match_prototype_at_admission() {
         .observations
         .iter()
         .filter_map(|o| match &o.fact {
-            Fact::CodexUsage {
-                tokens,
-                model_tokens,
-                accepted,
-                ..
-            } => Some((tokens.input, model_tokens.input, *accepted)),
+            Fact::Usage(usage) => match &usage.measurement {
+                UsageMeasurement::ResponseWithAcceptance {
+                    tokens,
+                    billing,
+                    accepted,
+                    ..
+                } => Some((tokens.input, billing.input, *accepted)),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(accepted, [(7, 4, true), (7, 4, false)]);
     assert!(
         batch.observations.iter().any(
-            |o| matches!(&o.fact, Fact::CodexTokenSnapshot { tokens, .. } if tokens.input == 7)
+            |o| matches!(&o.fact, Fact::Usage(usage) if matches!(
+                &usage.measurement, UsageMeasurement::ThreadSnapshot { tokens, .. } if tokens.input == 7))
         )
     );
     assert!(
