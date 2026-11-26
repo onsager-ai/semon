@@ -208,10 +208,17 @@ fn append_rates(
 }
 
 // Bump when model alias or provider resolution rules change.
-const LOOKUP_RULES_VERSION: u32 = 2;
+const LOOKUP_RULES_VERSION: u32 = 3;
+
+pub(super) fn gateway_billing_only(id: &str) -> bool {
+    id.starts_with("onsager/codex/gpt-6")
+}
 
 impl EffectiveTable {
     pub(crate) fn routed_price(&self, id: &str) -> Option<Price> {
+        if gateway_billing_only(id) {
+            return None;
+        }
         let (_, native) = id.rsplit_once('/')?;
         let mut matches = PROVIDERS
             .iter()

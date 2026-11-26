@@ -468,7 +468,8 @@ impl CostBuild {
             ),
         ];
         let mut entry_usd = 0.0;
-        let mut has_unpriced = false;
+        // Gateway-only models have no list-priced USD even for a zero-token record.
+        let mut has_unpriced = runtime::gateway_billing_only(model);
         let model_cost = self.models.entry(model.to_owned()).or_default();
         for (kind, tokens, rate) in categories {
             add_tokens(&mut model_cost.tokens, kind, tokens);
@@ -734,6 +735,19 @@ mod tests {
         assert_eq!(unknown.usd, None);
         assert_eq!((unknown.priced_tokens, unknown.unpriced_tokens), (0, 120));
         assert_eq!(unknown.unpriced_models, ["gateway/route/gpt-6.1-terra"]);
+    }
+
+    #[test]
+    fn gateway_billing_only_models_have_unknown_list_cost() {
+        let model = "onsager/codex/gpt-6.1-sol";
+        for (input, output) in [(100, 20), (0, 0)] {
+            let cost = calculate_cost(&[usage(model, input, output, 0, 0, 0)], &[]);
+            assert_eq!(cost.usd, None);
+            assert_eq!(cost.by_model[model].usd, None);
+            assert_eq!(cost.unpriced_models, [model]);
+            assert_eq!(cost.priced_tokens, 0);
+            assert_eq!(cost.unpriced_tokens, input + output);
+        }
     }
 
     #[test]
