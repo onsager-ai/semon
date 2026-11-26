@@ -11,6 +11,8 @@ use semon_asi::input::encode_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub(crate) mod stream_cards;
+
 #[cfg(test)]
 mod tests;
 
@@ -445,15 +447,25 @@ pub fn execute_with_timeout(
     enum Parsed {
         Search(Search),
         View(View),
+        StreamCards,
     }
     let parsed = match request.tool.as_str() {
         "search" => {
             Parsed::Search(serde_json::from_value(request.arguments).map_err(|_| invalid())?)
         }
         "view" => Parsed::View(serde_json::from_value(request.arguments).map_err(|_| invalid())?),
+        "stream_cards" => {
+            if request.arguments != json!({}) {
+                return Err(invalid());
+            }
+            Parsed::StreamCards
+        }
         _ => return Err(invalid()),
     };
-    if request.indexes.is_empty() || request.indexes.len() > 64 {
+    if request.indexes.is_empty()
+        || request.indexes.len() > 64
+        || (matches!(parsed, Parsed::StreamCards) && request.indexes.len() != 1)
+    {
         return Err(unavailable());
     }
     if Instant::now() >= deadline {
@@ -467,6 +479,7 @@ pub fn execute_with_timeout(
     let result = match parsed {
         Parsed::Search(request) => search(&indexes, request, deadline),
         Parsed::View(request) => view(&indexes, request, deadline),
+        Parsed::StreamCards => stream_cards::read(&indexes[0], deadline),
     };
     if Instant::now() >= deadline {
         return Err(timeout());

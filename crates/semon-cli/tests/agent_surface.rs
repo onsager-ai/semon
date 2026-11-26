@@ -619,7 +619,7 @@ fn check_schema(tool: &str, schema: &Value) {
     assert_eq!(schema["type"], "object", "{tool}");
     assert_eq!(schema["additionalProperties"], false, "{tool}");
     let properties = schema["properties"].as_object().unwrap();
-    assert!(!properties.is_empty(), "{tool}");
+    assert_eq!(properties.is_empty(), tool == "stream_cards", "{tool}");
     for (name, property) in properties {
         let property = property.as_object().unwrap();
         for key in property.keys() {
@@ -766,6 +766,7 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "sql",
         "context_growth",
         "lane_health",
+        "stream_cards",
         "search",
         "view",
         "schema",
@@ -924,6 +925,100 @@ fn the_window_is_30_days_unless_widened_and_since_stays_inside_it() {
         content(&server.call(3, "stalls", json!({"idle_minutes": 5, "since": "31d"})));
     assert!(failed);
     assert_eq!(error["error"]["code"], "outside_window");
+    server.finish();
+}
+
+#[cfg(feature = "asi-query")]
+#[test]
+fn stream_cards_return_only_latest_well_formed_root_cards() {
+    let home = Home::new();
+    let card = |stream: &str, number: &str| {
+        format!(
+            "Stream:  {stream} \nLane goal: Ship the query\nNumber: {number}\nNow: parked until review\nNext owner decision: none"
+        )
+    };
+    let latest = card("Index", "2 sources");
+    let claude_reply =
+        |id, minute, text: &str| assistant(id, ts(9, minute), json!([{"type":"text","text":text}]));
+    home.lines(
+        "claude/projects/-work-proj/stream-claude.jsonl",
+        &[
+            human("stream-claude", ts(9, 0), "PRIVATE-CLAUDE-PROMPT"),
+            json!({"type":"custom-title","sessionId":"stream-claude","customTitle":"Claude Manager"}),
+            claude_reply("stream-claude", 1, &card("Old stream", "1 source")),
+            claude_reply("stream-claude", 2, &latest),
+            claude_reply("stream-claude", 3, &latest.replace("Number:", "Metric:")),
+            claude_reply("stream-claude", 4, &format!("{latest}\nPRIVATE-CLAUDE-FOOTER")),
+            human("stream-claude", ts(9, 5), &card("PRIVATE-USER-CARD", "0")),
+        ],
+    );
+    home.lines(
+        "claude/projects/-work-proj/stream-claude/subagents/agent-stream-child.jsonl",
+        &[claude_reply(
+            "stream-child",
+            6,
+            &card("PRIVATE-CLAUDE-CHILD", "0"),
+        )],
+    );
+    home.write(
+        "claude/sessions/31.json",
+        &json!({"pid":31,"sessionId":"stream-claude","procStart":777,"status":"idle","updatedAt":at(9,5)}).to_string(),
+    );
+
+    let codex =
+        |minute, kind, payload| json!({"type":kind,"timestamp":ts(10,minute),"payload":payload});
+    let codex_message = |minute, role, part, text: &str| {
+        codex(
+            minute,
+            "response_item",
+            json!({"type":"message","role":role,"content":[{"type":part,"text":text}]}),
+        )
+    };
+    let long = "数".repeat(340);
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-stream-codex.jsonl",
+        &[
+            codex(0, "session_meta", json!({"id":"stream-codex","thread_source":"user","agent_nickname":"Codex Manager","cwd":"/work/proj"})),
+            codex(1, "event_msg", json!({"type":"task_started","turn_id":"turn"})),
+            codex_message(2, "user", "input_text", "PRIVATE-CODEX-PROMPT"),
+            codex_message(3, "assistant", "output_text", &card("Warehouse", &long)),
+            codex_message(4, "assistant", "output_text", &format!("PRIVATE-CODEX-QUOTE\n{latest}")),
+            codex(5, "event_msg", json!({"type":"task_complete","turn_id":"turn","last_agent_message":"PRIVATE-CODEX-TERMINAL"})),
+        ],
+    );
+    home.lines(
+        "codex/sessions/2026/09/24/rollout-stream-worker.jsonl",
+        &[
+            codex(0, "session_meta", json!({"id":"stream-worker","thread_source":"subagent","parent_thread_id":"missing-parent"})),
+            codex_message(6, "assistant", "output_text", &card("PRIVATE-CODEX-WORKER", "0")),
+        ],
+    );
+
+    let published = home.semon(&["analytics", "materialize"]);
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let namespace = semon_sessions::read_analytics_namespace(&home.root.join("state"))
+        .unwrap()
+        .unwrap();
+    let expected = json!({"cards":[
+        {"session_uid":format!("{namespace}/claude/stream-claude"),"title":"Claude Manager","state":"idle",
+         "last_message_at":at(9,5),"card_posted_at":at(9,2),"stream":"Index","lane_goal":"Ship the query",
+         "number":"2 sources","now":"parked until review","next_owner_decision":"none"},
+        {"session_uid":format!("{namespace}/codex/stream-codex"),"title":"Codex Manager","state":"ended",
+         "last_message_at":at(10,4),"card_posted_at":at(10,3),"stream":"Warehouse","lane_goal":"Ship the query",
+         "number":"数".repeat(300),"now":"parked until review","next_owner_decision":"none"}
+    ], "data_notice":semon_sessions::body_query::DATA_NOTICE});
+    assert_eq!(home.query(&["query", "stream_cards"]), expected);
+    let mut server = Server::start(&home);
+    let (mcp, failed) = content(&server.call(1, "stream_cards", json!({})));
+    assert!(!failed, "{mcp}");
+    assert_eq!(mcp, expected);
+    let (error, failed) = content(&server.call(2, "stream_cards", json!({"unknown": true})));
+    assert!(failed);
+    assert_eq!(error["error"]["code"], "invalid_argument");
     server.finish();
 }
 
