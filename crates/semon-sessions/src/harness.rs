@@ -81,6 +81,18 @@ pub fn harness(id: &str) -> Option<&'static HarnessDefinition> {
     HARNESSES.iter().find(|definition| definition.id == id)
 }
 
+/// Harnesses with native session inputs. Display-only definitions are excluded.
+pub fn supported_harnesses() -> impl Iterator<Item = &'static HarnessDefinition> {
+    HARNESSES
+        .iter()
+        .filter(|definition| crate::InputRoot::parse(definition.id).is_some())
+}
+
+/// Whether a harness has both a registry entry and a native input root.
+pub fn supports_native_sessions(id: &str) -> bool {
+    supported_harnesses().any(|definition| definition.id == id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

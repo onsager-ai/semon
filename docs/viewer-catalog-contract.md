@@ -17,6 +17,12 @@ or unavailable observations. Source inventory, capabilities, chrome and tree
 metadata do not require a Catalog publication. Nonblocking library read
 primitives remain usable independently of a live viewer producer.
 
+Each `/api/viewer/analytics` agent-hours column has an `ms_by_harness`
+object keyed by native harness ID. Each UTC cost day has the corresponding
+`usd_by_harness` object. A missing key contributes zero to that bin. The cost
+series represents priced contributions and retains the existing coverage fields
+for missing prices or usage.
+
 First publication is an admission signal, not a promise that every selected
 session or optional projection exists. Existing partial-data, generation,
 retained-history and authorization checks still determine each reply.

@@ -2573,8 +2573,17 @@ fn query_usage() -> String {
     )
 }
 
+fn native_home_options() -> String {
+    semon_sessions::harness::supported_harnesses()
+        .map(|harness| format!("[--{}-home PATH]", harness.id))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn analytics_usage() -> String {
-    "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
+    let home_options = native_home_options();
+    format!(
+        "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] {home_options} [--claude-json PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
      Admits native logs to the local Event Index, then materializes its committed warehouse.\n\
      Native admission scans the configured homes in full. --since/--all do not bound analytics input.\n\
      Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions and 8192 steps. An oversize session stays whole.\n\
@@ -2587,11 +2596,21 @@ fn analytics_usage() -> String {
      Copies one verified local analytics snapshot into an empty destination.\n\n\
      Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]\n\
      Removes only the local analytics store after confirmation. --without-export discards non-rebuildable imported or frozen facts."
-        .to_owned()
+    )
 }
 
 fn usage() -> String {
-    "Usage: semon receive --dir DIR [--listen ADDR] [--public-url https://HOST]\n\
+    let home_options = native_home_options();
+    let sources = semon_sessions::harness::supported_harnesses()
+        .map(|harness| harness.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let machine_dirs = semon_sessions::harness::supported_harnesses()
+        .map(|harness| harness.id)
+        .chain(["proc"])
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("Usage: semon receive --dir DIR [--listen ADDR] [--public-url https://HOST]\n\
          Usage: semon pair --dir DIR\n\
          Usage: semon pair URL CODE\n\
          Usage: semon unpair [MACHINE_ID --dir DIR]\n\
@@ -2599,10 +2618,10 @@ fn usage() -> String {
          Pair with one receiver and start background sync as a user service.\n\
          HTTPS proxies may forward to a plain HTTP receiver. Tokens work until revoked.\n\
          \n\
-         Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--annotations PATH] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
-         Shows a read-only tree of native Claude Code, Codex and Copilot sessions.\n\
+         Usage: semon sessions {home_options} [--claude-json PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--annotations PATH] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
+         Shows a read-only tree of native sessions from {sources}.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
-         --machine DIR (repeated, with --json or --serve): one view over several machines' homes, DIR/{claude,codex,proc}.\n\
+         --machine DIR (repeated, with --json or --serve): one view over several machines' homes, DIR/{{{machine_dirs}}}.\n\
          --machines DIR (with --serve or --json): this machine and every machine `semon receive` wrote under\n\
          DIR/machines/, followed while serving; --no-local leaves this machine out. DIR is only read.\n\
          \n\
@@ -2624,13 +2643,13 @@ fn usage() -> String {
          Copies author-owned durable state; refuses an existing destination.\n\
          Usage: semon asi add TABLE --id ID --values FILE|- [--cache PATH]\n\
          Inserts one durable row from a JSON values object; '-' reads stdin. Prints only id/revision.\n\n\
-         Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
+         Usage: semon mcp [--since DURATION | --all] {home_options} [--claude-json PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          With asi-query, use --received-cards DIR to include received stream cards. The query tools plus local durable asi_add
 \
          run over Model Context Protocol on stdin and stdout; no listener. Native queries read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
-         Advanced: semon push [--receiver URL] [--watch] [--since DATE|DURATION] [--max-rate KiB/s] [--stream-cards] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Advanced: semon push [--receiver URL] [--watch] [--since DATE|DURATION] [--max-rate KiB/s] [--stream-cards] [--state PATH] {home_options} [--claude-json PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a push-protocol receiver\n\
          (docs/push-protocol.md), appending as they grow. Run semon pair URL CODE first. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s. --stream-cards includes typed cards in full facts.\n\
@@ -2647,8 +2666,7 @@ fn usage() -> String {
          A push-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; use --listen for a proxy-facing address.\n\
          Serve plain HTTP behind an HTTPS proxy. Legacy DIR/tokens is refused.\n\
-         --max-bytes caps each machine's copy (20G by default); a push past it gets 507."
-.to_owned()
+         --max-bytes caps each machine's copy (20G by default); a push past it gets 507.")
 }
 
 #[cfg(test)]
@@ -2760,6 +2778,20 @@ mod tests {
             assert_eq!(values, PathBuf::from(source));
             assert_eq!(cache, PathBuf::from("cache"));
         }
+    }
+
+    #[test]
+    fn native_home_help_includes_copilot_for_every_command_that_accepts_it() {
+        let help = usage();
+        for command in ["sessions", "mcp", "push"] {
+            assert!(
+                help.lines()
+                    .any(|line| line.contains(&format!("semon {command} ["))
+                        && line.contains("[--copilot-home PATH]")),
+                "{command}"
+            );
+        }
+        assert!(analytics_usage().contains("[--copilot-home PATH]"));
     }
 
     #[test]

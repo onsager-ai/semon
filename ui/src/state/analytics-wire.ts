@@ -38,19 +38,18 @@ const period = shape({
 });
 const busy = shape({ sid: text, ms: number });
 const priced = shape({ sid: text, usd: nullable(number), unpriced_models: strings });
+const harnessAmounts = (value: unknown) => dictionary(value, number);
 const column = shape({
   from: number,
   to: number,
-  claude_ms: number,
-  codex_ms: number,
+  ms_by_harness: harnessAmounts,
   sessions: list(busy),
   more: number,
 });
 const day = shape({
   from: number,
   to: number,
-  claude_usd: number,
-  codex_usd: number,
+  usd_by_harness: harnessAmounts,
   sessions: list(priced),
   more: number,
 });
