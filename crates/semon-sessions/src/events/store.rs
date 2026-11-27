@@ -6261,6 +6261,28 @@ pub(crate) fn warehouse_has_codex_usage(
     native_usage::normalized(connection, path, ledger)
 }
 
+/// Require the native session.start identity written by qualified Copilot admission.
+pub(crate) fn warehouse_copilot_session(
+    connection: &Connection,
+    source: i64,
+    path: &str,
+    expected: &Ledger,
+    native_id: &str,
+) -> rusqlite::Result<bool> {
+    if expected.offset == 0
+        || ledger_row(connection, path)?.is_none_or(|(_, ledger)| &ledger != expected)
+    {
+        return Ok(false);
+    }
+    connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM fact_session_observation
+         WHERE source=?1 AND kind='session-id' AND pos=0 AND block=0
+           AND native_id=?2)",
+        )?
+        .query_row(params![source, native_id], |row| row.get(0))
+}
+
 /// Activity needs normalized metadata only. Never load body rows, transcript
 /// extras, runtime facts, or semantic projections for an analytics input.
 pub(crate) fn warehouse_activity_file(

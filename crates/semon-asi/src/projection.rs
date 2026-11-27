@@ -264,7 +264,10 @@ fn session_row(session: &AdmittedSession) -> Result<Row> {
         int_u64(sum_u64(exclusive.iter().copied().map(select))?)
     };
     let priced = sum_float(exclusive.iter().filter_map(|step| step.cost.usd_est));
-    let all_priced = exclusive.iter().all(|step| step.cost.usd_est.is_some());
+    // Copilot session facts have no priced step evidence. The empty sum is
+    // not an estimate of the session's cost.
+    let all_priced = (session.session.harness != "copilot" || !exclusive.is_empty())
+        && exclusive.iter().all(|step| step.cost.usd_est.is_some());
     let model_ms = complete_sum(session.steps.iter().map(|step| step.model_ms))?;
     let reasoning_tokens =
         complete_sum(exclusive.iter().map(|step| step.billing.reasoning_tokens))?;

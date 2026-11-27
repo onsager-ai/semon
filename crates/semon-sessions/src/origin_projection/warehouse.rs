@@ -469,9 +469,6 @@ impl WarehouseAnalyticsInput {
         owner: &Owner,
         uid: String,
     ) -> rusqlite::Result<Option<semon_asi::input::AdmittedSession>> {
-        if owner.harness == "copilot" {
-            return Ok(None);
-        }
         let members = self.members(owner.source)?;
         if members.is_empty() {
             return Ok(None);
@@ -487,12 +484,25 @@ impl WarehouseAnalyticsInput {
             {
                 return Ok(None);
             }
-            let Some(file) =
-                store::warehouse_activity_file(&self.connection, &member.path, &member.ledger)?
-            else {
-                return Ok(None);
-            };
-            files.push(file);
+            if owner.harness == "copilot" {
+                // Copilot snapshots do not support response steps or deltas.
+                if !store::warehouse_copilot_session(
+                    &self.connection,
+                    member.source,
+                    &member.path,
+                    &member.ledger,
+                    &member.native_id,
+                )? {
+                    return Ok(None);
+                }
+            } else {
+                let Some(file) =
+                    store::warehouse_activity_file(&self.connection, &member.path, &member.ledger)?
+                else {
+                    return Ok(None);
+                };
+                files.push(file);
+            }
             sources.push(
                 member
                     .ledger
