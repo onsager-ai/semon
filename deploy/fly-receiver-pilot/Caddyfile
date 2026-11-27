@@ -1,0 +1,43 @@
+{
+	# Fly terminates public TLS and forwards HTTPS traffic to this private ingress.
+	# Do not log request headers, paths, or bodies; Authorization and pairing data are sensitive.
+	auto_https off
+	log {
+		output discard
+	}
+}
+
+{$PUBLIC_HOST}:8080 {
+	@pair method POST path /v1/pair
+	handle @pair {
+		reverse_proxy 127.0.0.1:8735 {
+			header_up Host {http.request.host}
+		}
+	}
+
+	@unpair method POST path /v1/unpair
+	handle @unpair {
+		reverse_proxy 127.0.0.1:8735 {
+			header_up Host {http.request.host}
+		}
+	}
+
+	@push_write method POST path /v1/push/append /v1/push/facts /v1/push/status
+	handle @push_write {
+		reverse_proxy 127.0.0.1:8735 {
+			header_up Host {http.request.host}
+		}
+	}
+
+	@status_probe method HEAD path /v1/push/status
+	handle @status_probe {
+		reverse_proxy 127.0.0.1:8735 {
+			header_up Host {http.request.host}
+		}
+	}
+
+	# No other path or method, including every Viewer and management route, is public.
+	handle {
+		respond "Not Found" 404
+	}
+}

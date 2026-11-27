@@ -1,0 +1,25 @@
+# Review-only pilot template. Replace app and image after R2 design and owner choices.
+# This file cannot deploy until an approved image packages both Caddy and semon.
+app = "REPLACE_WITH_OWNER_APPROVED_APP_NAME"
+primary_region = "REPLACE_WITH_OWNER_APPROVED_REGION"
+
+[build]
+  image = "REPLACE_WITH_OWNER_APPROVED_IMMUTABLE_INGRESS_IMAGE"
+
+[env]
+  PUBLIC_HOST = "REPLACE_WITH_OWNER_APPROVED_PUBLIC_HOSTNAME"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "REPLACE_WITH_OWNER_APPROVED_VOLUME_NAME"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
