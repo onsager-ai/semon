@@ -7,29 +7,21 @@
 	}
 }
 
-{$PUBLIC_HOST}:8080 {
-	@pair method POST path /v1/pair
-	handle @pair {
+http://{$PUBLIC_HOST}:8080 {
+	@sender_post {
+		method POST
+		path /v1/pair /v1/unpair /v1/push/append /v1/push/facts /v1/push/status
+	}
+	@status_probe {
+		method HEAD
+		path /v1/push/status
+	}
+
+	handle @sender_post {
 		reverse_proxy 127.0.0.1:8735 {
 			header_up Host {http.request.host}
 		}
 	}
-
-	@unpair method POST path /v1/unpair
-	handle @unpair {
-		reverse_proxy 127.0.0.1:8735 {
-			header_up Host {http.request.host}
-		}
-	}
-
-	@push_write method POST path /v1/push/append /v1/push/facts /v1/push/status
-	handle @push_write {
-		reverse_proxy 127.0.0.1:8735 {
-			header_up Host {http.request.host}
-		}
-	}
-
-	@status_probe method HEAD path /v1/push/status
 	handle @status_probe {
 		reverse_proxy 127.0.0.1:8735 {
 			header_up Host {http.request.host}
