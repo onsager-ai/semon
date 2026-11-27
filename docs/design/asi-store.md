@@ -475,9 +475,13 @@ The writer's pure transition table is the authority for chain ownership:
   Explicit operator custody export includes and hashes it, verifies its one-to-one
   live binding, and compares it before guarded reset. Reset removes it with the
   analytics store; coverage continues to read only `fact_session`.
-  ASI schema version 5 keeps this contract and adds recorded `trigger` and
-  `pre_tokens` columns to `fact_compaction`. Older stores are refused with the
-  existing export/reset guidance, without migration or dual readers. Export and
+  ASI schema version 5 added recorded `trigger` and `pre_tokens` columns to
+  `fact_compaction`. Schema version 6 is current: `fact_session` now permits
+  unknown exclusive usage measures and records `step_coverage` (`response` or
+  `none`) and `usage_coverage` (`response`, `snapshot`, `partial` or `none`),
+  replacing `usage_complete`. Snapshot coverage describes cumulative observed
+  usage; it does not claim exclusive response usage. Older stores are refused
+  with the existing export/reset guidance, without migration or dual readers. Export and
   reset also require the current schema: preserve an unsupported store intact and
   use its matching older binary for explicit custody export/reset before rebuilding
   from available admitted sources. Never silently discard frozen data.
