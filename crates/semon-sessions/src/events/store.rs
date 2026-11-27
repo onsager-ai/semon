@@ -6277,7 +6277,7 @@ pub(crate) fn warehouse_copilot_session(
     connection
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM fact_session_observation
-         WHERE source=?1 AND kind='session-id' AND pos=0 AND block=0 AND occurrence=0
+         WHERE source=?1 AND kind='session-id' AND pos=0 AND block=0
            AND native_id=?2)",
         )?
         .query_row(params![source, native_id], |row| row.get(0))
