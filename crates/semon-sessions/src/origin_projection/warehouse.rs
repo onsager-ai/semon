@@ -588,6 +588,7 @@ impl WarehouseAnalyticsInput {
             facts: projection.facts,
             compactions,
             prices,
+            session_usage: crate::UsageCoverage::None,
         })?;
         if let Some(session) = &mut result {
             session.derivation.index_incarnation = Some(self.incarnation.clone());

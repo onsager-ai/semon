@@ -17,8 +17,8 @@ use semon_asi::input::{
     Activity, AdmittedBatch, AdmittedSession, AnalyticsInput, BillingUsage, Compaction,
     ContextBand, Coverage, InputBudget, Model, ParentMethod, Price, PriceUnit, RateKind,
     Reconciliation, RecordedCost, RecordedVersions, Repo, Role, Session, SessionChange, Source,
-    SourceWitness, Status, Step, ToolCall, Trigger, UNKNOWN_REPO_KEY, UsageOwner, WasteKind,
-    encode_component,
+    SourceWitness, Status, Step, StepCoverage, ToolCall, Trigger, UNKNOWN_REPO_KEY, UsageCoverage,
+    UsageOwner, WasteKind, encode_component,
 };
 
 use crate::{
@@ -362,6 +362,20 @@ fn read_session(
     if steps.len() != facts.len() {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    let session_usage = if row.harness == "copilot" {
+        let [source] = row.sources.as_slice() else {
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        let Some(coverage) =
+            crate::events::store::warehouse::session_snapshot_coverage(tx, &row.harness, source)?
+        else {
+            result.push(SessionChange::Pending { session_uid: uid });
+            return Ok(result);
+        };
+        coverage
+    } else {
+        UsageCoverage::None
+    };
     let witness = source_witness(tx, key)?;
     let prices = prices(tx, key, &header.generation, &price.fingerprint)?;
     let Some(session) = admitted(
@@ -375,6 +389,7 @@ fn read_session(
             steps,
             facts,
             prices,
+            session_usage,
         },
     )?
     else {
@@ -645,6 +660,7 @@ struct AdmittedEvidence<'a> {
         native_activity::StepFacts,
     )>,
     prices: Vec<Price>,
+    session_usage: UsageCoverage,
 }
 
 /// `None` withholds only a generation whose anchors cannot be represented.
@@ -662,6 +678,7 @@ fn admitted(
         steps,
         facts,
         prices,
+        session_usage,
     } = evidence;
     if row.key != witness.key || steps.len() != facts.len() {
         return Err(rusqlite::Error::InvalidQuery);
@@ -691,6 +708,7 @@ fn admitted(
         facts: facts.into_iter().map(|(_, id, fact)| (id, fact)).collect(),
         compactions,
         prices,
+        session_usage,
     })?;
     if let Some(session) = &mut projected {
         session.source_witness = indexed_source_witness(&witness.sources)?;
@@ -708,6 +726,7 @@ struct SessionEvidence<'a> {
     facts: BTreeMap<native_activity::ActivityStepId, native_activity::StepFacts>,
     compactions: Vec<Compaction>,
     prices: Vec<Price>,
+    session_usage: UsageCoverage,
 }
 
 fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<AdmittedSession>> {
@@ -721,6 +740,7 @@ fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<Adm
         facts,
         compactions,
         prices,
+        session_usage,
     } = evidence;
     if facts.len() != steps.len() {
         return Err(rusqlite::Error::InvalidQuery);
@@ -745,9 +765,16 @@ fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<Adm
         .iter()
         .filter(|step| step.activity.is_none())
         .count() as u64;
-    let usage_complete = projected_steps
+    let (step_coverage, usage_coverage) = if projected_steps.is_empty() {
+        (StepCoverage::None, session_usage)
+    } else if projected_steps
         .iter()
-        .all(|step| !step.billing.split_unknown);
+        .any(|step| step.billing.split_unknown)
+    {
+        (StepCoverage::Response, UsageCoverage::Partial)
+    } else {
+        (StepCoverage::Response, UsageCoverage::Response)
+    };
     Ok(Some(AdmittedSession {
         session_uid,
         source_witness: indexed_source_witness(sources)?,
@@ -774,7 +801,8 @@ fn project_session(evidence: SessionEvidence<'_>) -> rusqlite::Result<Option<Adm
         session,
         steps: projected_steps,
         compactions,
-        usage_complete,
+        step_coverage,
+        usage_coverage,
         prices,
     }))
 }
@@ -918,7 +946,7 @@ fn session_input(
         role: match row.kind.as_str() {
             "subagent" => Role::Worker,
             "codex-run" if parent_method == ParentMethod::Native => Role::Worker,
-            "session" | "codex-run" => Role::Solo,
+            "session" | "codex-run" | "copilot-session" => Role::Solo,
             _ => Role::Unknown,
         },
         parent_session_uid,

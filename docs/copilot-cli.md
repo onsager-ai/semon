@@ -67,9 +67,12 @@ separate observations. Child `agentMetrics` and compaction usage are not added
 again. Missing or incomplete metrics yield a null snapshot. Snapshot totals do
 not establish fresh branch work, USD billing or original copied-history ownership.
 Copilot costs remain unknown; native request cost units have no USD conversion.
-The common `usage` field carries any observed snapshot and marks coverage and
-ownership unknown; fresh usage and USD remain null. ASI admission is unchanged.
-Snapshot `Tokens.total` is derived input plus output.
+The common `usage` field carries the observed snapshot and marks its ownership
+unknown. Snapshot `Tokens.total` is derived input plus output. ASI admits the
+same session identity with `step_coverage = none`: `usage_coverage` is `snapshot`
+for complete metrics (including measured zero), `partial` for an incomplete
+latest shutdown, or `none` when no shutdown has been observed. ASI publishes no
+response steps, fresh usage, or USD from these snapshots.
 
 ## Redacted viewing copies
 

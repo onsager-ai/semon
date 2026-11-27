@@ -842,6 +842,42 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
         models
     );
     let shutdown = query.copilot.as_ref().unwrap().usage_source.as_ref();
+    if shutdown.is_some() {
+        let [source] = session.sources.as_slice() else {
+            panic!("expected one Copilot source");
+        };
+        let mut binding = Connection::open(EventCache::path(&oracle.options.cache)).unwrap();
+        let tx = binding.transaction().unwrap();
+        assert_eq!(
+            crate::events::store::warehouse::session_snapshot_coverage(&tx, "copilot", source)
+                .unwrap(),
+            Some(common.coverage),
+            "the admitted Copilot marker binds to its exact source and origin"
+        );
+        let mut wrong_native_id = source.clone();
+        wrong_native_id.native_id.push_str("-wrong");
+        assert_eq!(
+            crate::events::store::warehouse::session_snapshot_coverage(
+                &tx,
+                "copilot",
+                &wrong_native_id,
+            )
+            .unwrap(),
+            None,
+            "a valid marker must not bind to a different native session ID"
+        );
+        tx.execute(
+            "UPDATE meta SET value='wrong-origin' WHERE key IN ('storage_namespace','incarnation')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::events::store::warehouse::session_snapshot_coverage(&tx, "copilot", source)
+                .unwrap(),
+            None,
+            "a valid marker must not bind under another origin"
+        );
+    }
     let expected: Vec<_> = shutdown
         .into_iter()
         .map(|s| {

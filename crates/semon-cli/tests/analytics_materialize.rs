@@ -152,6 +152,95 @@ fn live_session_rows(root: &Path) -> BTreeMap<String, Vec<String>> {
 }
 
 #[test]
+fn materialize_admits_copilot_without_inventing_steps_or_fresh_usage() {
+    use semon_asi::schema::FACT_SESSION;
+    use serde_json::json;
+    use std::io::Write;
+
+    let home = fixture::Fixture::new();
+    let id = "00000000-0000-4000-8000-000000000003";
+    let relative = format!("empty-home/.copilot/session-state/{id}/events.jsonl");
+    let path = home.root.join(&relative);
+    let start = json!({
+        "type":"session.start", "id":"copilot-start", "timestamp":"2026-10-03T08:00:00Z",
+        "data":{"sessionId":id, "version":1, "copilotVersion":"1.0.91",
+            "selectedModel":"gpt-test"}
+    });
+    home.write(&relative, format!("{start}\n").as_bytes());
+
+    let expected = |coverage: &str| {
+        let output = materialize(&home);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows = live_rows(&home.root.join("state/analytics-store"));
+        let column = |name| {
+            FACT_SESSION
+                .columns
+                .iter()
+                .position(|column| column.name == name)
+                .unwrap()
+        };
+        let suffix = format!("/copilot/{id}");
+        let copilot: Vec<_> = rows["fact_session"]
+            .iter()
+            .filter(|row| row[column("session_uid")].ends_with(&suffix))
+            .collect();
+        assert_eq!(copilot.len(), 1);
+        let row = copilot[0];
+        assert_eq!(row[column("step_count")], "0");
+        assert_eq!(row[column("step_coverage")], "none");
+        assert_eq!(row[column("usage_coverage")], coverage);
+        assert_eq!(row[column("source_status")], "complete");
+        for name in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_5m_tokens",
+            "cache_write_1h_tokens",
+            "reasoning_tokens",
+            "web_search_requests",
+            "usd_est",
+            "reported_usd",
+            "model_ms",
+        ] {
+            assert!(row[column(name)].is_empty(), "{name} must be null");
+        }
+        for table in ["fact_step", "fact_turn", "fact_tool_call"] {
+            assert!(
+                rows[table]
+                    .iter()
+                    .flatten()
+                    .all(|cell| !cell.contains(&suffix))
+            );
+        }
+    };
+    let append = |id: &str, usage: serde_json::Value| {
+        let event = json!({
+            "type":"session.shutdown", "id":id, "timestamp":"2026-10-03T08:00:01Z",
+            "data":{"modelMetrics":{"gpt-test":{"usage":usage}}}
+        });
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{event}"
+        )
+        .unwrap();
+    };
+
+    expected("none");
+    append(
+        "zero-snapshot",
+        json!({"inputTokens":0, "outputTokens":0, "cacheReadTokens":0,
+        "cacheWriteTokens":0, "reasoningTokens":0}),
+    );
+    expected("snapshot");
+    append("incomplete-snapshot", json!({"inputTokens":7}));
+    expected("partial");
+}
+
+#[test]
 fn materialize_publishes_once_and_reuses_its_namespace() {
     let home = fixture::Fixture::new();
     let first = materialize(&home);

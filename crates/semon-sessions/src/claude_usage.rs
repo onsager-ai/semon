@@ -10,14 +10,7 @@ use crate::Tokens;
 pub(crate) type Records = BTreeMap<String, BTreeSet<String>>;
 pub(crate) type Shared = BTreeMap<String, String>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageCoverage {
-    Response,
-    Snapshot,
-    Partial,
-    None,
-}
+pub use semon_asi::input::UsageCoverage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
