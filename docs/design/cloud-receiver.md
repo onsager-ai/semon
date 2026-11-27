@@ -1,17 +1,23 @@
 # Cloud receiver hosting options
 
-Status: **Option (a) chosen for the synthetic pilot** ("Fly now, R2 later", owner
-decision via Chief PM run 706 on 2026-11-27; baseline `origin/main` `4dd600fc`).
+Status: **Option (a) chosen and synthetic pilot setup defaults approved** ("Fly now, R2
+later" and relayed owner answer `'Approve, region sin'` via Chief PM run 706 on
+2026-11-27; baseline `origin/main` `4dd600fc`). **Not yet provisioned or deployed.**
 
 - **Decision summary:** **(a)** native Rust `semon receive` on one Fly Machine + Fly
-  Volume is **chosen for the synthetic pilot**; **(b)** hybrid async R2 archival is a
-  **separate later decision**; **(c)** full Cloudflare port is **set aside**.
-- **Deployment boundary:** The synthetic pilot uses **one native Fly Machine and one Fly
-  Volume only**—**no R2** in the pilot and **no real data or backfill**. This option
-  selection is **not** a deployment approval or an approved protocol change, and it
-  authorizes no accounts, tokens, deploys, real data/backfill, or code/config changes.
-  The pilot setup batch below remains pending owner decisions. Independent Fly
-  deployment config is owned elsewhere and not duplicated here.
+  Volume is **chosen for the synthetic pilot**, with the pilot setup defaults below
+  **approved** (single region Singapore `sin`, one shared 1 GB Machine + 15 GB Volume,
+  synthetic isolated sender only); **(b)** hybrid async R2 archival is a **separate
+  later decision**; **(c)** full Cloudflare port is **set aside**.
+- **Deployment boundary & current state:** The synthetic pilot uses **one shared 1 GB
+  native Fly Machine and one 15 GB Fly Volume in `sin` only**—**no R2**, **no real data
+  or backfill**, and **no protocol change**. Approving the setup defaults below does
+  **not** mean Fly resources exist or deployment has happened: no org, app, Machine,
+  Volume, token, or deploy exists yet, and concrete non-secret org/app identifiers, a
+  future 24 h app-scoped deploy token, a checked route, and an immutable image are still
+  required before any deployment. This document creates no accounts, tokens, code/config
+  changes, or deployments; independent Fly deployment config is owned elsewhere and not
+  duplicated here.
 
 ## Current Semon contract
 
@@ -225,7 +231,7 @@ Workloads: **1×** = 10 GB retained raw + 0.5 GB index, 5 GB/mo out, 100k API ca
 
 ---
 
-## Decision, recommendation, smallest synthetic pilot, and pending setup choices
+## Decision, recommendation, smallest synthetic pilot, and approved setup defaults
 
 **Decision & recommendation.** Per the owner's **"Fly now, R2 later"** decision (Chief
 PM run 706, 2026-11-27), matching the zero-rewrite recommendation:
@@ -248,27 +254,43 @@ volume snapshot restore + re-sync, then tear down per the owner's retention rule
 throwaway R2 upload/restore verification belongs only to a separate future Option (b)
 decision.)
 
-**Pending owner setup decisions (required before any Fly pilot deployment)** *(option
-selection is settled; the setup batch below remains undecided—do not treat pending
-proposed values as approvals, and this document triggers no owner asks, accounts, or
-deploys)*:
-1. **Org & billing:** Fly organization and billing account that own the pilot.
-2. **Credentials:** How Fly deploy/admin credentials are supplied and kept isolated from
-   pushing machines and Magpie.
-3. **Spend:** Hard monthly spend cap and alert threshold for the Fly pilot.
-4. **Region:** Exact Fly host region for the pilot Machine and Volume (Cloudflare
-   residency/jurisdiction applies only if Option (b) is approved later).
-5. **Public sender routes only vs. private Viewer:** Confirm the public endpoint exposes
-   **sender routes only, including pairing** (`/v1/pair`, `/v1/unpair`, `/v1/push/*`),
-   with **no public Viewer planned**, and decide how the private Viewer is accessed or
-   whether it stays unexposed during the pilot.
-6. **Retention & teardown:** Maximum lifetime and explicit teardown rule for the
-   synthetic pilot Machine, volume, and snapshots (confirming no real data or backfill
-   enters the pilot and no automatic deletion of local copies on unpair).
-7. **Daily snapshots & recovery:** Daily Fly volume snapshot policy/retention and
-   confirmation that daily snapshot recovery (up to 24 h RPO for dead-origin data, with
-   live origins resuming via `409`) meets pilot expectations, leaving off-host async R2
-   archival to a separate later decision.
+**Approved pilot setup defaults** *(per Chief PM's relayed owner answer
+`'Approve, region sin'`, run 706, 2026-11-27; these are approved design/setup defaults
+only—no Fly resources exist and no deployment has occurred)*:
+1. **Org & billing:** A separate Semon pilot Fly organization and one Fly app under
+   existing Fly billing, isolated from Magpie.
+2. **Credentials:** A short-lived app-scoped deploy token (24 h lifetime), supplied via
+   private secret prompt/file only and kept isolated from pushing machines and Magpie.
+3. **Spend & sizing:** $15/month operating limit with a $10 alert (an operating limit
+   and alert, **not** a provider hard cap) covering one shared 1 GB Machine + one 15 GB
+   Volume. The US monthly cost comparison table above remains an **illustrative US
+   baseline**, not a Singapore (`sin`) price quote.
+4. **Region & sender scope:** Single region Singapore (`sin`) for the pilot Machine and
+   Volume, accepting a **synthetic isolated sender only** with **no real data or
+   backfill**. (Cloudflare residency/jurisdiction applies only if Option (b) is approved
+   later.)
+5. **Public sender routes vs. private Viewer:** Public HTTPS exposes a strict sender
+   method/path allowlist including pairing, unpair, and push only (`/v1/pair`,
+   `/v1/unpair`, `/v1/push/*`), with no public Viewer. The Viewer stays **private with
+   owner authentication via an authorized private path**.
+6. **Retention & teardown:** Maximum pilot lifetime of **at most 48 h**, with
+   **explicitly authorized deletion only** of the named pilot app, Machine, and Volume
+   at teardown; volume snapshots expire within **7 days**. (No real data or backfill
+   enters the pilot, and unpair never automatically deletes local copies.)
+7. **Daily snapshots & recovery:** Daily Fly volume snapshots with **≤24 h potential
+   data loss** (for dead-origin data; live origins resume via `409`) and a **target
+   restore in one working day** (an operational target, **not** an SLA), leaving
+   off-host async R2 archival to a separate later decision.
+
+**Still required before any pilot deployment (not yet provisioned or executed):**
+Approving the defaults above does not create resources or complete deployment. Execution
+remains gated on:
+- Concrete **non-secret Fly org and app identifiers** for the isolated pilot org/app.
+- A **future short-lived (24 h) app-scoped deploy token**, delivered via private secret
+  prompt/file only when deployment runs.
+- A **checked route** confirming the public HTTPS sender method/path allowlist
+  (pairing, unpair, push only) and the authorized private Viewer path.
+- An **immutable image** reference built and pinned for the pilot receiver.
 
 ---
 
