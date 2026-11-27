@@ -755,6 +755,53 @@ fn write_fact(
     }
 }
 
+/// Read the latest cumulative session marker only if it belongs to the exact
+/// Index generation admitted by the Catalog and activity projection.
+pub(crate) fn session_snapshot_coverage(
+    tx: &Transaction<'_>,
+    harness: &str,
+    source: &crate::model::summary::CatalogSource,
+) -> rusqlite::Result<Option<crate::UsageCoverage>> {
+    let path = source.path.to_str().ok_or(rusqlite::Error::InvalidQuery)?;
+    let found: Option<(String, String)> = tx
+        .prepare_cached(
+            "SELECT s.ledger,u.coverage FROM warehouse_current c
+             JOIN warehouse_source s USING(source)
+             JOIN current_session_usage_snapshot u USING(source)
+             WHERE c.path=?1 AND s.harness=?2 AND s.origin=?3 AND u.item=0
+               AND EXISTS(SELECT 1 FROM fact_session_observation f
+                          WHERE f.source=s.source AND f.kind='session-id'
+                            AND f.native_id=?4)",
+        )?
+        .query_row(
+            params![
+                path,
+                harness,
+                super::origin_namespace(tx)?,
+                source.native_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((ledger, coverage)) = found else {
+        return Ok(None);
+    };
+    let ledger: Ledger =
+        serde_json::from_str(&ledger).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let mut expected = ledger.source(&source.path, &source.native_id);
+    expected.native_role.clone_from(&source.native_role);
+    if &expected != source {
+        return Ok(None);
+    }
+    let coverage = match coverage.as_str() {
+        "snapshot" => crate::UsageCoverage::Snapshot,
+        "partial" => crate::UsageCoverage::Partial,
+        "none" => crate::UsageCoverage::None,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(Some(coverage))
+}
+
 pub(super) fn runtime_binding(
     tx: &Transaction<'_>,
     wanted: &crate::events::warehouse::RuntimeSource<'_>,

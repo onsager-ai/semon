@@ -2663,7 +2663,7 @@ impl<'a> Builder<'a> {
     ) -> io::Result<Option<events::store::session_activity::Projection>> {
         if !matches!(
             session.kind,
-            SessKind::Lineage | SessKind::Agent | SessKind::Codex
+            SessKind::Lineage | SessKind::Agent | SessKind::Codex | SessKind::Copilot
         ) {
             return Ok(None);
         }

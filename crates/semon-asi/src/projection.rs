@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     error::{Error, Result},
     input::{
-        Activity, AdmittedSession, ContextBand, Price, PriceUnit, RateKind, Step, Trigger,
-        UNKNOWN_REPO_KEY, UsageOwner, WasteKind,
+        Activity, AdmittedSession, ContextBand, Price, PriceUnit, RateKind, Step, StepCoverage,
+        Trigger, UNKNOWN_REPO_KEY, UsageCoverage, UsageOwner, WasteKind,
     },
     schema::{self, Type},
 };
@@ -260,8 +260,13 @@ fn session_row(session: &AdmittedSession) -> Result<Row> {
         .iter()
         .filter(|step| step.usage_owner == UsageOwner::Exclusive)
         .collect();
+    let has_responses = session.step_coverage == StepCoverage::Response;
     let token = |select: fn(&Step) -> u64| -> Result<Cell> {
-        int_u64(sum_u64(exclusive.iter().copied().map(select))?)
+        if has_responses {
+            int_u64(sum_u64(exclusive.iter().copied().map(select))?)
+        } else {
+            Ok(int_opt(None))
+        }
     };
     let priced = sum_float(exclusive.iter().filter_map(|step| step.cost.usd_est));
     let all_priced = exclusive.iter().all(|step| step.cost.usd_est.is_some());
@@ -299,18 +304,39 @@ fn session_row(session: &AdmittedSession) -> Result<Row> {
             "cache_write_1h_tokens",
             token(|step| step.billing.cache_write_1h_tokens)?,
         ),
-        ("reasoning_tokens", int_opt_u64(reasoning_tokens)?),
+        (
+            "reasoning_tokens",
+            int_opt_u64(reasoning_tokens.filter(|_| has_responses))?,
+        ),
         (
             "web_search_requests",
             token(|step| step.billing.web_search_requests)?,
         ),
-        ("usd_est", float(all_priced.then_some(priced))),
+        (
+            "usd_est",
+            float((has_responses && all_priced).then_some(priced)),
+        ),
         ("reported_usd", float(session.session.reported_usd)),
         ("wall_ms", int_opt_u64(wall_ms)?),
-        ("model_ms", int_opt_u64(model_ms)?),
+        ("model_ms", int_opt_u64(model_ms.filter(|_| has_responses))?),
         ("step_count", int_u64(session.steps.len() as u64)?),
         ("failure_count", int_u64(failure_count as u64)?),
-        ("usage_complete", boolean(Some(session.usage_complete))),
+        (
+            "step_coverage",
+            text(match session.step_coverage {
+                StepCoverage::Response => "response",
+                StepCoverage::None => "none",
+            }),
+        ),
+        (
+            "usage_coverage",
+            text(match session.usage_coverage {
+                UsageCoverage::Response => "response",
+                UsageCoverage::Snapshot => "snapshot",
+                UsageCoverage::Partial => "partial",
+                UsageCoverage::None => "none",
+            }),
+        ),
         ("source_status", text("complete")),
         ("computation_status", text("current")),
         (
@@ -703,6 +729,7 @@ mod tests {
     };
 
     fn session(steps: Vec<Step>) -> AdmittedSession {
+        let has_steps = !steps.is_empty();
         AdmittedSession {
             session_uid: "machine/codex/session".into(),
             source_witness: SourceWitness {
@@ -739,7 +766,16 @@ mod tests {
             },
             steps,
             compactions: Vec::new(),
-            usage_complete: true,
+            step_coverage: if has_steps {
+                StepCoverage::Response
+            } else {
+                StepCoverage::None
+            },
+            usage_coverage: if has_steps {
+                UsageCoverage::Response
+            } else {
+                UsageCoverage::None
+            },
             prices: vec![Price {
                 price_version: "historical-price".into(),
                 provider: "openai".into(),
@@ -788,6 +824,22 @@ mod tests {
             ok: None,
             tool_calls: Vec::new(),
         }
+    }
+
+    #[test]
+    fn absent_responses_do_not_become_zero_usage_or_cost() {
+        let mut snapshot = session(Vec::new());
+        snapshot.usage_coverage = UsageCoverage::Snapshot;
+        let aggregate = session_row(&snapshot).unwrap();
+        assert_eq!(aggregate["step_count"], Cell::Integer(Some(0)));
+        assert_eq!(aggregate["input_tokens"], Cell::Integer(None));
+        assert_eq!(aggregate["model_ms"], Cell::Integer(None));
+        assert_eq!(aggregate["usd_est"], Cell::Float(None));
+
+        let observed_zero = session(vec![step(UsageOwner::Exclusive, 0, None)]);
+        let aggregate = session_row(&observed_zero).unwrap();
+        assert_eq!(aggregate["input_tokens"], Cell::Integer(Some(0)));
+        assert_eq!(aggregate["usd_est"], Cell::Float(Some(0.0)));
     }
 
     #[test]
