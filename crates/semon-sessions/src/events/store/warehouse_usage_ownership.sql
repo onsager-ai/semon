@@ -15,7 +15,7 @@ member AS MATERIALIZED (
   CROSS JOIN warehouse_current c ON c.source=u.source
   CROSS JOIN warehouse_source s ON s.source=c.source
   WHERE u.kind='per_response' AND u.uuid IS NOT NULL
-    AND ((?2 IS NOT NULL AND EXISTS(SELECT 1 FROM json_each(?2) WHERE value=c.path))
+    AND ((?2 IS NOT NULL AND c.path IN (SELECT value FROM json_each(?2)))
       OR (?2 IS NULL AND s.origin=?3))
 ), edges AS MATERIALIZED (
   SELECT a.message_id,a.owner,b.owner AS other,a.uuid FROM identities a
