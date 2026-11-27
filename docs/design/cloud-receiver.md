@@ -1,10 +1,17 @@
 # Cloud receiver hosting options
 
-Status: **draft options paper** for owner review (`origin/main` `4dd600fc`). Compares
-three hosting alternatives for `semon receive`; **not** an accepted deployment, **not**
-an approved protocol change, and authorizes no accounts, tokens, deploys, live data, or
-code/config changes. The Fly pilot is on hold until this R2 discussion settles;
-independent Fly deployment config is owned elsewhere and not duplicated here.
+Status: **Option (a) chosen for the synthetic pilot** ("Fly now, R2 later", owner
+decision via Chief PM run 706 on 2026-11-27; baseline `origin/main` `4dd600fc`).
+
+- **Decision summary:** **(a)** native Rust `semon receive` on one Fly Machine + Fly
+  Volume is **chosen for the synthetic pilot**; **(b)** hybrid async R2 archival is a
+  **separate later decision**; **(c)** full Cloudflare port is **set aside**.
+- **Deployment boundary:** The synthetic pilot uses **one native Fly Machine and one Fly
+  Volume only**—**no R2** in the pilot and **no real data or backfill**. This option
+  selection is **not** a deployment approval or an approved protocol change, and it
+  authorizes no accounts, tokens, deploys, real data/backfill, or code/config changes.
+  The pilot setup batch below remains pending owner decisions. Independent Fly
+  deployment config is owned elsewhere and not duplicated here.
 
 ## Current Semon contract
 
@@ -26,7 +33,11 @@ independent Fly deployment config is owned elsewhere and not duplicated here.
 
 ---
 
-## Option (a): Native Rust receiver on a Fly persistent volume (as-is)
+## Option (a): Native Rust receiver on a Fly persistent volume (as-is) — chosen for synthetic pilot
+
+*Status: **Chosen for the synthetic pilot** ("Fly now, R2 later", Chief PM run 706,
+2026-11-27). Pilot scope is one native Fly Machine + one Fly Volume only—no R2 and no
+real data or backfill; DigitalOcean VPS remains below as a comparable VM cost baseline.*
 
 Run the unchanged `semon receive` binary on one Fly Machine with a local NVMe Fly
 Volume (or on a single DigitalOcean Droplet + Block Volume; both are costed below).
@@ -63,7 +74,10 @@ Fly's proxy (or a VPS reverse proxy) terminates HTTPS in front of plain HTTP.
 
 ---
 
-## Option (b): Hybrid — Native Rust receiver + async R2 archive
+## Option (b): Hybrid — Native Rust receiver + async R2 archive — separate later decision
+
+*Status: **Separate later decision** (not part of the synthetic Fly pilot). Revisit only
+after the Option (a) pilot if off-host R2 archival is requested.*
 
 Keep Option (a) for live writes, sealing, indexing, and Viewer, and add an asynchronous
 background worker that uploads immutable sealed segments (`.seal/` zstd segments),
@@ -107,7 +121,10 @@ background worker that uploads immutable sealed segments (`.seal/` zstd segments
 
 ---
 
-## Option (c): Full Cloudflare port (Workers + R2 + D1 or SQLite Durable Objects)
+## Option (c): Full Cloudflare port (Workers + R2 + D1 or SQLite Durable Objects) — set aside
+
+*Status: **Set aside** by owner decision ("Fly now, R2 later", Chief PM run 706,
+2026-11-27). Retained below for comparison context only.*
 
 Re-implement the receiver on Workers storing raw chunks in R2 and metadata/registry/facts
 in **SQLite Durable Objects** (one serialized writer per machine) or **D1**. **No
@@ -208,39 +225,50 @@ Workloads: **1×** = 10 GB retained raw + 0.5 GB index, 5 GB/mo out, 100k API ca
 
 ---
 
-## Recommendation, smallest synthetic test, and owner choices
+## Decision, recommendation, smallest synthetic pilot, and pending setup choices
 
-**Recommendation.** Start with **Option (a)** (Fly volume, or DO VPS if flat billing
-and pooled transfer matter more) for zero-rewrite operational validation. Add
-**Option (b)** (async R2 archive of immutable sealed segments/chains) once off-host
-recovery expectations justify additive R2 storage and egress. **Defer Option (c)**: the
-$5/$6.35 floor hides a full server/Viewer rewrite, D1's 10 GB cap, and external compute
-still required for DuckDB/Parquet/FTS parity.
+**Decision & recommendation.** Per the owner's **"Fly now, R2 later"** decision (Chief
+PM run 706, 2026-11-27), matching the zero-rewrite recommendation:
+- **Option (a) — chosen for the synthetic pilot:** Run **one native `semon receive` Fly
+  Machine with one Fly Volume**, with **no R2** and **no real data or backfill**, for
+  zero-rewrite operational validation.
+- **Option (b) — separate later decision:** Add async R2 archival of immutable sealed
+  segments/chains only as a separate follow-up decision once off-host recovery
+  expectations justify additive R2 storage and Fly egress.
+- **Option (c) — set aside:** The $5/$6.35 floor hides a full server/Viewer rewrite,
+  D1's 10 GB cap, and external compute still required for DuckDB/Parquet/FTS parity.
 
-**Smallest isolated synthetic test.** Stand up one throwaway receiver with **synthetic
-fixture logs only** (zero live data/secrets) and a tight `--max-bytes` cap. Run an
-automated `semon push` pass verifying: (1) pair + append + simulated ack-loss `409`
-resume, (2) `replace: true` archive-chain creation, (3) `507` refusal + recovery,
-(4) forced Index rebuild (`503 receiver_rebuilding`), and (5) volume snapshot restore +
-re-sync. If testing (b), add one throwaway R2 bucket, upload sealed blobs with
-`If-None-Match: *`, restore + verify plain SHA-256 into a clean dir, then tear down.
+**Smallest isolated synthetic pilot (Option (a) only).** Stand up **one throwaway native
+Fly Machine + one Fly Volume** running `semon receive` with **synthetic fixture logs
+only** (**no R2**, **no real data or backfill**, zero live secrets) and a tight
+`--max-bytes` cap. Run an automated `semon push` pass verifying: (1) pair + append +
+simulated ack-loss `409` resume, (2) `replace: true` archive-chain creation, (3) `507`
+refusal + recovery, (4) forced Index rebuild (`503 receiver_rebuilding`), and (5) Fly
+volume snapshot restore + re-sync, then tear down per the owner's retention rule. (Any
+throwaway R2 upload/restore verification belongs only to a separate future Option (b)
+decision.)
 
-**Owner choices required before any pilot or implementation** *(in-doc only; no owner
-asks sent now)*:
-1. **Org & credential delivery:** Billing org and isolation of cloud owner keys from
+**Pending owner setup decisions (required before any Fly pilot deployment)** *(option
+selection is settled; the setup batch below remains undecided—do not treat pending
+proposed values as approvals, and this document triggers no owner asks, accounts, or
+deploys)*:
+1. **Org & billing:** Fly organization and billing account that own the pilot.
+2. **Credentials:** How Fly deploy/admin credentials are supplied and kept isolated from
    pushing machines and Magpie.
-2. **Monthly cap:** Hard spend alert/ceiling at 1× and 10× (and Fly vs. DO preference).
-3. **Region & jurisdiction:** Exact host region (`iad`/`fra`/`sin`, etc.) and whether
-   legal residency (immutable Cloudflare jurisdictions + Regional Services) is needed
-   vs. a best-effort location hint.
-4. **Public exposure vs. private Viewer:** Internet-facing `/v1/push/*` only with
-   private/VPN Viewer vs. Viewer exposed on `--public-url`.
-5. **Synthetic test retention, snapshot & delete policy:** Lifetime and explicit
-   teardown rule for synthetic volumes, snapshots, and test R2 buckets.
-6. **Raw custody:** Confirm local host copies stay complete with no automatic eviction
-   or deletion (including after R2 archival or unpair).
-7. **Recovery expectation:** Daily volume snapshots (up to 24 h RPO for dead-origin
-   data) vs. minutes-level async R2 archive lag.
+3. **Spend:** Hard monthly spend cap and alert threshold for the Fly pilot.
+4. **Region:** Exact Fly host region for the pilot Machine and Volume (Cloudflare
+   residency/jurisdiction applies only if Option (b) is approved later).
+5. **Public sender routes only vs. private Viewer:** Confirm the public endpoint exposes
+   **sender routes only, including pairing** (`/v1/pair`, `/v1/unpair`, `/v1/push/*`),
+   with **no public Viewer planned**, and decide how the private Viewer is accessed or
+   whether it stays unexposed during the pilot.
+6. **Retention & teardown:** Maximum lifetime and explicit teardown rule for the
+   synthetic pilot Machine, volume, and snapshots (confirming no real data or backfill
+   enters the pilot and no automatic deletion of local copies on unpair).
+7. **Daily snapshots & recovery:** Daily Fly volume snapshot policy/retention and
+   confirmation that daily snapshot recovery (up to 24 h RPO for dead-origin data, with
+   live origins resuming via `409`) meets pilot expectations, leaving off-host async R2
+   archival to a separate later decision.
 
 ---
 
