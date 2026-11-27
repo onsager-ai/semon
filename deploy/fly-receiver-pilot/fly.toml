@@ -1,7 +1,7 @@
 # Review-only pilot template. Replace app and image after R2 design and owner choices.
 # This file cannot deploy until an approved image packages both Caddy and semon.
 app = "REPLACE_WITH_OWNER_APPROVED_APP_NAME"
-primary_region = "REPLACE_WITH_OWNER_APPROVED_REGION"
+primary_region = "sin"
 
 [build]
   image = "REPLACE_WITH_OWNER_APPROVED_IMMUTABLE_INGRESS_IMAGE"

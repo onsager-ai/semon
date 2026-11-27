@@ -9,8 +9,9 @@ credential. Merging it must not trigger deployment, release, cleanup, or deletio
 
 `Caddyfile` is the only public application listener. The Fly proxy terminates
 HTTPS and forwards to Caddy on port 8080. Caddy accepts only the explicit
-`PUBLIC_HOST` hostname placeholder in `fly.toml`, and forwards only these method/path
-pairs to the private receiver at `127.0.0.1:8735`:
+`PUBLIC_HOST` hostname placeholder in `fly.toml`. Each public route requires both
+its listed method and exact path, and forwards to the private receiver at
+`127.0.0.1:8735`:
 
 - `POST /v1/pair` for a one-time pairing code exchange.
 - `POST /v1/unpair` for authenticated sender revocation.
@@ -39,8 +40,8 @@ Caddy. An owner-approved immutable image must package the reviewed Caddy config,
 the `semon` binary, and a launcher that starts the receiver on
 `127.0.0.1:8735` with the approved `--public-url`, then starts Caddy on port
 8080. No image is named or built here. The placeholders in `fly.toml` are
-intentionally not deployable until R2 decisions establish the app, image, region,
-and volume names.
+intentionally not deployable until R2 decisions establish the app, image, and
+volume names.
 
 Before any pilot, owner decisions must also set the Fly app to exactly one
 machine and provision exactly one persistent volume for `/data`. The template
