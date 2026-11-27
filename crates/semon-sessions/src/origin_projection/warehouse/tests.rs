@@ -231,6 +231,71 @@ fn cold_start_warehouse_matches_semantic_origin() {
 }
 
 #[test]
+fn copilot_session_fact_requires_committed_start_evidence() {
+    use semon_asi::Cell;
+
+    let fixture = Fixture::new("copilot-session");
+    let id = "00000000-0000-4000-8000-000000000003";
+    let path = fixture
+        .options
+        .copilot_home
+        .join(format!("session-state/{id}/events.jsonl"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = fs::File::create(path).unwrap();
+    for record in [
+        json!({
+            "type":"session.start", "id":"copilot-start", "timestamp":"2026-10-03T08:00:00Z",
+            "data":{"sessionId":id, "version":1, "copilotVersion":"1.0.91", "selectedModel":"gpt-test"}
+        }),
+        json!({
+            "type":"session.shutdown", "id":"copilot-stop", "timestamp":"2026-10-03T08:00:01Z",
+            "data":{"modelMetrics":{"gpt-test":{"usage":{
+                "inputTokens":11,"outputTokens":3,"cacheReadTokens":2,"cacheWriteTokens":0,"reasoningTokens":1
+            }}}}
+        }),
+    ] {
+        writeln!(file, "{record}").unwrap();
+    }
+    drop(file);
+    fixture.admit();
+
+    let uid = format!("{NAMESPACE}/copilot/{id}");
+    let sessions = drain(&mut fixture.open());
+    assert_eq!(sessions.len(), 1);
+    let session = &sessions[&uid];
+    assert_eq!(session.session.native_session_id, id);
+    let rows = project(session).unwrap().tables;
+    assert_eq!(rows["fact_session"].len(), 1);
+    let row = &rows["fact_session"][0];
+    assert_eq!(row["session_uid"], Cell::Text(Some(uid.clone())));
+    assert_eq!(row["step_count"], Cell::Integer(Some(0)));
+    assert_eq!(row["input_tokens"], Cell::Integer(Some(0)));
+    assert_eq!(row["output_tokens"], Cell::Integer(Some(0)));
+    assert_eq!(row["usd_est"], Cell::Float(None));
+    assert_eq!(row["reported_usd"], Cell::Float(None));
+    for table in ["fact_step", "fact_turn", "fact_tool_call"] {
+        assert!(!rows.contains_key(table));
+    }
+
+    // Leave the inventory and ledger intact, but remove the committed identity proof.
+    let db = Connection::open(crate::analytics_index_path(&fixture.options.cache)).unwrap();
+    assert_eq!(
+        db.execute(
+            "DELETE FROM fact_session_observation WHERE kind='session-id' AND native_id=?1",
+            [id],
+        )
+        .unwrap(),
+        1
+    );
+    let batch = fixture.open().read_admitted(None, BUDGET).unwrap();
+    assert!(batch.complete);
+    assert!(matches!(
+        batch.changes.as_slice(),
+        [SessionChange::Pending { session_uid }] if session_uid == &uid
+    ));
+}
+
+#[test]
 fn both_harnesses_preserve_evidence_turns_and_usage() {
     use semon_asi::input::UsageOwner::{Copied, Exclusive};
 

@@ -68,8 +68,12 @@ again. Missing or incomplete metrics yield a null snapshot. Snapshot totals do
 not establish fresh branch work, USD billing or original copied-history ownership.
 Copilot costs remain unknown; native request cost units have no USD conversion.
 The common `usage` field carries any observed snapshot and marks coverage and
-ownership unknown; fresh usage and USD remain null. ASI admission is unchanged.
+ownership unknown; fresh usage and USD remain null.
 Snapshot `Tokens.total` is derived input plus output.
+
+ASI admits a session fact when the Index can verify the committed `session.start`
+identity and source ledger. Missing evidence leaves the session pending. Copilot
+snapshots do not produce ASI response steps, token deltas or USD estimates.
 
 ## Redacted viewing copies
 
