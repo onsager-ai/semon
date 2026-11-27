@@ -1270,7 +1270,7 @@ mod tests {
         serde_json::json!({
             "key":"owner","name":"Synthetic owner","harness":"codex","kind":"Codex",
             "native_ids":["owner"],"model":"unknown","tokens":[0,0,0],
-            "cost":{"pricing_fingerprint":"","usd":null,"unpriced_models":[],
+            "cost":{"pricing_fingerprint":"","usd":null,"provenance":"unknown","unpriced_models":[],
                 "split_unknown_messages":0,"by_model":{},"by_day":{}},
             "sources":[{"path":"original","native_id":"owner", "dev":ledger.stat.dev,
                 "ino":ledger.stat.ino,"size":ledger.stat.size,"modified_ns":ledger.stat.modified_ns,

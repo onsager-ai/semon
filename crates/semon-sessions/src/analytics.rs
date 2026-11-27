@@ -59,6 +59,7 @@ pub(crate) struct Activity {
     pub(crate) cost_by_day: Vec<(i64, f64)>,
     pub(crate) incomplete_usage_days: BTreeSet<i64>,
     pub(crate) incomplete_usage_time: bool,
+    pub(crate) cost_provenance: crate::CostProvenance,
     pub(crate) unpriced_models: Vec<String>,
     pub(crate) rate_limits: Option<RateLimits>,
     /// When each of its messages to you that still waits was sent: a
@@ -164,6 +165,7 @@ pub(crate) fn activity(
                     .copied()
                     .collect(),
                 incomplete_usage_time: session.incomplete_usage_time,
+                cost_provenance: session.cost.provenance,
                 unpriced_models: session.cost.unpriced_models.clone(),
                 rate_limits: session.rate_limits.clone(),
                 waits: session
@@ -473,7 +475,7 @@ fn cost_in(activity: &Activity, (from, to): (i64, i64)) -> Cost {
             .any(|day| *day >= from && day + DAY_MS <= to);
     let has_data = !days.is_empty()
         || incomplete_usage
-        || (activity.harness == "copilot"
+        || (activity.cost_provenance == crate::CostProvenance::Snapshot
             && (in_range(activity.start, from, to)
                 || activity
                     .busy
@@ -1000,6 +1002,7 @@ mod tests {
             cost_by_day: Vec::new(),
             incomplete_usage_days: BTreeSet::new(),
             incomplete_usage_time: false,
+            cost_provenance: crate::CostProvenance::Unknown,
             unpriced_models: Vec::new(),
             rate_limits: None,
             waits: Vec::new(),

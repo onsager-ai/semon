@@ -21,6 +21,11 @@ thread_local! {
 }
 
 pub(crate) const DETAIL: &str = include_str!("warehouse_detail.sql");
+const USAGE_OWNERSHIP: &str = include_str!("warehouse_usage_ownership.sql");
+
+pub(crate) fn usage_query(projection: &str) -> String {
+    format!("{USAGE_OWNERSHIP}{projection}")
+}
 
 pub(super) const SCHEMA: &str = include_str!("warehouse.sql");
 
@@ -59,7 +64,7 @@ use super::{FileIndex, Ledger, int, json};
 use crate::{
     events::{
         DENIED, Kind, SEND_FAILED,
-        warehouse::{Batch, Fact, Observation, Sidecar},
+        warehouse::{Batch, Fact, Observation, Sidecar, UsageMeasurement},
     },
     native_timing::Measurements,
 };
@@ -309,17 +314,8 @@ pub(super) fn write(
         )?;
         header_kind = Some(kind);
     }
-    let mut record_uuid = None;
-    let mut record_offset = None;
     for observation in &batch.observations {
-        if record_offset != Some(observation.position.offset) {
-            record_offset = Some(observation.position.offset);
-            record_uuid = None;
-        }
-        if let Fact::Record { uuid, .. } = &observation.fact {
-            record_uuid = uuid.as_deref();
-        }
-        write_fact(tx, source, batch, observation, record_uuid)?;
+        write_fact(tx, source, batch, observation)?;
     }
     let eof_witness = if batch.eof.is_empty() {
         None
@@ -456,7 +452,6 @@ fn write_fact(
     source: i64,
     batch: &Batch,
     observation: &Observation,
-    record_uuid: Option<&str>,
 ) -> rusqlite::Result<()> {
     let pos = int(observation.position.offset);
     let block = observation.position.block;
@@ -508,52 +503,144 @@ fn write_fact(
         Fact::LaunchCandidate { call_id, tool } => {
             at!(fact_claude_call,call_id=>call_id,tool=>tool)
         }
-        Fact::ClaudeUsage {
-            message_id,
-            model,
-            tokens,
-            billing,
-        } => {
-            at!(fact_step_observation,kind=>"claude",message_id=>message_id,uuid=>record_uuid,
-                model=>model,input=>int(tokens.input),cached=>int(tokens.cached_input),output=>int(tokens.output),
-                ts=>billing.timestamp,accepted=>true)?;
-            at!(fact_step_billing,kind=>"claude",billing=>json(billing)?)
-        }
-        Fact::CodexUsage {
-            identity,
-            model,
-            tokens,
-            model_tokens,
-            time,
-            accepted,
-        } => {
-            at!(fact_step_observation,kind=>"codex-response",message_id=>identity,uuid=>record_uuid,
-                model=>model,input=>int(tokens.input),cached=>int(tokens.cached_input),output=>int(tokens.output),
-                ts=>time,accepted=>accepted)?;
-            at!(fact_step_billing,kind=>"codex-response",billing=>json(model_tokens)?)
-        }
-        Fact::CodexTokenSnapshot {
-            model,
-            tokens,
-            time,
-        } => at!(fact_step_observation,
-            kind=>"codex-snapshot",message_id=>Option::<&str>::None,uuid=>record_uuid,
-            model=>model,input=>int(tokens.input),cached=>int(tokens.cached_input),output=>int(tokens.output),
-            ts=>time,accepted=>true),
-        Fact::CopilotShutdown {
-            event_id,
-            time,
-            usage,
-        } => {
-            at!(fact_copilot_shutdown,event_id=>event_id,ts=>time,complete=>usage.is_some())?;
-            if let Some(usage) = usage {
-                for (model, tokens) in &usage.by_model {
-                    at!(fact_copilot_usage,model=>model,input=>int(tokens.input),output=>int(tokens.output),
-                        cached=>int(tokens.cache_read),cache_write=>int(tokens.cache_write),
-                        reasoning=>int(usage.reasoning_by_model[model]))?;
+        Fact::Usage(usage) => {
+            let mut item = 0_i64;
+            let mut write = |kind: &str,
+                             scope: &str,
+                             model: Option<&str>,
+                             tokens: &crate::Tokens,
+                             cache_write: u64,
+                             accepted: Option<bool>,
+                             billing: Option<&crate::events::BillingUsage>,
+                             provider: Option<&str>,
+                             coverage: &str,
+                             cost: &str|
+             -> rusqlite::Result<()> {
+                let provenance = if cost == "list_priced"
+                    && model.is_none_or(crate::pricing::gateway_billing_only)
+                {
+                    "unknown"
+                } else {
+                    cost
+                };
+                at!(fact_usage_observation,item=>item,kind=>kind,scope=>scope,message_id=>usage.identity,
+                    uuid=>usage.record_id,model=>model,input=>int(tokens.input),cached=>int(tokens.cached_input),
+                    output=>int(tokens.output),cache_write=>int(cache_write),reasoning=>int(tokens.reasoning_output),
+                    ts=>usage.timestamp,accepted=>accepted,billing=>billing.map(json).transpose()?,provider=>provider,
+                    coverage=>coverage,cost_provenance=>provenance)?;
+                item += 1;
+                Ok(())
+            };
+            match &usage.measurement {
+                UsageMeasurement::PerResponse {
+                    model,
+                    tokens,
+                    billing,
+                } => write(
+                    "per_response",
+                    "response",
+                    model.as_deref(),
+                    tokens,
+                    billing
+                        .cache_write_5m
+                        .saturating_add(billing.cache_write_1h),
+                    None,
+                    Some(billing),
+                    Some("anthropic"),
+                    if billing.split_unknown {
+                        "partial"
+                    } else {
+                        "response"
+                    },
+                    "list_priced",
+                ),
+                UsageMeasurement::ResponseWithAcceptance {
+                    model,
+                    tokens,
+                    billing,
+                    accepted,
+                } => {
+                    let billing = crate::events::BillingUsage {
+                        input: billing.input,
+                        output: billing.output,
+                        cache_read: billing.cache_read,
+                        prompt_size: billing.input.saturating_add(billing.cache_read),
+                        timestamp: usage.timestamp,
+                        ..Default::default()
+                    };
+                    write(
+                        "accepted_response",
+                        "response",
+                        model.as_deref(),
+                        tokens,
+                        0,
+                        Some(*accepted),
+                        Some(&billing),
+                        Some("openai"),
+                        if *accepted { "response" } else { "none" },
+                        "list_priced",
+                    )
+                }
+                UsageMeasurement::ThreadSnapshot { model, tokens } => write(
+                    "cumulative_snapshot",
+                    "thread",
+                    model.as_deref(),
+                    tokens,
+                    0,
+                    None,
+                    None,
+                    Some("openai"),
+                    "snapshot",
+                    "snapshot",
+                ),
+                UsageMeasurement::SessionSnapshot {
+                    usage: snapshot,
+                    observed,
+                } => {
+                    write(
+                        "cumulative_snapshot",
+                        "session",
+                        None,
+                        &crate::Tokens::default(),
+                        0,
+                        None,
+                        None,
+                        None,
+                        if snapshot.is_some() {
+                            "snapshot"
+                        } else if *observed {
+                            "partial"
+                        } else {
+                            "none"
+                        },
+                        "snapshot",
+                    )?;
+                    if let Some(snapshot) = snapshot {
+                        for (model, counts) in &snapshot.by_model {
+                            let tokens = crate::Tokens {
+                                input: counts.input,
+                                cached_input: counts.cache_read,
+                                output: counts.output,
+                                reasoning_output: snapshot.reasoning_by_model[model],
+                                ..Default::default()
+                            };
+                            write(
+                                "cumulative_snapshot",
+                                "session",
+                                Some(model),
+                                &tokens,
+                                counts.cache_write,
+                                None,
+                                None,
+                                None,
+                                "snapshot",
+                                "snapshot",
+                            )?;
+                        }
+                    }
+                    Ok(())
                 }
             }
-            Ok(())
         }
         Fact::CodexTurn {
             thread_id,

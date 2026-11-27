@@ -441,21 +441,17 @@ fn retained_cost(
     row: &crate::model::summary::CatalogRow,
     table: &Arc<EffectiveTable>,
 ) -> rusqlite::Result<Option<Cost>> {
-    if row.sources.is_empty()
-        || row.sources.len() > 64
-        || !matches!(row.harness.as_str(), "claude" | "codex")
-    {
+    if row.sources.is_empty() || row.sources.len() > 64 {
         return Ok(None);
     }
     let mut build = CostBuild::with_table(Arc::clone(table));
-    let mut messages: BTreeMap<String, MessageUsage> = BTreeMap::new();
+    let mut responses = BTreeMap::new();
     let mut facts = 0;
     for source in &row.sources {
         let Some(path) = source.path.to_str() else {
             return Ok(None);
         };
-        let current = ledger_row(tx, path)?;
-        let Some((file_id, ledger)) = current else {
+        let Some((_, ledger)) = ledger_row(tx, path)? else {
             return Ok(None);
         };
         if ledger.offset != source.offset
@@ -469,76 +465,111 @@ fn retained_cost(
         {
             return Ok(None);
         }
-        if row.harness == "claude" {
-            let mut statement=tx.prepare(&format!("SELECT {USAGE_COLUMNS} FROM usage WHERE file_id=?1 AND octet_length(record_ids)<=65536 AND length(COALESCE(model,''))<=512 LIMIT ?2"))?;
-            let total: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM (SELECT 1 FROM usage WHERE file_id=?1 LIMIT ?2)",
-                params![file_id, (MAX_FACTS + 1) as i64],
-                |r| r.get(0),
+        let Some(warehouse_source) = tx
+            .query_row(
+                "SELECT source FROM warehouse_current JOIN warehouse_source USING(source)
+             WHERE path=?1 AND ledger=?2",
+                params![path, json(&ledger)?],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut statement = tx.prepare_cached(
+            "SELECT scope,kind,message_id,model,provider,billing,input,cached,output,ts,accepted
+             FROM fact_usage_observation WHERE source=?1 AND pos<?2 AND item=0
+             ORDER BY pos,block,occurrence LIMIT ?3",
+        )?;
+        let mut rows = statement.query(params![
+            warehouse_source,
+            int(ledger.offset),
+            (MAX_FACTS + 1 - facts) as i64
+        ])?;
+        let mut source_responses = BTreeMap::new();
+        let mut snapshot_cost = CostBuild::with_table(Arc::clone(table));
+        let mut previous = (0_u64, 0_u64, 0_u64);
+        let mut has_response_cohort = false;
+        let mut has_thread_snapshot = false;
+        while let Some(observation) = rows.next()? {
+            facts += 1;
+            if facts > MAX_FACTS {
+                return Ok(None);
+            }
+            let scope: String = observation.get(0)?;
+            let kind: String = observation.get(1)?;
+            let model: Option<String> = observation.get(3)?;
+            let provider: Option<String> = observation.get(4)?;
+            match scope.as_str() {
+                "response" => {
+                    has_response_cohort |= kind == "accepted_response";
+                    if observation.get::<_, Option<bool>>(10)? == Some(false) {
+                        continue;
+                    }
+                    let id: String = observation.get(2)?;
+                    let provider = provider.ok_or(rusqlite::Error::InvalidQuery)?;
+                    let billing: String = observation.get(5)?;
+                    if billing.len() > 8192 || model.as_ref().is_some_and(|value| value.len() > 512)
+                    {
+                        return Ok(None);
+                    }
+                    let billing: BillingUsage = decode_json(5, &billing)?;
+                    source_responses.insert((kind, id), (provider, model, billing));
+                }
+                "thread" => {
+                    has_thread_snapshot = true;
+                    let current = (
+                        uint(observation.get(6)?),
+                        uint(observation.get(7)?),
+                        uint(observation.get(8)?),
+                    );
+                    if let (Some(provider), Some(model)) = (provider, model) {
+                        let cache_read = current.1.saturating_sub(previous.1);
+                        let input = current
+                            .0
+                            .saturating_sub(previous.0)
+                            .saturating_sub(cache_read);
+                        snapshot_cost.observe(
+                            &provider,
+                            Some(&model),
+                            &BillingUsage {
+                                input,
+                                output: current.2.saturating_sub(previous.2),
+                                cache_read,
+                                prompt_size: input.saturating_add(cache_read),
+                                timestamp: observation.get(9)?,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    previous = current;
+                }
+                "session" => return Ok(None),
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            }
+        }
+        for (identity, observation) in source_responses {
+            if responses
+                .get(&identity)
+                .is_some_and(|prior| prior != &observation)
+            {
+                return Ok(None);
+            }
+            responses.insert(identity, observation);
+        }
+        if has_thread_snapshot && !has_response_cohort {
+            let forked: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM fact_session_observation WHERE source=?1 AND pos=-1
+                  AND kind='header' AND json_extract(metadata,'$.history.forked_from_id') IS NOT NULL)",
+                [warehouse_source], |r| r.get(0),
             )?;
-            if total as usize + facts > MAX_FACTS {
-                return Ok(None);
-            }
-            let rows = statement.query_map(params![file_id, (MAX_FACTS + 1) as i64], read_usage)?;
-            let mut loaded = 0;
-            for result in rows {
-                let (id, message) = result?;
-                loaded += 1;
-                if let Some(prior) = messages.get(&id)
-                    && (prior.model != message.model || prior.billing != message.billing)
-                {
-                    return Ok(None);
-                }
-                messages.insert(id, message);
-            }
-            if loaded != total as usize {
-                return Ok(None);
-            }
-            facts += loaded;
-        } else {
-            let encoded:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(codex_native_usage)<=1048576 THEN codex_native_usage ELSE NULL END FROM files WHERE file_id=?1",[file_id],|r|r.get(0))?;
-            if let Some(encoded) = encoded {
-                if let Some((id, _)) = native_usage::source(tx, path)? {
-                    let count:i64=tx.query_row("SELECT COUNT(*) FROM (SELECT 1 FROM native_usage_dimensions WHERE source_id=?1 LIMIT 4097)",[id],|r|r.get(0))?;
-                    if count > MAX_FACTS as i64 {
-                        return Ok(None);
-                    }
-                }
-                let native = native_usage::restore(tx, path, &ledger, Some(encoded))?
-                    .ok_or(rusqlite::Error::InvalidQuery)?;
-                let index = FileIndex {
-                    codex_native_usage: Some(native),
-                    ..FileIndex::default()
-                };
-                let cost = index.codex_cost();
-                if cost.pricing_fingerprint != table.fingerprint {
-                    return Ok(None);
-                }
-                build.merge(&cost);
-            } else {
-                let mut statement=tx.prepare("SELECT model,input,output,cache_write,cache_read,t FROM codex_usage WHERE file_id=?1 ORDER BY seq LIMIT ?2")?;
-                let mut rows = statement.query(params![file_id, (MAX_FACTS + 1) as i64])?;
-                while let Some(r) = rows.next()? {
-                    facts += 1;
-                    if facts > MAX_FACTS {
-                        return Ok(None);
-                    }
-                    build.codex(&CodexUsageEvent {
-                        model: r.get(0)?,
-                        tokens: ModelTokens {
-                            input: uint(r.get(1)?),
-                            output: uint(r.get(2)?),
-                            cache_write: uint(r.get(3)?),
-                            cache_read: uint(r.get(4)?),
-                        },
-                        timestamp: r.get(5)?,
-                    });
-                }
+            if !forked {
+                build.merge(&snapshot_cost);
             }
         }
     }
-    for message in messages.values() {
-        build.message(message)
+    for (provider, model, billing) in responses.into_values() {
+        build.observe(&provider, model.as_deref(), &billing);
     }
     let mut cost = build.finish();
     // Existing ownership/copy exclusions must be exactly reproducible. Token
@@ -554,7 +585,8 @@ fn retained_cost(
         return Ok(None);
     }
     if row.cost.usd.is_none() && row.cost.unpriced_models.is_empty() {
-        cost.usd = None
+        cost.usd = None;
+        cost.provenance = crate::CostProvenance::Unknown;
     }
     Ok(Some(cost))
 }
@@ -652,6 +684,7 @@ fn catalog_step(
                 .map_err(|_| rusqlite::Error::InvalidQuery)?
         {
             value["home"]["cost"] = serde_json::to_value(cost.usd).map_err(sql_json)?;
+            update_usage_provenance(&mut value["home"], &cost)?;
             if let Some(days) = value
                 .pointer_mut("/activity/cost_by_day")
                 .and_then(Value::as_array_mut)
@@ -671,6 +704,8 @@ fn catalog_step(
                 }
             }
             if let Some(activity) = value.get_mut("activity").filter(|v| v.is_object()) {
+                activity["cost_provenance"] =
+                    serde_json::to_value(cost.provenance).map_err(sql_json)?;
                 activity["unpriced_models"] =
                     serde_json::to_value(&cost.unpriced_models).map_err(sql_json)?;
             }
@@ -707,8 +742,18 @@ fn catalog_step(
     Ok(true)
 }
 
+fn update_usage_provenance(value: &mut Value, cost: &Cost) -> rusqlite::Result<()> {
+    if let Some(usage) = value.get_mut("usage").filter(|usage| usage.is_object())
+        && usage["coverage"] != "snapshot"
+    {
+        usage["cost_provenance"] = serde_json::to_value(cost.provenance).map_err(sql_json)?;
+    }
+    Ok(())
+}
+
 fn replace_costs(value: &mut Value, old: &Cost, cost: &Cost) -> rusqlite::Result<()> {
     if let Some(object) = value.as_object_mut() {
+        let mut replaced = false;
         for (key, value) in object {
             if key == "cost" && value.is_object() && value.get("by_model").is_some() {
                 let found: Cost = serde_json::from_value(value.clone()).map_err(sql_json)?;
@@ -719,10 +764,14 @@ fn replace_costs(value: &mut Value, old: &Cost, cost: &Cost) -> rusqlite::Result
                         .all(|(id, m)| old.by_model.get(id).is_some_and(|o| m.tokens == o.tokens))
                 {
                     *value = serde_json::to_value(cost).map_err(sql_json)?;
+                    replaced = true;
                 }
             } else {
                 replace_costs(value, old, cost)?;
             }
+        }
+        if replaced {
+            update_usage_provenance(value, cost)?;
         }
     } else if let Some(array) = value.as_array_mut() {
         for value in array {
@@ -961,6 +1010,33 @@ mod tests {
             native_role: None,
         }
     }
+    fn warehouse_usage(index: &mut FileIndex, harness: &str) {
+        use crate::events::warehouse::{Batch, Fact, UsageMeasurement, UsageObservation};
+        let mut batch = Batch::new(harness).unwrap();
+        for (id, message) in &index.usage_by_id {
+            batch.push(
+                message.offset,
+                0,
+                Fact::usage(UsageObservation {
+                    identity: Some(id.clone()),
+                    record_id: None,
+                    timestamp: message.billing.timestamp,
+                    measurement: UsageMeasurement::PerResponse {
+                        model: message.model.clone(),
+                        tokens: message.tokens.clone(),
+                        billing: message.billing.clone(),
+                    },
+                }),
+            );
+        }
+        if let Some(responses) = &index.native_usage_observations {
+            for (offset, response) in responses.iter().enumerate() {
+                batch.push(offset as u64, 0, response.warehouse_fact(true, None));
+            }
+        }
+        index.warehouse_observations = Some(batch);
+    }
+
     fn row(path: &str, ledger: &Ledger, cost: Cost, harness: &str) -> CatalogRow {
         CatalogRow {
             session_activity: None,
@@ -1570,6 +1646,7 @@ mod tests {
         };
         let mut index = FileIndex::default();
         index.usage_by_id.insert("message".into(), usage.clone());
+        warehouse_usage(&mut index, "claude");
         store
             .write_one(native, None, None, &ledger, &index)
             .unwrap();
@@ -1670,6 +1747,7 @@ mod tests {
         };
         let mut index = FileIndex::default();
         index.usage_by_id.insert("message".into(), used.clone());
+        warehouse_usage(&mut index, "claude");
         store
             .write_one(native, None, None, &ledger, &index)
             .unwrap();
@@ -1772,6 +1850,7 @@ mod tests {
             );
         }
         let old = index.codex_cost().finish();
+        warehouse_usage(&mut index, "codex");
         publish(&store, &row(native, &ledger, old, "codex"));
         store
             .write_one(native, None, None, &ledger, &index)

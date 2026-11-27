@@ -10,12 +10,31 @@ use crate::Tokens;
 pub(crate) type Records = BTreeMap<String, BTreeSet<String>>;
 pub(crate) type Shared = BTreeMap<String, String>;
 
-/// Primary token fields contain only exclusive observations when this is present.
-/// Neither an exclusive observation nor a copied record establishes a native bill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCoverage {
+    Response,
+    Snapshot,
+    Partial,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageOwnership {
+    Exclusive,
+    Copied,
+    Unknown,
+}
+
+/// Usage observed for one session, with separately qualified fresh work.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClaudeUsageEvidence {
-    pub observed: Tokens,
-    pub exclusive: Tokens,
+pub struct UsageEvidence {
+    pub coverage: UsageCoverage,
+    pub ownership: UsageOwnership,
+    pub cost_provenance: crate::CostProvenance,
+    pub observed: Option<Tokens>,
+    pub exclusive: Option<Tokens>,
     pub shared: BTreeMap<String, Tokens>,
     pub shared_models: BTreeMap<String, Option<String>>,
     /// Native persistence does not establish the original branch owner.
@@ -84,7 +103,7 @@ pub(crate) fn shared<'a>(
 pub(crate) fn evidence<'a>(
     usage: impl IntoIterator<Item = (&'a String, &'a Tokens, Option<&'a str>)>,
     shared: &Shared,
-) -> Option<ClaudeUsageEvidence> {
+) -> Option<UsageEvidence> {
     if shared.is_empty() {
         return None;
     }
@@ -101,14 +120,57 @@ pub(crate) fn evidence<'a>(
             add(&mut exclusive, tokens);
         }
     }
-    Some(ClaudeUsageEvidence {
-        observed,
-        exclusive,
+    Some(UsageEvidence {
+        coverage: UsageCoverage::Response,
+        ownership: UsageOwnership::Copied,
+        cost_provenance: crate::CostProvenance::Unknown,
+        observed: Some(observed),
+        exclusive: Some(exclusive),
         shared: copied,
         shared_models,
         fresh: None,
         shared_owner: None,
     })
+}
+
+impl UsageEvidence {
+    pub(crate) fn aggregate(
+        coverage: UsageCoverage,
+        tokens: Option<Tokens>,
+        ownership: UsageOwnership,
+        cost_provenance: crate::CostProvenance,
+    ) -> Self {
+        let exclusive = (ownership == UsageOwnership::Exclusive)
+            .then(|| tokens.clone())
+            .flatten();
+        Self {
+            coverage,
+            ownership,
+            cost_provenance,
+            observed: tokens,
+            fresh: exclusive.clone(),
+            exclusive,
+            shared: BTreeMap::new(),
+            shared_models: BTreeMap::new(),
+            shared_owner: None,
+        }
+    }
+
+    pub(crate) fn snapshot(usage: Option<&crate::copilot::CopilotUsage>, observed: bool) -> Self {
+        let coverage = if usage.is_some() {
+            UsageCoverage::Snapshot
+        } else if observed {
+            UsageCoverage::Partial
+        } else {
+            UsageCoverage::None
+        };
+        Self::aggregate(
+            coverage,
+            usage.map(|usage| usage.tokens.clone()),
+            UsageOwnership::Unknown,
+            crate::CostProvenance::Snapshot,
+        )
+    }
 }
 
 fn add(total: &mut Tokens, tokens: &Tokens) {

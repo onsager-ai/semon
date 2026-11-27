@@ -1410,6 +1410,16 @@ fn list_sessions_summarizes_every_session_newest_first() {
     let mut query = home.query();
     let mut all = call(&mut query, "list_sessions", json!({}));
     project_activity(&mut all);
+    let lead = all["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["id"] == "lead")
+        .unwrap();
+    assert_eq!(lead["usage"]["coverage"], "partial");
+    assert_eq!(lead["usage"]["ownership"], "exclusive");
+    assert_eq!(lead["usage"]["cost_provenance"], "list_priced");
+    project_usage(&mut all);
     let order = ["cx", "done", "crashed", "asker", "scan", "lead"];
     assert_eq!(
         all,
@@ -1469,6 +1479,7 @@ fn get_session_adds_busy_turns_and_handoffs_from_native_evidence() {
     let mut query = home.query();
     let mut got = call(&mut query, "get_session", json!({"id": "asker"}));
     project_activity(&mut got);
+    project_usage(&mut got);
     let of = |list: &str, keep: &dyn Fn(&Value) -> bool| -> Value {
         Value::Array(
             model[list]
@@ -1836,6 +1847,7 @@ fn stalls_give_one_closed_reason_per_session() {
     let mut query = home.query();
     let mut stalls = call(&mut query, "stalls", json!({"idle_minutes": 60}));
     project_activity(&mut stalls);
+    project_usage(&mut stalls);
     let row = |id: &str, reason: &str, last: i64| {
         let mut row = summary(id, &question);
         row["stall_reason"] = json!(reason);
@@ -3136,6 +3148,7 @@ fn assert_contract_reference(
         }
     }
     project_activity(&mut actual);
+    project_usage(&mut actual);
     let mut expected = rows[0]["response"].clone();
     lifecycle_contract(&mut expected);
     if tool == "stalls"
@@ -6171,6 +6184,28 @@ fn shared_virtual_and_unsent_owners_preserve_complete_native_results() {
 }
 
 mod recovery_tests;
+
+fn project_usage(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object.contains_key("id")
+                && object.contains_key("harness")
+                && object.contains_key("kind")
+            {
+                object.remove("usage");
+            }
+            for child in object.values_mut() {
+                project_usage(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                project_usage(child);
+            }
+        }
+        _ => {}
+    }
+}
 
 fn project_activity(value: &mut Value) {
     match value {

@@ -90,15 +90,23 @@ impl Observation {
         &self.identity
     }
 
-    pub(crate) fn warehouse_fact(&self, accepted: bool) -> crate::events::warehouse::Fact {
-        crate::events::warehouse::Fact::CodexUsage {
-            identity: self.identity.clone(),
-            model: self.payload.model.clone(),
-            tokens: self.payload.tokens.clone(),
-            model_tokens: self.payload.model_tokens.clone(),
-            time: self.payload.timestamp,
-            accepted,
-        }
+    pub(crate) fn warehouse_fact(
+        &self,
+        accepted: bool,
+        record_id: Option<&str>,
+    ) -> crate::events::warehouse::Fact {
+        use crate::events::warehouse::{Fact, UsageMeasurement, UsageObservation};
+        Fact::usage(UsageObservation {
+            identity: Some(self.identity.clone()),
+            record_id: record_id.map(str::to_owned),
+            timestamp: self.payload.timestamp,
+            measurement: UsageMeasurement::ResponseWithAcceptance {
+                model: self.payload.model.clone(),
+                tokens: self.payload.tokens.clone(),
+                billing: self.payload.model_tokens.clone(),
+                accepted,
+            },
+        })
     }
 }
 

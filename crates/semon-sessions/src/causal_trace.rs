@@ -153,8 +153,8 @@ impl Projection {
             "tool_calls": transcript.map(|value| &value.tools).unwrap_or(&session.tool_calls),
             "signals": session.signals,
             "cost": session.cost,
-            "copied_usage": session.claude_usage.is_some(),
-            "claude_usage": session.claude_usage,
+            "copied_usage": session.usage.as_ref().is_some_and(|usage| usage.ownership == crate::UsageOwnership::Copied),
+            "usage": session.usage,
             "copilot": session.copilot.as_ref().map(|evidence| json!({
                 "version": evidence.version, "schema": evidence.schema,
                 "usage": evidence.usage, "usage_source": evidence.usage_source,
@@ -1424,6 +1424,7 @@ mod generation_tests {
             "tokens":[1.5,2.0,0.5],
             "cost":{
                 "usd":2.25,
+                "provenance":"list_priced",
                 "unpriced_models":["unknown-model"],
                 "split_unknown_messages":1,
                 "by_model":{},

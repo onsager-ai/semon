@@ -105,20 +105,6 @@ struct SavedStep {
     facts: activity::StepFacts,
 }
 
-fn billing(usage: &Usage) -> crate::events::BillingUsage {
-    match usage {
-        Usage::Claude(usage) => usage.billing.clone(),
-        Usage::Codex(event) => crate::events::BillingUsage {
-            input: event.tokens.input,
-            output: event.tokens.output,
-            cache_read: event.tokens.cache_read,
-            prompt_size: event.tokens.input.saturating_add(event.tokens.cache_read),
-            timestamp: event.timestamp,
-            ..Default::default()
-        },
-    }
-}
-
 /// Model time is measured only from the latest preceding user prompt or tool
 /// result with a timestamp in the same physical source to the step's native
 /// usage record. Absent or reversed timestamps remain unknown.
@@ -261,7 +247,7 @@ fn derive_facts(
                         Usage::Codex(_) => None,
                     },
                     usage_owner,
-                    billing: billing(usage),
+                    billing: usage.dimensions().3,
                     model_ms: model_ms(step, observations, unclassified_tools, input_events),
                     tool_ms,
                     tool_calls: std::mem::take(&mut calls[index])
@@ -1153,10 +1139,8 @@ pub(super) fn reprice_step(
         let ordinal: i64 = row.get(0)?;
         let mut saved: SavedStep = from_json(1, &row.get::<_, String>(1)?)?;
         let mut cost = crate::pricing::CostBuild::with_table(table.clone());
-        match &saved.usage {
-            Usage::Claude(usage) => cost.message(usage),
-            Usage::Codex(event) => cost.codex(event),
-        }
+        let (provider, model, _, billing) = saved.usage.dimensions();
+        cost.observe(provider, model, &billing);
         let cost = cost.finish_step();
         saved.step.list_cost_usd = cost.list;
         saved.step.fresh_input_usd = cost.fresh_input;

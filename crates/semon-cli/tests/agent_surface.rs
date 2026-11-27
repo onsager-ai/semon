@@ -241,7 +241,10 @@ fn turn_id(model: &Value, sid: &str) -> Value {
 
 fn summaries(model: &Value) -> BTreeMap<&'static str, Value> {
     let claude = |id: &str| {
-        json!({"id": id, "harness": "claude", "kind": "session", "model": "opus-5.5", "repo": null, "branch": null,
+        let observed = json!({"input":3000,"cached_input":2000,"output":500,"reasoning_output":0,"total":3500});
+        json!({"usage":{"coverage":"partial","ownership":"exclusive","cost_provenance":"list_priced",
+                "observed":observed,"exclusive":observed,"fresh":observed,"shared":{},"shared_models":{},"shared_owner":null},
+            "id": id, "harness": "claude", "kind": "session", "model": "opus-5.5", "repo": null, "branch": null,
             "machine": "testbox", "parent": null, "children": [], "exit": null,
             "tokens": {"input": 1000, "cached": 2000, "output": 500}, "run": null, "turns_truncated": false})
     };
@@ -1158,7 +1161,10 @@ fn lane_health_reports_published_agent_lineage_in_cli_and_mcp() {
     let grandchild = uid("lane-grandchild");
     let mut report = home.query(&["query", "lane_health", &root]);
     assert!(!report.to_string().contains(private));
-    assert_eq!(report["asi_schema_version"], 5);
+    assert_eq!(
+        report["asi_schema_version"],
+        semon_asi::schema::ASI_SCHEMA_VERSION
+    );
     let manifest = semon_asi::read_manifest(&home.root.join("state/analytics-store"))
         .unwrap()
         .unwrap();

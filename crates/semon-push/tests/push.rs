@@ -1534,10 +1534,10 @@ fn copied_claude_usage_has_redacted_http_push_and_restart_parity() {
         );
         let json = native_query_corpus(&remote, now);
         assert_eq!(
-            json["sessions"]["native-claude-child"]["claude_usage"]["exclusive"]["input"],
+            json["sessions"]["native-claude-child"]["usage"]["exclusive"]["input"],
             5
         );
-        assert!(json["sessions"]["native-claude-child"]["claude_usage"]["shared_owner"].is_null());
+        assert!(json["sessions"]["native-claude-child"]["usage"]["shared_owner"].is_null());
         assert_viewer_parity(
             &remote,
             &local,
