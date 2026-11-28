@@ -1,7 +1,10 @@
 """Offline provenance and exact-identity checks; does not launch any harness."""
 import hashlib
 import json
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
+import sqlite3
 import unittest
 import importlib.util
 import tempfile
@@ -12,6 +15,114 @@ ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
 
 class CompatibilityFixtures(unittest.TestCase):
+    def test_antigravity_metadata_qualifies_runs_and_unique_turns(self):
+        directory = ROOT / 'antigravity-acp-1.5.18'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        expected = manifest['expected']
+        fixtures = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            fixtures[entry['path']] = data
+
+        native = next(path for path in fixtures if path.endswith('.db.sql'))
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / Path(native).stem
+            connection = sqlite3.connect(db)
+            try:
+                connection.executescript(fixtures[native].decode())
+                trajectory, cascade = connection.execute(
+                    'SELECT trajectory_id, cascade_id FROM trajectory_meta'
+                ).fetchone()
+                self.assertEqual(cascade, db.stem)
+                self.assertEqual(cascade, expected['cascade_id'])
+                self.assertNotEqual(trajectory, cascade)
+                self.assertEqual([row[1] for row in connection.execute('PRAGMA table_info(steps)')],
+                                 ['idx', 'step_type', 'status', 'has_subtrajectory'])
+            finally:
+                connection.close()
+
+        tables = defaultdict(list)
+        for line in fixtures['t3-projections.jsonl'].splitlines():
+            row = json.loads(line)
+            tables[row['table'].removeprefix('orchestration_v2_projection_')].append(row)
+        thread, = tables['threads']
+        providers = {row['provider_thread_id']: row for row in tables['provider_threads']}
+        native_ref = {'driver': 'antigravity', 'strength': 'strong', 'nativeId': cascade}
+        runs = {row['run_id']: row for row in tables['runs'] if row['status'] == 'completed'}
+        native_runs = {}
+        for run_id, run in runs.items():
+            provider = providers[run['provider_thread_id']]
+            if (provider['thread_id'] == run['thread_id'] == thread['thread_id']
+                    and provider['provider_instance_id'] == run['provider_instance_id']
+                    and provider['driver'] == 'antigravity'
+                    and provider['payload_json']['nativeThreadRef'] == native_ref):
+                native_runs[run_id] = run['payload_json']
+        self.assertEqual(sorted(native_runs), expected['completed_runs'])
+        excluded = expected['outside_native_scope']
+        self.assertEqual(set(runs) - set(native_runs), set(excluded.values()))
+        wrong_driver = runs[excluded['wrong_driver']]
+        self.assertEqual(wrong_driver['payload_json']['modelSelection']['model'],
+                         native_runs['fixture-run-1']['modelSelection']['model'])
+        self.assertEqual(providers[wrong_driver['provider_thread_id']]
+                         ['payload_json']['nativeThreadRef']['nativeId'], cascade)
+        unlinked = providers[runs[excluded['missing_native_ref']]['provider_thread_id']]
+        self.assertEqual(unlinked['provider_session_id'], cascade)
+        self.assertIsNone(unlinked['payload_json']['nativeThreadRef'])
+
+        def duration_ms(start, end):
+            if start is None or end is None:
+                return None
+            duration = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+            return int(duration * 1000) if duration >= 0 else None
+
+        self.assertEqual({key: duration_ms(row['startedAt'], row['completedAt'])
+                          for key, row in native_runs.items()}, expected['run_latency_ms'])
+        attempts = {row['attempt_id']: row for row in tables['run_attempts']
+                    if row['status'] == 'completed' and row['run_id'] in native_runs}
+        turns_by_run = defaultdict(lambda: defaultdict(list))
+        for turn in tables['provider_turns']:
+            attempt = attempts.get(turn['run_attempt_id'])
+            if attempt and turn['status'] == 'completed':
+                run = runs[attempt['run_id']]
+                self.assertEqual(attempt['thread_id'], run['thread_id'])
+                self.assertEqual(turn['thread_id'], run['thread_id'])
+                self.assertEqual(turn['provider_thread_id'], attempt['provider_thread_id'])
+                self.assertEqual(turn['provider_thread_id'], run['provider_thread_id'])
+                self.assertEqual(attempt['provider_instance_id'], run['provider_instance_id'])
+                self.assertIsNone(attempt['provider_turn_id'])
+                turns_by_run[run['run_id']][turn['provider_turn_id']].append(turn)
+
+        selected_models, observed, intervals, unresolved = {}, {}, {}, []
+        for run_id, run in native_runs.items():
+            turns = turns_by_run[run_id]
+            if len(turns) != 1:
+                unresolved.append(run_id)
+                continue
+            (turn_id, observations), = turns.items()
+            selected_models[turn_id] = run['modelSelection']['model']
+            turn = observations[0]
+            intervals[turn_id] = duration_ms(turn['started_at'], turn['completed_at'])
+            usage = turn['payload_json'].get('turnTokenUsage')
+            if usage is not None and all(row['payload_json'].get('turnTokenUsage') == usage
+                                         for row in observations):
+                observed[turn_id] = usage
+
+        self.assertEqual(sorted(selected_models), expected['completed_provider_turns'])
+        self.assertEqual(selected_models, expected['turn_selected_model'])
+        self.assertEqual(sorted(unresolved), expected['turn_link_unknown'])
+        self.assertEqual(sum(value is not None for value in intervals.values()),
+                         expected['timed_provider_turns'])
+        self.assertEqual(intervals['fixture-turn-2'], 0)
+        self.assertEqual(sorted(observed), expected['observed_turn_usage'])
+        self.assertIs(observed['fixture-turn-1']['hasSubagents'], False)
+        zero = observed['fixture-turn-2']
+        self.assertEqual((zero['usageScope'], zero['usageStatus']), ('main_agent', 'complete'))
+        self.assertEqual(zero['inputTokens'], 0)
+        self.assertEqual(zero['outputTokens'], 0)
+        self.assertIsNone(zero['cacheCreationTokens'])
+        self.assertIs(zero['hasSubagents'], True)
+
     def test_codex_native_fork_owns_only_its_new_turn_and_fresh_usage(self):
         directory = ROOT / 'codex-0.159.0-alpha.3/fork'
         manifest = json.loads((directory / 'manifest.json').read_text())

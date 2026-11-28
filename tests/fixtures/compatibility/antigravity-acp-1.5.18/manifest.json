@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "harness": "Managed Antigravity ACP",
+  "harness_version": "1.5.18",
+  "evidence_origin": "Wholly synthetic values shaped by bounded, WAL-aware, read-only SQLite metadata inspection on hp-code-2.",
+  "fixtures": [
+    {
+      "path": "conversations/fixture-cascade.db.sql",
+      "fixture_sha256": "ec57a5592066d66ef399cea97534d1a85a56931af72c25be3636af857dcca655"
+    },
+    {
+      "path": "t3-projections.jsonl",
+      "fixture_sha256": "992facacc10bdf467de640f3e59f324403b78e99e7168418102e57eedfaa189a"
+    }
+  ],
+  "representation": {
+    "native": "SQL recreates the metadata subset of the named database. Binary payload columns are omitted.",
+    "supplement": "JSONL contains allowlisted T3 projection columns with payload_json decoded and reduced to selected metadata. Repeated primary keys are observations across reads, including identical replay and conflicting usage."
+  },
+  "expected": {
+    "cascade_id": "fixture-cascade",
+    "completed_runs": [
+      "fixture-run-1",
+      "fixture-run-2",
+      "fixture-run-3",
+      "fixture-run-4",
+      "fixture-run-7"
+    ],
+    "run_latency_ms": {
+      "fixture-run-1": 20000,
+      "fixture-run-2": null,
+      "fixture-run-3": null,
+      "fixture-run-4": 20000,
+      "fixture-run-7": 20000
+    },
+    "completed_provider_turns": [
+      "fixture-turn-1",
+      "fixture-turn-2",
+      "fixture-turn-3",
+      "fixture-turn-4"
+    ],
+    "observed_turn_usage": [
+      "fixture-turn-1",
+      "fixture-turn-2"
+    ],
+    "turn_link_unknown": [
+      "fixture-run-7"
+    ],
+    "outside_native_scope": {
+      "wrong_driver": "fixture-run-5",
+      "missing_native_ref": "fixture-run-6"
+    },
+    "timed_provider_turns": 3,
+    "turn_selected_model": {
+      "fixture-turn-1": "fixture-neon",
+      "fixture-turn-2": "fixture-carbon",
+      "fixture-turn-3": "fixture-neon",
+      "fixture-turn-4": "fixture-neon"
+    },
+    "turn_executed_model": null
+  },
+  "unverified": [
+    "Runtime ingestion and Semon reads",
+    "Executed model",
+    "Model calls",
+    "Exact rates and spend"
+  ]
+}
