@@ -1,7 +1,11 @@
 """Offline provenance and exact-identity checks; does not launch any harness."""
 import hashlib
 import json
+from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
+import sqlite3
 import unittest
 import importlib.util
 import tempfile
@@ -12,6 +16,176 @@ ROOT = Path(__file__).resolve().parents[1] / 'fixtures/compatibility'
 
 
 class CompatibilityFixtures(unittest.TestCase):
+    def test_antigravity_metadata_qualifies_runs_and_unique_turns(self):
+        directory = ROOT / 'antigravity-acp-1.5.18'
+        manifest = json.loads((directory / 'manifest.json').read_text())
+        expected = manifest['expected']
+        fixtures = {}
+        for entry in manifest['fixtures']:
+            data = (directory / entry['path']).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), entry['fixture_sha256'])
+            fixtures[entry['path']] = data
+
+        sessions = {}
+        for origin, databases in manifest['native_databases'].items():
+            for path in databases:
+                connection = sqlite3.connect(':memory:')
+                try:
+                    connection.executescript(fixtures[path].decode())
+                    (trajectory, cascade), = connection.execute(
+                        'SELECT trajectory_id, cascade_id FROM trajectory_meta LIMIT 2'
+                    )
+                    self.assertEqual(cascade, Path(Path(path).stem).stem)
+                    self.assertNotEqual(trajectory, cascade)
+                    self.assertEqual([row[1:4] for row in connection.execute('PRAGMA table_info(steps)')],
+                                     [('idx', 'INTEGER', 0), ('step_type', 'INTEGER', 1),
+                                      ('status', 'INTEGER', 1), ('has_subtrajectory', 'NUMERIC', 1)])
+                    plan, = connection.execute(
+                        'EXPLAIN QUERY PLAN SELECT idx, step_type, status, has_subtrajectory '
+                        'FROM steps WHERE idx >= ? ORDER BY idx LIMIT ?', (0, 1)
+                    )
+                    self.assertIn('USING INTEGER PRIMARY KEY', plan[3])
+                finally:
+                    connection.close()
+                sessions[origin, cascade] = f"{quote(origin, safe='')}/antigravity/{quote(cascade, safe='')}"
+        self.assertCountEqual(sessions.values(), expected['session_uids'])
+
+        rows = [json.loads(line) for line in fixtures['t3-projections.jsonl'].splitlines()]
+        primary_keys = {
+            'threads': 'thread_id', 'provider_threads': 'provider_thread_id',
+            'runs': 'run_id', 'run_attempts': 'attempt_id', 'provider_turns': 'provider_turn_id',
+        }
+
+        def agreed(values):
+            first, *rest = values
+            return first if all(value == first for value in rest) else None
+
+        def duration_ms(interval):
+            if interval is None or None in interval:
+                return None
+            try:
+                start, end = map(datetime.fromisoformat, interval)
+            except ValueError:
+                return None
+            if start.tzinfo is None or end.tzinfo is None or end < start:
+                return None
+            return (end - start) // timedelta(milliseconds=1)
+
+        def evaluate(observations):
+            tables = defaultdict(lambda: defaultdict(list))
+            for row in observations:
+                table = row['table'].removeprefix('orchestration_v2_projection_')
+                tables[row['origin'], table][row[primary_keys[table]]].append(row)
+
+            runs, turns, unattributed, no_turn = {}, {}, set(), set()
+            for origin in manifest['native_databases']:
+                run_results = runs[origin] = {}
+                current = []
+                for group in tables[origin, 'provider_threads'].values():
+                    provider = agreed(group)
+                    native_ref = provider['payload_json'].get('nativeThreadRef')
+                    if (provider['driver'] == 'antigravity' and native_ref
+                            and native_ref['driver'] == 'antigravity'
+                            and native_ref['strength'] == 'strong'):
+                        thread = agreed(tables[origin, 'threads'][provider['thread_id']])
+                        current.append([sessions[origin, native_ref['nativeId']], thread['created_at'],
+                                        thread['updated_at'], thread['payload_json']['modelSelection']['model']])
+                self.assertEqual(current, [expected['current_thread'][origin]])
+                for group in tables[origin, 'run_attempts'].values():
+                    self.assertTrue(all(row['attempt_ordinal'] >= 1 for row in group))
+                for run_id, run_rows in tables[origin, 'runs'].items():
+                    if agreed([row['status'] for row in run_rows]) != 'completed':
+                        continue
+                    provenance = agreed([(row['thread_id'], row['provider_thread_id'],
+                                          row['provider_instance_id']) for row in run_rows])
+                    self.assertIsNotNone(provenance)
+                    thread, provider, instance = provenance
+                    self.assertIn(thread, tables[origin, 'threads'])
+                    provider_row = agreed(tables[origin, 'provider_threads'][provider])
+                    self.assertEqual((provider_row['thread_id'], provider_row['provider_instance_id']),
+                                     (thread, instance))
+
+                    attempts = {}
+                    bindings = []
+                    for attempt_id, group in tables[origin, 'run_attempts'].items():
+                        if not any(row['run_id'] == run_id and row['status'] == 'completed'
+                                   for row in group):
+                            continue
+                        for row in group:
+                            self.assertEqual((row['thread_id'], row['provider_thread_id'],
+                                              row['provider_instance_id']), provenance)
+                        if agreed([(row['run_id'], row['status']) for row in group]) != (run_id, 'completed'):
+                            bindings.append(None)
+                            continue
+                        attempts[attempt_id] = {row['provider_turn_id'] for row in group}
+                        bindings.append(agreed([row['payload_json'].get('nativeThreadId')
+                                                for row in group]))
+                    cascade = agreed(bindings) if bindings else None
+                    session = sessions.get((origin, cascade))
+                    if provider_row['driver'] != 'antigravity' or session is None:
+                        unattributed.add(run_id)
+                        continue
+
+                    payloads = [row['payload_json'] for row in run_rows]
+                    selection = agreed([p['modelSelection']['model'] for p in payloads])
+                    run_time = duration_ms(agreed([(p.get('startedAt'), p.get('completedAt'))
+                                                  for p in payloads]))
+                    run_results[run_id] = [session, run_time, selection]
+
+                    candidates = {}
+                    for turn_id, group in tables[origin, 'provider_turns'].items():
+                        link = agreed([(row['thread_id'], row['provider_thread_id'],
+                                        row['run_attempt_id'], row['status']) for row in group])
+                        if link is None or link[:2] != (thread, provider) or link[3] != 'completed':
+                            continue
+                        attempt_id = link[2]
+                        if attempt_id in attempts:
+                            candidates[turn_id] = (group, attempts[attempt_id])
+                    if len(candidates) != 1:
+                        no_turn.add(run_id)
+                        continue
+                    (turn_id, (group, pointers)), = candidates.items()
+                    if pointers - {None, turn_id}:
+                        no_turn.add(run_id)
+                        continue
+
+                    turn_time = duration_ms(agreed([(row['started_at'], row['completed_at'])
+                                                   for row in group]))
+                    if any('model' in row['payload_json'] for row in group):
+                        # Pinned AntigravityChildWork.ts rejects other IDs before reading a model.
+                        self.assertRegex(cascade, r'^[A-Za-z0-9-]{1,64}$')
+                    executed = agreed([row['payload_json'].get('model')
+                                       if row.get('source_profile') == 'upstream_executed_model'
+                                       else None for row in group])
+                    usage = agreed([row['payload_json'].get('turnTokenUsage') for row in group])
+                    status = usage['usageStatus'] if usage is not None else 'unknown'
+                    uid = f"{session}/t/{quote(turn_id, safe='')}"
+                    self.assertNotIn(uid, turns)
+                    turns[uid] = [turn_time, selection, executed, status]
+            return runs, turns, unattributed, no_turn
+
+        runs, turns, unattributed, no_turn = evaluate(rows)
+        self.assertEqual((runs, turns, unattributed, no_turn), evaluate(reversed(rows)))
+        self.assertEqual(runs, expected['runs'])
+        self.assertEqual(turns, expected['turns'])
+        self.assertEqual(unattributed, set(expected['unattributed_runs'].values()))
+        self.assertEqual(no_turn, {expected['run_without_attributed_turn']})
+        self.assertEqual({
+            'runs': sum(row[1] is not None for origin_runs in runs.values() for row in origin_runs.values()),
+            'turns': sum(row[0] is not None for row in turns.values()),
+        }, expected['timing_populations'])
+
+        zero, = [row['payload_json']['turnTokenUsage'] for row in rows
+                 if row.get('provider_turn_id') == 'fixture-turn-2']
+        self.assertEqual((zero['usageScope'], zero['inputTokens'], zero['outputTokens']),
+                         ('main_agent', 0, 0))
+        self.assertNotIn('cacheCreationTokens', zero)
+        self.assertIs(zero['hasSubagents'], True)
+        unavailable, = [row['payload_json']['turnTokenUsage'] for row in rows
+                         if row.get('provider_turn_id') == 'fixture-turn-3']
+        self.assertEqual(unavailable, {'usageScope': 'main_agent', 'usageStatus': 'unavailable',
+                                       'hasSubagents': False})
+
     def test_codex_native_fork_owns_only_its_new_turn_and_fresh_usage(self):
         directory = ROOT / 'codex-0.159.0-alpha.3/fork'
         manifest = json.loads((directory / 'manifest.json').read_text())
