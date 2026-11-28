@@ -594,6 +594,9 @@ fn long_context(cost: &Value, provider: &str) -> io::Result<Option<LongContextPr
             // calculator. More than one context boundary cannot be represented.
             let mut context = None;
             for tier in tiers {
+                if tier.pointer("/tier/type").and_then(Value::as_str).is_none() {
+                    continue;
+                }
                 let Some(size) = context_boundary(tier)? else {
                     continue;
                 };
@@ -1470,6 +1473,29 @@ mod tests {
     }
     fn table(value: Value) -> EffectiveTable {
         adapt(&serde_json::to_vec(&value).unwrap(), 10).unwrap()
+    }
+
+    #[test]
+    fn v1_validates_only_recognized_context_tiers() {
+        let mut catalog = fixture();
+        catalog["anthropic"]["models"]["claude-new"] = serde_json::json!({
+            "id":"claude-new","cost":{"input":7,"tiers":[
+                {"tier":{"size":"unknown"},"input":"ignored"},
+                {"tier":{"type":42},"input":"ignored"},
+                {"tier":{"type":"context","size":200000},"input":11}
+            ]}
+        });
+        let effective = adapt(&serde_json::to_vec(&catalog).unwrap(), 100).unwrap();
+        let price = effective.price_for("anthropic", "claude-new").unwrap();
+        assert_eq!(price.input, Some(7.0));
+        let tier = price.long_context.unwrap();
+        assert_eq!(tier.threshold_tokens, 200_000);
+        assert_eq!(tier.input, Some(11.0));
+
+        catalog["anthropic"]["models"]["claude-new"]["cost"]["tiers"][2]["tier"]["size"] =
+            Value::from("200000");
+        let error = adapt(&serde_json::to_vec(&catalog).unwrap(), 100).unwrap_err();
+        assert!(error.to_string().contains("invalid boundary"));
     }
 
     #[test]
