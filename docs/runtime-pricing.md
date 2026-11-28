@@ -82,6 +82,92 @@ writes never map to them. Bundled Anthropic five-minute/one-hour and web-search
 rates remain distinct, with their recorded provenance. Actual usage of an
 unavailable category makes the total unknown, never free.
 
+## Magpie execution evidence for Claude Code and Codex
+
+Semon keeps recognized Magpie-only route costs unknown, even for zero-token
+observations. The native parsers do not establish which upstream provider and
+model executed a Magpie call. The routed-ID lookup described above is a model
+name lookup. A matching suffix, configured model, requested model, or model
+sent on the wire cannot establish execution.
+
+Magpie v0.1.4690 records the model named by the upstream reply as `served` on
+its own usage rows. For Responses the sniffer reads `response.model` in stream
+events or `model` in a whole response. For Anthropic it reads `message.model`
+in stream events or `model` in a whole response. The gateway copies that
+value into the usage ledger with the client-facing `response_id` and
+`native_session` when available. The upstream request ID (`rid`) is distinct
+from the response ID. The same usage endpoint also returns native-log
+projections and accepts client-reported `served` values. Only gateway-owned
+rows from an authorized source can supply this evidence.
+[Upstream response parser][magpie-sniffer] · [Gateway ledger write][magpie-write] ·
+[Ledger source rules][magpie-source] · [Usage endpoint][magpie-api] ·
+[Client reporting][magpie-ingest]
+
+- **Claude Code.** Match an admitted native response's `sessionId` and
+  `message.id` to the gateway row's `native_session` and client-facing
+  `response_id`. Magpie recognizes `x-claude-code-session-id` and captures the
+  Anthropic message ID sent to the client, including an ID chosen by its
+  translation encoder. Semon deduplicates assistant usage by `message.id`.
+  Some native records carry an outer `requestId` that Magpie's native reader
+  parses. Semon's Claude usage observation does not retain it, and its
+  equality with the upstream `rid` across gateway translations is unverified.
+  Missing native session or matching response ID leaves the gateway cost
+  unknown. [Session header handling][magpie-session] ·
+  [Encoder ID capture][magpie-response-id] ·
+  [Magpie's Claude reader][magpie-claude-reader] ·
+  [Semon's Claude observation][semon-claude]
+- **Codex.** Match the `session_id` and `response_id` of an accepted
+  `token_usage_record` to the gateway row's `native_session` and client-facing
+  `response_id`. Require a unique match to the native
+  `(thread_id, session_id, turn_id, response_id)` observation. The gateway
+  row does not carry that full native tuple. Magpie already uses unique
+  response IDs for its own Codex pairing. Older cumulative `token_count`
+  events lack a per-response ID, and `turn_context.model` is turn configuration.
+  Session- or thread-level counters alone cannot establish per-call usage.
+  [Pinned native probe](cli-compatibility.md#codex-native-fork-boundaries-and-child-usage) ·
+  [Semon's Codex decoder][semon-codex] · [Magpie's Codex pairing][magpie-codex-pair]
+
+The smallest next change is to admit a metadata-only, gateway-owned response
+observation into Semon's existing usage projection. It needs a stable source
+identity and call identity, the native session and client response IDs, and an
+upstream-served model with a verified models.dev provider namespace. A
+user-configurable Magpie provider label is insufficient to identify that
+namespace. Accept only one-to-one matches with the same usage scope. A
+response spanning several attempts or upstream calls needs independently
+attributed usage for each call before it can be priced. Known native response
+counters can supply rate dimensions when they cover the verified call.
+Missing identities, ambiguous matches, or missing rate dimensions leave the
+estimate unknown.
+
+Look up the exact provider and model ID and use only rates with models.dev
+provenance for the categories consumed, including applicable cache and tier
+rates. Label the result **estimated, list price (models.dev)**. Any separately
+recorded billed amount can be kept as reconciliation evidence in Semon. The
+Magpie ledger's calculated cost is a list-price computation, and a reported
+client cost is a client assertion. Neither supplies rated usage dimensions or
+proves a billed charge. Semon has no admitted Magpie input or correlation path
+today. [Magpie cost calculation][magpie-cost]
+
+A synthetic producer-to-Index test should pair a gateway response with each
+harness and give its requested alias a different price from the served model.
+Assert the exact models.dev estimate and the original reconciliation amount.
+Exercise missing or duplicate response IDs, a reported row, an alias-only
+row, a cumulative Codex counter, and a category available only in the
+bundled table. Each of those cases should leave the estimate unknown.
+
+[magpie-sniffer]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/gateway/sniff.go#L207-L277
+[magpie-write]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/gateway/gateway.go#L6098-L6117
+[magpie-source]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/usage/ledger.go#L125-L155
+[magpie-api]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/gateway/usage_api.go#L74-L95
+[magpie-ingest]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/gateway/usage_ingest.go#L75-L81
+[magpie-session]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/gateway/gateway.go#L10758-L10836
+[magpie-response-id]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/gateway/response_id.go#L5-L46
+[magpie-claude-reader]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/sessions/claude.go#L339-L354
+[magpie-codex-pair]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/usage/codex_identity.go#L44-L69
+[magpie-cost]: https://github.com/yetone/magpie/blob/62852a53637c43ee1dbc004fa42aae03365143cb/internal/usage/usage.go#L573-L603
+[semon-claude]: https://github.com/onsager-ai/semon/blob/b21cde70e18df5e6d05bcc5fc84e3f00e1185c5e/crates/semon-sessions/src/events.rs#L6421-L6542
+[semon-codex]: https://github.com/onsager-ai/semon/blob/b21cde70e18df5e6d05bcc5fc84e3f00e1185c5e/crates/semon-sessions/src/events/usage.rs#L130-L159
+
 ## Retained derived costs
 
 Every newly computed cost records its pricing fingerprint, which includes an

@@ -73,10 +73,12 @@ acceptance, timestamp, billing dimensions, coverage and cost provenance. The
 warehouse resolves copied ownership using authorized sources at read time.
 Selected details expose `usage` with observed, exclusive and fresh totals and
 copy evidence when available. A session snapshot supplies observed totals and
-leaves fresh usage and USD null. List-priced costs identify their price source;
-gateway-only routes remain unknown until gateway billing evidence is available,
-including observations with zero tokens. Usage evidence remains bound to the source
-generation and grants no runtime or control authority.
+leaves fresh usage and USD null. List-priced costs identify their price source.
+Gateway-only routes remain unknown, including observations with zero tokens.
+List estimates for those routes require
+[verified gateway execution evidence](../runtime-pricing.md#magpie-execution-evidence-for-claude-code-and-codex).
+Usage evidence remains bound to the source generation and grants no runtime or
+control authority.
 
 Current list indexes are partial B-trees (`WHERE lifecycle='current'`) ordered
 by their filter and keyset keys. Retained rows do not enter those trees.
