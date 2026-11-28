@@ -686,8 +686,8 @@ pub(crate) fn cost_check_ok(computed: Option<f64>, reported: Option<f64>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::{
-        FastPrice, LongContextPrice, Price, calculate_cost, calculate_cost_with, cost_check_ok,
-        normalize_model_id, price_data, table,
+        Cost, CostBuild, FastPrice, LongContextPrice, Price, calculate_cost, calculate_cost_with,
+        cost_check_ok, normalize_model_id, price_data, runtime, table,
     };
     use crate::events::{BillingUsage, CodexUsageEvent, MessageUsage, ModelTokens};
 
