@@ -5649,6 +5649,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
 
 #[test]
 fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
+    let _prices = crate::pricing::runtime::fixture_prices();
     let home = Home::new();
     let real_usage = json!({
         "input_tokens":1034,

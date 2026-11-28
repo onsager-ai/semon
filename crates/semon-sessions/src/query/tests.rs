@@ -1418,7 +1418,7 @@ fn list_sessions_summarizes_every_session_newest_first() {
         .unwrap();
     assert_eq!(lead["usage"]["coverage"], "partial");
     assert_eq!(lead["usage"]["ownership"], "exclusive");
-    assert_eq!(lead["usage"]["cost_provenance"], "list_priced");
+    assert_eq!(lead["usage"]["cost_provenance"], "unknown");
     project_usage(&mut all);
     let order = ["cx", "done", "crashed", "asker", "scan", "lead"];
     assert_eq!(

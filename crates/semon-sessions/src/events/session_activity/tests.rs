@@ -3,23 +3,21 @@ use serde_json::json;
 
 fn table() -> Arc<pricing::EffectiveTable> {
     // Synthetic, pinned reference data; independent of pricing refresh or logs.
-    let price = json!({"price": {
-        "input": 1.0, "output": 2.0, "cache_read": 0.25,
-        "cache_write_5m": 1.25, "cache_write_1h": 2.0,
-        "web_search_per_1k": 10.0
-    }, "provenance": {}});
-    Arc::new(
-        serde_json::from_value(json!({
-            "version": 1, "fetched_at": 0, "fingerprint": "synthetic-prices-v1",
-            "providers": {
-                "anthropic": {"synthetic-model": price.clone(), "partial-model": {
-                    "price": {"input": 1.0, "cache_read": 0.25}, "provenance": {}
-                }},
-                "openai": {"synthetic-model": price}
-            }
-        }))
-        .unwrap(),
-    )
+    table_with_input(1.0)
+}
+
+fn table_with_input(input: f64) -> Arc<pricing::EffectiveTable> {
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../pricing/fixtures/models-dev.json")).unwrap();
+    for provider in ["anthropic", "openai"] {
+        fixture[provider]["models"]["synthetic-model"] = json!({"id":"synthetic-model","cost":{
+            "input": input, "output": 2.0, "cache_read": 0.25,
+            "cache_write_5m": 1.25, "cache_write_1h": 2.0
+        }});
+    }
+    fixture["anthropic"]["models"]["partial-model"] =
+        json!({"id":"partial-model","cost":{"input":1.0,"cache_read":0.25}});
+    Arc::new(pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 0).unwrap())
 }
 
 fn position(source: &str, offset: u64) -> SourcePosition {
@@ -120,7 +118,7 @@ fn synthetic_claude_fixture_matches_step_golden() {
     );
     let snapshot = json!({
         "rules_version": result.rules_version,
-        "pricing_fingerprint": result.pricing_fingerprint,
+        "pricing_fingerprint": result.pricing_fingerprint == table().fingerprint,
         "steps": result.steps.iter().map(|step| json!({
             "id": match &step.id { ActivityStepId::Claude(id) => id, _ => unreachable!() },
             "context_tokens": step.context_tokens,
@@ -221,15 +219,12 @@ fn repeated_claude_rows_use_existing_merge_order_and_shared_time_is_not_exclusiv
 #[test]
 fn price_changes_reprice_without_changing_activity_rules() {
     let first = activity(vec![step("id", "s", 0, Some(0))], vec![]);
-    let mut changed = serde_json::to_value(table().as_ref()).unwrap();
-    changed["fingerprint"] = json!("synthetic-prices-v2");
-    changed["providers"]["anthropic"]["synthetic-model"]["price"]["input"] = json!(2.0);
     let second = derive(
         "session".into(),
         [step("id", "s", 0, Some(0))],
         &Shared::new(),
         [],
-        Arc::new(serde_json::from_value(changed).unwrap()),
+        table_with_input(2.0),
     );
     assert_eq!(first.rules_version, second.rules_version);
     assert_eq!(first.steps[0].id, second.steps[0].id);
@@ -498,7 +493,7 @@ fn components_price_independently_and_list_cost_needs_all_of_them() {
             let sum: f64 = known.iter().flatten().sum();
             assert!((step.list_cost_usd.unwrap() - sum).abs() < 1e-12);
         }
-        assert_eq!(result.pricing_fingerprint, "synthetic-prices-v1");
+        assert_eq!(result.pricing_fingerprint, table().fingerprint);
         assert_eq!(
             result.aggregate.exclusive_cost_complete,
             known_list.is_some()

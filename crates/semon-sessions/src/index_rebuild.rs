@@ -1266,4 +1266,62 @@ mod tests {
             snapshot
         );
     }
+
+    #[test]
+    fn rebuilt_codex_costs_use_persisted_execution_time_history() {
+        // Pricing initialization is process-wide. Give this real rebuild a
+        // private process so parallel tests never see its reference data.
+        const CHILD: &str = "SEMON_TEST_REBUILD_RATE_HISTORY";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "index_rebuild::tests::rebuilt_codex_costs_use_persisted_execution_time_history"])
+                .env(CHILD, "1").env("SEMON_PRICING_REFRESH", "off")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let (stage, options) = fixture();
+        let table = crate::pricing::runtime::adapt(
+            include_bytes!("pricing/fixtures/models-dev.json"),
+            2_000,
+        )
+        .unwrap();
+        fs::write(
+            stage.0.join("models-dev-rate-history.json"),
+            crate::pricing::runtime::recorded_snapshot(&table),
+        )
+        .unwrap();
+        crate::pricing::initialize(&stage.0);
+        let path = options.codex_home.join("sessions/rollout-priced.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut records = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":"priced","cwd":"/test"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-6.1-sol"}}),
+        ];
+        for (id, at) in [
+            ("before", "1970-01-01T00:00:01Z"),
+            ("covered", "1970-01-01T00:00:02Z"),
+        ] {
+            records.push(serde_json::json!({"type":"token_usage_record","timestamp":at,"payload":{
+                "thread_id":"priced","session_id":"priced","turn_id":id,"response_id":id,
+                "usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0,"total_tokens":100,
+                         "cache_write_input_tokens":0,"reasoning_output_tokens":0}
+            }}));
+        }
+        let mut bytes = String::new();
+        for record in records {
+            bytes.push_str(&record.to_string());
+            bytes.push('\n');
+        }
+        fs::write(&path, bytes).unwrap();
+        refused(&options, store::SCHEMA_VERSION - 1);
+        let cache = sqlite::open_index(&options, &Namespace::new("local").unwrap()).unwrap();
+        assert!(cache.committed_rebuild_ledger(&path).is_ok());
+        let db = rusqlite::Connection::open(active_path(&options.cache)).unwrap();
+        let (priced,unknown,subtotal): (i64,i64,f64) = db.query_row(
+            "SELECT json_extract(codex_native_usage,'$.cost.priced_tokens'),json_extract(codex_native_usage,'$.cost.unpriced_tokens'),json_extract(codex_native_usage,'$.cost.usd') FROM files WHERE path=?1",
+            [path.to_str().unwrap()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!((priced, unknown), (100, 100));
+        assert!((subtotal - 0.0002).abs() < 1e-12);
+    }
 }

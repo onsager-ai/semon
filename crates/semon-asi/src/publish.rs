@@ -336,7 +336,7 @@ fn dimension_row_position(
     candidate: &Row,
 ) -> crate::Result<Option<usize>> {
     if table.name == "dim_price" {
-        const KEY: [&str; 9] = [
+        const KEY: [&str; 10] = [
             "price_version",
             "provider",
             "model",
@@ -346,6 +346,7 @@ fn dimension_row_position(
             "service_tier",
             "threshold_tokens",
             "unit",
+            "valid_from",
         ];
         for key in KEY {
             if !candidate.contains_key(key) {
@@ -364,8 +365,7 @@ fn dimension_row_position(
         .position(|row| row.get(table.columns[0].name) == Some(key)))
 }
 
-// Fetch time is excluded from price_version. Merge each bound independently so
-// observations commute across batches and publication cycles. Once closed, an
+// The selector and valid_from identify an interval within a snapshot. Once closed, an
 // interval cannot be reopened by an observation that still considers it current.
 fn merge_price_observation(current: &mut Row, observation: &Row) -> crate::Result<()> {
     if current.get("usd_per_unit") != observation.get("usd_per_unit")
@@ -375,9 +375,8 @@ fn merge_price_observation(current: &mut Row, observation: &Row) -> crate::Resul
             "conflicting dim_price rates for one logical key",
         ));
     }
-    let (learned_at, valid_from, valid_to) = price_observation_timestamps(current)?;
-    let (other_learned_at, other_valid_from, other_valid_to) =
-        price_observation_timestamps(observation)?;
+    let (learned_at, _, valid_to) = price_observation_timestamps(current)?;
+    let (other_learned_at, _, other_valid_to) = price_observation_timestamps(observation)?;
     let valid_to = match (valid_to, other_valid_to) {
         (Some(left), Some(right)) => Some(left.min(right)),
         (left, right) => left.or(right),
@@ -385,10 +384,6 @@ fn merge_price_observation(current: &mut Row, observation: &Row) -> crate::Resul
     current.insert(
         "learned_at",
         Cell::Timestamp(Some(learned_at.min(other_learned_at))),
-    );
-    current.insert(
-        "valid_from",
-        Cell::Timestamp(Some(valid_from.min(other_valid_from))),
     );
     current.insert("valid_to", Cell::Timestamp(valid_to));
     Ok(())
@@ -748,7 +743,7 @@ mod tests {
         let price = &mut admitted.prices[0];
         price.price_version = "same-version".into();
         price.learned_at = learned_at;
-        price.valid_from = learned_at;
+        price.valid_from = 100;
         price.usd_per_unit = rate;
         admitted
     }
@@ -1421,6 +1416,7 @@ mod tests {
             ("service_tier", Cell::Text(Some("priority".into()))),
             ("threshold_tokens", Cell::Integer(Some(200_000))),
             ("unit", Cell::Text(Some("request".into()))),
+            ("valid_from", Cell::Timestamp(Some(200))),
         ] {
             let mut other = original.clone();
             other.insert(key, value);
@@ -1482,7 +1478,7 @@ mod tests {
     #[test]
     fn price_intervals_remain_open_when_every_observation_is_open() {
         let mut early_learned = priced_session("early-learned", 50, 1.0);
-        early_learned.prices[0].valid_from = 150;
+        early_learned.prices[0].valid_from = 100;
         let early_validity = priced_session("early-validity", 100, 1.0);
         let mut expected = project(&early_validity).unwrap().tables["dim_price"][0].clone();
         expected.insert("learned_at", Cell::Timestamp(Some(50)));
@@ -1505,14 +1501,14 @@ mod tests {
         first.prices[0].valid_from = 100;
         first.prices[0].valid_to = Some(300);
         let mut second = priced_session("second", 50, 1.0);
-        second.prices[0].valid_from = 150;
+        second.prices[0].valid_from = 100;
         let mut third = priced_session("third", 150, 1.0);
-        third.prices[0].valid_from = 80;
+        third.prices[0].valid_from = 100;
         third.prices[0].valid_to = Some(250);
         let observations = [first, second, third];
         let mut expected = project(&observations[0]).unwrap().tables["dim_price"][0].clone();
         expected.insert("learned_at", Cell::Timestamp(Some(50)));
-        expected.insert("valid_from", Cell::Timestamp(Some(80)));
+        expected.insert("valid_from", Cell::Timestamp(Some(100)));
         expected.insert("valid_to", Cell::Timestamp(Some(250)));
         for order in [
             [0, 1, 2],

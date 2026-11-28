@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
+mod history;
 pub(crate) mod runtime;
 pub(crate) use runtime::{EffectiveTable, gateway_billing_only, snapshot};
 pub use runtime::{initialize, initialize_default, start_default_refresh, start_refresh};
@@ -27,7 +28,7 @@ pub struct Price {
     pub web_search_per_1k: Option<f64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, Deserialize, Serialize)]
 pub struct LongContextPrice {
     pub threshold_tokens: u64,
     pub input: Option<f64>,
@@ -298,7 +299,7 @@ impl CostBuild {
         self.table = Some(table);
     }
 
-    fn lookup(&mut self, provider: &str, model: &str) -> Option<Price> {
+    fn lookup(&mut self, provider: &str, model: &str, at: Option<i64>) -> Option<Price> {
         let table = self.table.get_or_insert_with(snapshot);
         if self.pricing_fingerprint.is_empty() && self.models.is_empty() {
             self.pricing_fingerprint = table.fingerprint.clone();
@@ -309,16 +310,12 @@ impl CostBuild {
         if self.pricing_fingerprint != table.fingerprint {
             return None;
         }
-        if model.contains('/') {
-            table.routed_price(model)
-        } else {
-            table.price_for(provider, model)
-        }
+        table.execution_price(provider, model, at?)
     }
 
     pub(crate) fn observe(&mut self, provider: &str, model: Option<&str>, billing: &BillingUsage) {
         let model = model.unwrap_or("unknown");
-        let price = self.lookup(provider, model);
+        let price = self.lookup(provider, model, billing.timestamp);
         self.add(
             model,
             billing,
@@ -484,7 +481,7 @@ impl CostBuild {
         ];
         let mut entry_usd = 0.0;
         // Gateway-only models have no list-priced USD even for a zero-token record.
-        let mut has_unpriced = runtime::gateway_billing_only(model);
+        let mut has_unpriced = timestamp.is_none() || runtime::gateway_billing_only(model);
         let model_cost = self.models.entry(model.to_owned()).or_default();
         for (kind, tokens, rate) in categories {
             add_tokens(&mut model_cost.tokens, kind, tokens);
@@ -727,6 +724,20 @@ mod tests {
 
     #[test]
     fn routed_models_and_token_coverage() {
+        let rates = std::sync::Arc::new(
+            runtime::adapt(include_bytes!("pricing/fixtures/models-dev.json"), 0).unwrap(),
+        );
+        let calculate_cost = |messages: &[MessageUsage], events: &[CodexUsageEvent]| {
+            let mut cost = CostBuild::with_table(rates.clone());
+            for message in messages {
+                cost.message(message)
+            }
+            for event in events {
+                cost.codex(event)
+            }
+            cost.finish()
+        };
+
         let plain_anthropic = calculate_cost(&[usage("claude-opus-5-5", 100, 20, 0, 0, 0)], &[]);
         for model in [
             "gateway/route/claude-opus-5-5",
@@ -743,7 +754,7 @@ mod tests {
                 output: 20,
                 ..Default::default()
             },
-            timestamp: None,
+            timestamp: Some(0),
         };
         let native = calculate_cost(&[], &[event]);
         let routed = calculate_cost(&[usage("gateway/route/gpt-6.1-sol", 100, 20, 0, 0, 0)], &[]);
@@ -783,6 +794,10 @@ mod tests {
         }
     }
 
+    fn bundled_cost(messages: &[MessageUsage], events: &[CodexUsageEvent]) -> Cost {
+        calculate_cost_with(messages, events, super::price_for)
+    }
+
     #[test]
     fn opus_five_prices_match_the_official_cache_rates_and_real_run() {
         let p = super::price_for("claude-opus-5[1m]").unwrap();
@@ -793,14 +808,14 @@ mod tests {
         assert_eq!(p.cache_read, Some(0.5));
         let mut real = usage("claude-opus-5", 1_034, 2_080, 518_410, 0, 151_872);
         real.billing.prompt_size = 671_316;
-        let cost = calculate_cost(&[real], &[]);
+        let cost = bundled_cost(&[real], &[]);
         assert!((cost.usd.unwrap() - 1.835095).abs() < 1e-12);
     }
 
     #[test]
     fn five_minute_and_one_hour_writes_use_their_own_rates() {
-        let one_hour = calculate_cost(&[usage("claude-opus-5", 0, 0, 0, 0, 1_000_000)], &[]);
-        let five_minutes = calculate_cost(&[usage("claude-opus-5", 0, 0, 0, 1_000_000, 0)], &[]);
+        let one_hour = bundled_cost(&[usage("claude-opus-5", 0, 0, 0, 0, 1_000_000)], &[]);
+        let five_minutes = bundled_cost(&[usage("claude-opus-5", 0, 0, 0, 1_000_000, 0)], &[]);
         assert_eq!(one_hour.usd, Some(10.0));
         assert_eq!(five_minutes.usd, Some(6.25));
     }
@@ -824,8 +839,8 @@ mod tests {
         assert_eq!(at_threshold.billing.prompt_size, 100_000);
         assert_eq!(above_threshold.billing.prompt_size, 100_001);
 
-        let standard = calculate_cost(&[at_threshold], &[]);
-        let long = calculate_cost(&[above_threshold], &[]);
+        let standard = bundled_cost(&[at_threshold], &[]);
+        let long = bundled_cost(&[above_threshold], &[]);
         assert!((standard.usd.unwrap() - 0.0096).abs() < 1e-12);
         assert!((long.usd.unwrap() - 0.04800005).abs() < 1e-12);
     }
@@ -833,7 +848,7 @@ mod tests {
     #[test]
     fn haiku_five_five_cache_write_durations_use_their_own_rates() {
         let writes = usage("claude-haiku-5-5", 0, 0, 0, 1_000, 1_000);
-        let cost = calculate_cost(&[writes], &[]);
+        let cost = bundled_cost(&[writes], &[]);
         assert!((cost.usd.unwrap() - 0.000325).abs() < 1e-12);
         assert!(
             (cost.by_model["claude-haiku-5-5"].usd_by_kind["cache_write_5m"] - 0.000125).abs()
@@ -857,7 +872,7 @@ mod tests {
             },
             timestamp: Some(0),
         };
-        let cost = calculate_cost(&[], &[event]);
+        let cost = bundled_cost(&[], &[event]);
         assert!((cost.usd.unwrap() - 1.21).abs() < 1e-12);
         assert_eq!(cost.unpriced_models, Vec::<String>::new());
     }
@@ -903,7 +918,7 @@ mod tests {
         assert!((above_cost.usd.unwrap() - 0.00003).abs() < 1e-12);
         let mut fast = p.clone();
         fast.billing.speed = Some("fast".into());
-        let fast_cost = calculate_cost(&[fast], &[]);
+        let fast_cost = bundled_cost(&[fast], &[]);
         assert!((fast_cost.usd.unwrap() - 0.00006).abs() < 1e-12);
         // The official pages do not publish a usable OpenAI long-context
         // threshold, so no such tier is installed in its rows.
@@ -921,7 +936,7 @@ mod tests {
         first.billing.timestamp = Some(0);
         let mut second = usage("claude-opus-5", 1_000_000, 0, 0, 0, 0);
         second.billing.timestamp = Some(86_400_000);
-        let cost = calculate_cost(&[first, second], &[]);
+        let cost = bundled_cost(&[first, second], &[]);
         assert_eq!(cost.usd, Some(60.0));
         assert_eq!(cost.by_day.values().sum::<f64>(), cost.usd.unwrap());
         assert_eq!(
@@ -940,7 +955,7 @@ mod tests {
     fn missing_cache_split_uses_five_minute_rate_and_counts_one_unknown_split() {
         let mut message = usage("claude-opus-5", 0, 0, 0, 1_000_000, 0);
         message.billing.split_unknown = true;
-        let cost = calculate_cost(&[message], &[]);
+        let cost = bundled_cost(&[message], &[]);
         assert_eq!(cost.usd, Some(6.25));
         assert_eq!(cost.split_unknown_messages, 1);
     }
@@ -949,7 +964,7 @@ mod tests {
     fn verified_web_search_charge_is_added_per_thousand_requests() {
         let mut message = usage("claude-opus-5", 0, 0, 0, 0, 0);
         message.billing.web_search_requests = 1;
-        let cost = calculate_cost(&[message], &[]);
+        let cost = bundled_cost(&[message], &[]);
         assert_eq!(cost.usd, Some(0.01));
     }
 
@@ -977,7 +992,7 @@ mod tests {
                 timestamp: Some(86_400_000),
             },
         ];
-        let cost = calculate_cost(&[], &events);
+        let cost = bundled_cost(&[], &events);
         assert!((cost.usd.unwrap() - 0.3592).abs() < 1e-12);
         assert!((cost.by_day["1970-01-01"] - 0.0132).abs() < 1e-12);
         assert!((cost.by_day["1970-01-02"] - 0.346).abs() < 1e-12);
