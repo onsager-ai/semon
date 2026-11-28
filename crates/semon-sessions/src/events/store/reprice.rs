@@ -33,48 +33,81 @@ CREATE INDEX IF NOT EXISTS files_codex_pricing_fingerprint
     WHERE codex_native_usage IS NOT NULL;
 CREATE INDEX IF NOT EXISTS session_catalog_pricing_fingerprint
     ON session_catalog(session_key,pricing_fingerprint);
-CREATE TRIGGER IF NOT EXISTS pricing_pending_file_insert
+";
+
+const DROP_OLD_TRIGGERS: &str = "
+DROP TRIGGER IF EXISTS pricing_pending_file_insert;
+DROP TRIGGER IF EXISTS pricing_pending_file_update;
+DROP TRIGGER IF EXISTS pricing_pending_native_usage_ready;
+DROP TRIGGER IF EXISTS pricing_pending_catalog_insert;
+DROP TRIGGER IF EXISTS pricing_pending_catalog_update;
+";
+
+// The statement's outer conflict policy can override a trigger's INSERT OR
+// IGNORE. Target only the queue primary key with an explicit UPSERT.
+const ENQUEUE_TRIGGERS: &str = "
+CREATE TRIGGER pricing_enqueue_file_insert
 AFTER INSERT ON files
 WHEN NEW.codex_native_usage IS NOT NULL
 BEGIN
     UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE file_id=NEW.file_id;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    INSERT INTO pricing_recompute_pending(owner_kind,owner_key)
     SELECT 'source',NEW.path FROM files f,meta m WHERE f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
-      AND f.codex_pricing_fingerprint IS NOT m.value;
+      AND f.codex_pricing_fingerprint IS NOT m.value
+    ON CONFLICT(owner_kind,owner_key) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_file_update
+CREATE TRIGGER pricing_enqueue_file_update
 AFTER UPDATE OF codex_native_usage ON files
 BEGIN
     UPDATE files SET codex_pricing_fingerprint=CASE WHEN json_valid(NEW.codex_native_usage) THEN json_extract(NEW.codex_native_usage,'$.cost.pricing_fingerprint') END WHERE file_id=NEW.file_id;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    INSERT INTO pricing_recompute_pending(owner_kind,owner_key)
     SELECT 'source',NEW.path FROM files f,meta m WHERE NEW.codex_native_usage IS NOT NULL AND f.file_id=NEW.file_id AND m.key='pricing_recompute_target'
-      AND f.codex_pricing_fingerprint IS NOT m.value;
+      AND f.codex_pricing_fingerprint IS NOT m.value
+    ON CONFLICT(owner_kind,owner_key) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_native_usage_ready
+CREATE TRIGGER pricing_enqueue_native_usage_ready
 AFTER UPDATE OF usage_ready ON native_usage_sources
 WHEN NEW.usage_ready=1
 BEGIN
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    INSERT INTO pricing_recompute_pending(owner_kind,owner_key)
     SELECT 'source',NEW.source_path FROM files f,meta m WHERE f.path=NEW.source_path AND m.key='pricing_recompute_target'
-      AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value;
+      AND f.codex_native_usage IS NOT NULL AND f.codex_pricing_fingerprint IS NOT m.value
+    ON CONFLICT(owner_kind,owner_key) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_insert
+CREATE TRIGGER pricing_enqueue_catalog_insert
 AFTER INSERT ON session_catalog
 BEGIN
     UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    INSERT INTO pricing_recompute_pending(owner_kind,owner_key)
     SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
+      AND c.pricing_fingerprint IS NOT m.value
+    ON CONFLICT(owner_kind,owner_key) DO NOTHING;
 END;
-CREATE TRIGGER IF NOT EXISTS pricing_pending_catalog_update
+CREATE TRIGGER pricing_enqueue_catalog_update
 AFTER UPDATE OF metadata ON session_catalog
 BEGIN
     UPDATE session_catalog SET pricing_fingerprint=CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata,'$.cost.pricing_fingerprint') END WHERE session_key=NEW.session_key;
-    INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key)
+    INSERT INTO pricing_recompute_pending(owner_kind,owner_key)
     SELECT 'session',NEW.session_key FROM session_catalog c,meta m WHERE c.session_key=NEW.session_key AND m.key='pricing_recompute_target'
-      AND c.pricing_fingerprint IS NOT m.value;
+      AND c.pricing_fingerprint IS NOT m.value
+    ON CONFLICT(owner_kind,owner_key) DO NOTHING;
 END;
 ";
+
+/// Install the fixed triggers together under the producer's writer lock.
+/// Current Indexes retain their queue, data and schema version.
+pub(super) fn ensure_enqueue_triggers(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let installed: bool = tx
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='pricing_enqueue_file_update')",
+        )?
+        .query_row([], |row| row.get(0))?;
+    if !installed {
+        tx.execute_batch(DROP_OLD_TRIGGERS)?;
+        tx.execute_batch(ENQUEUE_TRIGGERS)?;
+    }
+    Ok(())
+}
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -165,6 +198,7 @@ fn step_inner(
     {
         return Ok(false);
     }
+    ensure_enqueue_triggers(&tx)?;
     let encoded: Option<String>=tx.query_row("SELECT CASE WHEN octet_length(value)<=1048576 THEN value ELSE NULL END FROM meta WHERE key=?1",[WORK],|r|r.get(0)).optional()?;
     let mut work: Work = encoded
         .as_deref()
@@ -859,7 +893,7 @@ fn pending_step(
             let changed = catalog_step(tx, work, table, Some(&key))?;
             if changed {
                 tx.execute(
-                    "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1",
+                    "INSERT INTO pricing_recompute_pending(owner_kind,owner_key) VALUES('family',?1) ON CONFLICT(owner_kind,owner_key) DO NOTHING",
                     [&key],
                 )?;
             }
@@ -882,7 +916,7 @@ fn pending_step(
                 .flatten();
             if let Some(parent) = parent {
                 tx.execute(
-                    "INSERT OR IGNORE INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1 WHERE EXISTS(SELECT 1 FROM session_trace_headers WHERE session_key=?1)",
+                    "INSERT INTO pricing_recompute_pending(owner_kind,owner_key) SELECT 'family',?1 WHERE EXISTS(SELECT 1 FROM session_trace_headers WHERE session_key=?1) ON CONFLICT(owner_kind,owner_key) DO NOTHING",
                     [&parent],
                 )?;
             }
@@ -1180,6 +1214,137 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap()
+    }
+
+    fn install_previous_enqueue_triggers(connection: &Connection) {
+        connection
+            .execute_batch(&DROP_OLD_TRIGGERS.replace("pricing_pending_", "pricing_enqueue_"))
+            .unwrap();
+        connection
+            .execute_batch(
+                &ENQUEUE_TRIGGERS
+                    .replace("pricing_enqueue_", "pricing_pending_")
+                    .replace("INSERT INTO", "INSERT OR IGNORE INTO")
+                    .replace("\n    ON CONFLICT(owner_kind,owner_key) DO NOTHING", ""),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn queued_owners_allow_existing_file_and_catalog_updates_on_a_current_index() {
+        use crate::slot_projection::Publication;
+
+        let root = root();
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = SqliteStore::attempt(&path).unwrap_or_else(|e| panic!("{e}"));
+        let native = "/not-present/queued.jsonl";
+        let before = ledger();
+        let index = codex_index("gpt-6.1-sol", 1);
+        let old = table("openai", "gpt-6.1-sol", 4.0, 0);
+        let target = table("openai", "gpt-6.1-sol", 17.0, 1);
+        let mut catalog = row(
+            native,
+            &before,
+            CostBuild::with_table(old).finish(),
+            "codex",
+        );
+        assert_eq!(
+            store
+                .write_one(native, None, None, &before, &index)
+                .unwrap(),
+            Outcome::Written
+        );
+        let publish = |store: &mut SqliteStore, row: &CatalogRow| {
+            let generation = store.session_catalog_generation().unwrap();
+            store.publish_session_catalog_fenced(
+                &Publication {
+                    rows: std::slice::from_ref(row),
+                    transcripts: None,
+                },
+                generation.as_deref(),
+            )
+        };
+        assert_eq!(publish(&mut store, &catalog).unwrap().0, Outcome::Written);
+
+        // Keep the current-format Index, including its rows and old trigger DDL.
+        install_previous_enqueue_triggers(&store.connection);
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![TARGET, target.fingerprint],
+            )
+            .unwrap();
+        store.connection.execute_batch("UPDATE session_catalog SET metadata=metadata; UPDATE files SET codex_native_usage=codex_native_usage;").unwrap();
+        let count_pending = |store: &SqliteStore| {
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pricing_recompute_pending",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count_pending(&store), 2);
+        drop(store);
+
+        let (mut store, _) = SqliteStore::attempt(&path).unwrap_or_else(|e| panic!("{e}"));
+        let catalog_name = |store: &SqliteStore| {
+            store.connection.query_row("SELECT json_extract(metadata,'$.name') FROM session_catalog WHERE session_key='owner'", [], |row| row.get::<_, String>(0)).unwrap()
+        };
+        catalog.name = "updated".into();
+        store.connection.execute_batch("CREATE TEMP TRIGGER refuse_catalog_source BEFORE INSERT ON session_catalog_sources BEGIN SELECT RAISE(ABORT,'fixture write failure'); END;").unwrap();
+        let error = publish(&mut store, &catalog).unwrap_err();
+        assert!(
+            error.to_string().contains("fixture write failure"),
+            "{error}"
+        );
+        assert_eq!(catalog_name(&store), "owner");
+        assert_eq!(count_pending(&store), 2);
+        store
+            .connection
+            .execute_batch("DROP TRIGGER refuse_catalog_source;")
+            .unwrap();
+        assert_eq!(publish(&mut store, &catalog).unwrap().0, Outcome::Written);
+        assert_eq!(catalog_name(&store), "updated");
+        assert_eq!(count_pending(&store), 2);
+
+        // Independently exercise the source writer as the first updated writer.
+        install_previous_enqueue_triggers(&store.connection);
+        let mut after = before.clone();
+        after.stat.size += 100;
+        after.offset += 100;
+        after.tail = [3; 32];
+        assert_eq!(
+            store
+                .write_one(
+                    native,
+                    Some(&before),
+                    Some(&index),
+                    &after,
+                    &codex_index("gpt-6.1-sol", 2)
+                )
+                .unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(
+            ledger_row(&store.connection, native).unwrap().unwrap().1,
+            after
+        );
+        assert_eq!(pending_source_count(&store.connection, native), 1);
+        assert_eq!(count_pending(&store), 2);
+
+        drain(&path, &target);
+        assert_eq!(count_pending(&store), 0);
+        let usage: (u64, String) = store.connection.query_row(
+            "SELECT json_extract(codex_native_usage,'$.tokens.total'),codex_pricing_fingerprint FROM files WHERE path=?1",
+            [native],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(usage, (200, target.fingerprint.clone()));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

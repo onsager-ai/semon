@@ -2968,6 +2968,7 @@ impl IndexStore for SqliteStore {
         measurements.record("fences", started, files.len());
         write_activity.stage("fences", &transaction);
         let started = measurements.start();
+        reprice::ensure_enqueue_triggers(&transaction).map_err(failure)?;
         for (path, ledger, index) in files {
             write_index_changes_measured(
                 &transaction,
@@ -3660,6 +3661,7 @@ impl SqliteStore {
             }
             crate::history_projection::publish(&transaction, publication).map_err(failure)?;
             stage("history", &transaction);
+            reprice::ensure_enqueue_triggers(&transaction).map_err(failure)?;
             let mut metadata_measurements =
                 crate::native_timing::Measurements::new(producer.is_some());
             let mut overview_measurements =
@@ -4600,6 +4602,7 @@ impl SqliteStore {
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
             return Ok(Outcome::Conflict);
         }
+        reprice::ensure_enqueue_triggers(&transaction)?;
         if changes.is_none()
             && let Some((file_id, _)) = found
         {
@@ -5250,6 +5253,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                 for ddl in storage_ddl() {
                     transaction.execute_batch(ddl)?;
                 }
+                reprice::ensure_enqueue_triggers(&transaction)?;
                 transaction.execute(
                     "INSERT INTO meta(key,value) VALUES('cache_version',?1),('storage_stamp',?2),('incarnation',lower(hex(randomblob(16))))",
                     [CACHE_VERSION.to_string(), crate::storage::sqlite::stamp()],
