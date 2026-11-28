@@ -3649,6 +3649,7 @@ fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
 
 #[test]
 fn star_catalog_family_dollar_arrival_parity() {
+    let _prices = crate::pricing::runtime::fixture_prices();
     for reverse in [false, true] {
         let home = Home::new();
         let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
@@ -3665,7 +3666,7 @@ fn star_catalog_family_dollar_arrival_parity() {
             let mut records = vec![human(id, ts(0, source), &prompt)];
             if id != "empty" {
                 records.push(assistant_usage(
-                    id, ts(0, 10), &format!("message-{id}"), "claude-sonnet-4-6",
+                    id, ts(0, 10), &format!("message-{id}"), "claude-opus-5",
                     json!({"input_tokens":100,"cache_read_input_tokens":30,
                         "cache_creation_input_tokens":40,
                         "cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":30},
@@ -3685,7 +3686,7 @@ fn star_catalog_family_dollar_arrival_parity() {
         assert!(total > 0.0);
         // A later native report replaces the invocation price, rather than
         // adding a second charge. Unknown rates then poison every ancestor.
-        for model in ["claude-sonnet-4-6", "unknown-fixture-model"] {
+        for model in ["claude-opus-5", "unknown-fixture-model"] {
             let records = [assistant_usage(
                 "late-leaf",
                 ts(0, 15),

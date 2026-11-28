@@ -3760,6 +3760,7 @@ fn warehouse_retained_tool_expansion_reads_the_frozen_reply() {
 
 #[test]
 fn warehouse_list_prices_claude_usage_with_the_existing_pricing_calculator() {
+    let _prices = crate::pricing::runtime::fixture_prices();
     let mut fixture = Fixture::new("warehouse-list-prices");
     let path = fixture.claude("native", "Price fixture");
     append_native(
@@ -3798,6 +3799,7 @@ fn warehouse_list_prices_claude_usage_with_the_existing_pricing_calculator() {
 
 #[test]
 fn warehouse_selected_family_prices_descendants_and_deduplicates_shared_steps() {
+    let _prices = crate::pricing::runtime::fixture_prices();
     let mut fixture = Fixture::new("selected-family-price");
     let root = fixture.claude("root", "Work");
     let child = fixture.claude("child", "Semon-Parent: claude:root\nChild work");
@@ -3911,6 +3913,7 @@ fn warehouse_selected_family_prices_descendants_and_deduplicates_shared_steps() 
         billing: crate::events::BillingUsage {
             input: 10,
             output: 10,
+            timestamp: Some(1000),
             ..Default::default()
         },
         ..Default::default()

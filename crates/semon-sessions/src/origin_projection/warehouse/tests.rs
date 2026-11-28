@@ -384,10 +384,9 @@ fn both_harnesses_preserve_evidence_turns_and_usage() {
     };
     let totals = family_costs(&actual);
     assert_eq!(totals, family_costs(&expected));
-    assert_eq!(
-        totals[&root.session_uid],
-        Some(root.steps[0].cost.usd_est.unwrap() + child.steps[0].cost.usd_est.unwrap())
-    );
+    assert_eq!(root.steps[0].cost.usd_est, None);
+    assert_eq!(child.steps[0].cost.usd_est, None);
+    assert_eq!(totals[&root.session_uid], None);
 }
 
 #[test]

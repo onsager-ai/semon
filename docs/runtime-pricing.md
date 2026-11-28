@@ -14,9 +14,9 @@ provider calls or changes provider authentication or application authority.
 The public endpoint is <https://models.dev/api.json>; its
 [API documentation](https://github.com/anomalyco/models.dev#api) describes a
 community-maintained catalog. Prices are estimates, not provider invoices.
-The local cache is `models-dev-pricing.json` in Semon's existing XDG state
+The local cache is `models-dev-rate-history.json` in Semon's existing XDG state
 directory, or Hub's configured data root. Startup prefers a validated cache,
-then the bundled `pricing.json`. Corruption, network errors, invalid prices or
+then an empty valuation history. The bundled `pricing.json` supplies reference metadata for normalization. Corruption, network errors, invalid prices or
 persistence failures retain the previous effective table. Fetches have a
 10-second connection timeout, a 30-second total timeout, no redirects and a
 16 MiB streaming response limit. A normalized cache is fsynced and atomically
@@ -51,8 +51,7 @@ streaming cap. A v2 request, parse or schema failure never blocks valid v1
 prices. Exact IDs retain their last-known-good v2 TTLs, including their separate
 `v2_fetched_at`, until a later valid v2 response replaces them. An invalid v2
 entry fails closed for that entry and retains its previous supplement. v1 still
-outranks a retained v2 field. The cache fingerprint covers effective prices and
-provenance, but not fetch timestamps.
+outranks a retained v2 field. The valuation fingerprint includes the interval history, its provenance and the lookup rules. Reobserving unchanged prices leaves it stable.
 
 The TTL split follows models.dev's upstream implementation: `packages/core/src/translate.ts`
 reduces cache-write TTLs to the first v1 price, while `packages/core/src/generate-v2.ts`
@@ -64,8 +63,7 @@ weekly price-sync workflow continue maintaining the bundled offline bootstrap;
 they are no longer the only way runtime reference prices change.
 
 Context tiers use the explicit `cost.tiers[].tier.size` (for example 272000),
-with `context_over_200k` used only without an explicit tier. A compatibility
-200k field cannot erase an authored exact hotfix boundary. The current native
+with `context_over_200k` used only without an explicit tier. The observed context boundary is part of each tier rate's identity. The current native
 calculator supports one context boundary; updates with multiple context tiers
 are rejected rather than flattened. Non-context tiers are ignored. Tier categories fall back to an
 authored tier only at the same boundary. Fast mode uses explicit
@@ -81,6 +79,43 @@ provider. Anthropic's explicit `cache_write_5m`/`cache_write5m` and
 writes never map to them. Bundled Anthropic five-minute/one-hour and web-search
 rates remain distinct, with their recorded provenance. Actual usage of an
 unavailable category makes the total unknown, never free.
+
+## Execution-time valuation
+
+Initial admission, archive replay, a fresh Index rebuild, and the pending-owner
+repricer use the same lookup. Each supported models.dev rate has an interval
+for its exact provider, model, category, speed and context threshold. Times
+are UTC epoch milliseconds. A successful observation opens an interval at the
+observation time. It covers steps at or after that instant and strictly before
+its end. A changed or removed rate closes the interval. Reappearance opens a
+new one. Unchanged categories keep their first observation, including explicit
+zero rates. A context threshold selects a tier. Pricing requires a monetary
+rate within the selected tier. A malformed v2 cache-write object or context
+size retains the affected supplement at its existing v1 boundary. A valid
+response that removes the rate or changes its boundary closes that interval.
+
+Lookup resolves exact IDs and aliases against intervals covering the execution.
+An active exact ID takes precedence. If the base ID also has no active rate,
+there must be exactly one matching dated alias. Overlapping fallback candidates
+leave the estimate unknown.
+
+Only amounts attributed to models.dev enter valuation history. Bundled
+fallbacks, model release dates, log ingestion times and the latest fetch date
+cannot establish a price for an earlier execution. An earlier effective start
+requires evidence for that exact rate and a recorded source for the date. The
+HTTP importer currently uses first observations exclusively. Without execution
+time or a covering interval the list cost is unknown, including for a zero-token
+step. Its unused components still cost zero. Known component amounts
+and token coverage remain available for partially priced steps. Gateway-only
+identities retain their separate billing semantics.
+
+The cache is independent of the Index. Refresh holds a cross-process file lock
+from cache read through atomic publication. A corrupt history blocks refresh
+until recovered. One-shot commands and refresh-disabled processes read the
+same durable history without adding observations. A previous current-price
+cache supplies no interval history. An ASI pricing snapshot records the
+valuation fingerprint and projects the individual intervals into `dim_price`;
+`valid_from` distinguishes separate intervals of the same rate selector.
 
 ## Retained derived costs
 
@@ -127,7 +162,10 @@ with 1 MiB metadata values. Legacy, over-budget, changed-source or incomplete
 observations retain their prior cost and older/absent fingerprint. They are not
 zeroed or relabeled as current and are reconsidered only after a price change or
 a new retained-fact write. Appends onto a restored stale accumulator stay
-explicitly unpriced until its retained facts are recomputed. A superseded table
+explicitly unpriced until its retained facts are recomputed. When a one-shot
+read combines restored Codex files, it counts tokens from stale files as
+unpriced and keeps only amounts verified against the selected fingerprint.
+A superseded table
 cannot publish further work in the process; an older fetched table cannot roll
 back a newer durable job.
 

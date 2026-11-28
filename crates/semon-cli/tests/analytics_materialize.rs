@@ -449,9 +449,7 @@ fn late_claude_continuation_counts_usage_once() {
                     row[column(&FACT_SESSION, "step_count")]
                         .parse::<usize>()
                         .unwrap(),
-                    row[column(&FACT_SESSION, "usd_est")]
-                        .parse::<f64>()
-                        .unwrap(),
+                    row[column(&FACT_SESSION, "usd_est")].clone(),
                 )
             })
             .collect::<Vec<_>>()
@@ -462,7 +460,7 @@ fn late_claude_continuation_counts_usage_once() {
     assert!(
         separate
             .iter()
-            .all(|&(count, cost)| count == 1 && cost > 0.0)
+            .all(|(count, cost)| *count == 1 && cost.is_empty())
     );
 
     let mut file = fs::OpenOptions::new()
@@ -478,10 +476,7 @@ fn late_claude_continuation_counts_usage_once() {
     .unwrap();
     drop(file);
     let after = publish();
-    assert_eq!(
-        claude_totals(&after),
-        vec![(2, separate.iter().map(|&(_, cost)| cost).sum())]
-    );
+    assert_eq!(claude_totals(&after), vec![(2, String::new())]);
     let steps: Vec<_> = after["fact_step"]
         .iter()
         .filter(|row| row[column(&FACT_STEP, "session_uid")].contains("/claude/"))

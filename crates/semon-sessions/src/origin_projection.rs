@@ -405,7 +405,7 @@ fn prices(
 }
 
 fn decode_prices(snapshot: &str, fingerprint: &str) -> rusqlite::Result<Vec<Price>> {
-    let rates = crate::pricing::runtime::recorded_rates(snapshot)
+    let rates = crate::pricing::runtime::recorded_rates(snapshot, fingerprint)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
     rates
         .into_iter()
@@ -438,8 +438,8 @@ fn decode_prices(snapshot: &str, fingerprint: &str) -> rusqlite::Result<Vec<Pric
                 threshold_tokens: rate.threshold_tokens,
                 unit,
                 usd_per_unit: rate.usd_per_unit,
-                valid_from: rate.learned_at,
-                valid_to: None,
+                valid_from: rate.valid_from,
+                valid_to: rate.valid_to,
                 learned_at: rate.learned_at,
             })
         })
@@ -1304,7 +1304,9 @@ mod tests {
                  ) STRICT;",
             )
             .unwrap();
-        let table = crate::pricing::snapshot();
+        let table =
+            crate::pricing::runtime::adapt(include_bytes!("pricing/fixtures/models-dev.json"), 100)
+                .unwrap();
         let snapshot = crate::pricing::runtime::recorded_snapshot(&table);
         connection
             .execute(

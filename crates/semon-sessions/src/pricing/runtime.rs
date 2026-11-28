@@ -1,4 +1,5 @@
 //! Public reference data only: no provider credentials or native source access.
+use super::history::{self, History, Kind, Rates, Selector};
 use super::{FastPrice, FastRates, LongContextPrice, Price, normalize_model_id, price_data};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,7 +16,7 @@ use std::{
 const MAX_BODY: u64 = 16 * 1024 * 1024;
 const INTERVAL: u64 = 6 * 60 * 60;
 const RETRY: u64 = 30 * 60;
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const PROVIDERS: [&str; 2] = ["anthropic", "openai"];
 const MAX_INDEXES: usize = 64;
 const INDEX_RETIRE_AFTER: Duration = Duration::from_secs(30 * 60);
@@ -34,6 +35,7 @@ pub(crate) struct EffectiveTable {
     version: u32,
     pub(crate) fetched_at: u64,
     pub(crate) fingerprint: String,
+    history: History,
     providers: BTreeMap<String, BTreeMap<String, Row>>,
 }
 
@@ -51,14 +53,8 @@ pub(crate) struct RecordedRate {
     pub(crate) unit: &'static str,
     pub(crate) usd_per_unit: f64,
     pub(crate) learned_at: i64,
-}
-
-struct RateContext<'a> {
-    fingerprint: &'a str,
-    provider: &'a str,
-    model: &'a str,
-    speed: Option<&'a str>,
-    learned_at: i64,
+    pub(crate) valid_from: i64,
+    pub(crate) valid_to: Option<i64>,
 }
 
 /// Serialize the full effective table with the activity generation.  A later
@@ -69,162 +65,173 @@ pub(crate) fn recorded_snapshot(table: &EffectiveTable) -> String {
 
 /// Read an exact recorded table. Invalid snapshots fail rather than falling
 /// back to a current rate table.
-pub(crate) fn recorded_rates(snapshot: &str) -> Result<Vec<RecordedRate>, serde_json::Error> {
+pub(crate) fn recorded_rates(
+    snapshot: &str,
+    expected: &str,
+) -> Result<Vec<RecordedRate>, serde_json::Error> {
     let table: EffectiveTable = serde_json::from_str(snapshot)?;
     table.validate().map_err(serde_json::Error::io)?;
     let mut fingerprinted = table.clone();
     fingerprinted.seal().map_err(serde_json::Error::io)?;
-    if fingerprinted.fingerprint != table.fingerprint {
+    if fingerprinted.fingerprint != table.fingerprint || table.fingerprint != expected {
         return Err(serde_json::Error::io(invalid(
             "pricing snapshot fingerprint mismatch",
         )));
     }
-    let learned_at = i64::try_from(table.fetched_at)
-        .ok()
-        .and_then(|seconds| seconds.checked_mul(1_000))
-        .unwrap_or(0);
     let mut rates = Vec::new();
-    for (provider, models) in &table.providers {
-        for (model, row) in models {
-            let context = RateContext {
-                fingerprint: &table.fingerprint,
-                provider,
-                model,
-                speed: None,
-                learned_at,
-            };
-            append_rates(&mut rates, &context, row.price, None);
-            if let Some(fast) = row.price.fast {
-                let price = match fast {
-                    FastPrice::Rates { rates: fast } => Price {
-                        input: fast.input,
-                        output: fast.output,
-                        cache_read: fast.cache_read,
-                        cache_write_5m: fast.cache_write_5m,
-                        cache_write_1h: fast.cache_write_1h,
-                        long_context: fast.long_context,
-                        fast: None,
-                        web_search_per_1k: row.price.web_search_per_1k,
-                    },
-                    FastPrice::Multiplier { multiplier } => scaled(row.price, multiplier),
-                };
-                append_rates(
-                    &mut rates,
-                    &RateContext {
-                        speed: Some("fast"),
-                        ..context
-                    },
-                    price,
-                    None,
-                );
+    for (provider, models) in &table.history {
+        for (model, series) in models {
+            for s in series {
+                let selector = s.selector;
+                if selector.kind == Kind::Boundary {
+                    continue;
+                }
+                for i in &s.intervals {
+                    let web = selector.kind == Kind::WebSearch;
+                    rates.push(RecordedRate {
+                        fingerprint: table.fingerprint.clone(),
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        kind: if web {
+                            "web_search_request"
+                        } else {
+                            selector.kind.key()
+                        },
+                        tier: selector.threshold.map(|_| "long_context".into()),
+                        speed: selector.fast.then(|| "fast".into()),
+                        threshold_tokens: selector.threshold,
+                        unit: if web { "request" } else { "mtok" },
+                        usd_per_unit: if web { i.amount / 1000.0 } else { i.amount },
+                        learned_at: i.learned_at,
+                        valid_from: i.valid_from,
+                        valid_to: i.valid_to,
+                    });
+                }
             }
         }
     }
     Ok(rates)
 }
 
-fn scaled(mut price: Price, multiplier: f64) -> Price {
-    price.input = price.input.map(|rate| rate * multiplier);
-    price.output = price.output.map(|rate| rate * multiplier);
-    price.cache_read = price.cache_read.map(|rate| rate * multiplier);
-    price.cache_write_5m = price.cache_write_5m.map(|rate| rate * multiplier);
-    price.cache_write_1h = price.cache_write_1h.map(|rate| rate * multiplier);
-    price.long_context = price.long_context.map(|mut tier| {
-        tier.input = tier.input.map(|rate| rate * multiplier);
-        tier.output = tier.output.map(|rate| rate * multiplier);
-        tier.cache_read = tier.cache_read.map(|rate| rate * multiplier);
-        tier.cache_write_5m = tier.cache_write_5m.map(|rate| rate * multiplier);
-        tier.cache_write_1h = tier.cache_write_1h.map(|rate| rate * multiplier);
-        tier
-    });
-    price.fast = None;
-    price
-}
-
-fn append_rates(
-    rates: &mut Vec<RecordedRate>,
-    context: &RateContext<'_>,
-    price: Price,
-    tier: Option<&LongContextPrice>,
-) {
-    let (price, tier_name, threshold) = match tier {
-        Some(tier) => (
-            Price {
-                input: tier.input,
-                output: tier.output,
-                cache_read: tier.cache_read,
-                cache_write_5m: tier.cache_write_5m,
-                cache_write_1h: tier.cache_write_1h,
-                long_context: None,
-                fast: None,
-                web_search_per_1k: price.web_search_per_1k,
-            },
-            Some("long_context".into()),
-            Some(tier.threshold_tokens),
-        ),
-        None => (price, None, None),
-    };
-    for (kind, rate) in [
-        ("input", price.input),
-        ("output", price.output),
-        ("cache_read", price.cache_read),
-        ("cache_write_5m", price.cache_write_5m),
-        ("cache_write_1h", price.cache_write_1h),
-    ] {
-        if let Some(usd_per_unit) = rate {
-            rates.push(RecordedRate {
-                fingerprint: context.fingerprint.into(),
-                provider: context.provider.into(),
-                model: context.model.into(),
-                kind,
-                tier: tier_name.clone(),
-                speed: context.speed.map(Into::into),
-                threshold_tokens: threshold,
-                unit: "mtok",
-                usd_per_unit,
-                learned_at: context.learned_at,
-            });
+fn observed_rates(row: &Row) -> io::Result<Rates> {
+    let mut result = Rates::new();
+    let value = serde_json::to_value(row.price)?;
+    for (fast, prefix) in [(false, ""), (true, "fast.rates.")] {
+        for tier in [false, true] {
+            let group = format!("{prefix}{}", if tier { "long_context." } else { "" });
+            let threshold = if tier {
+                let path = format!("{group}threshold_tokens").replace('.', "/");
+                let Some(threshold) = value.pointer(&format!("/{path}")).and_then(Value::as_u64)
+                else {
+                    continue;
+                };
+                Some(threshold)
+            } else {
+                None
+            };
+            for kind in [
+                Kind::Input,
+                Kind::Output,
+                Kind::CacheRead,
+                Kind::CacheWrite5m,
+                Kind::CacheWrite1h,
+                Kind::WebSearch,
+                Kind::Boundary,
+            ] {
+                let field = format!("{group}{}", kind.key());
+                let Some(source) = row
+                    .provenance
+                    .get(&field)
+                    .filter(|s| matches!(s.as_str(), "models_dev" | "models_dev_v2"))
+                else {
+                    continue;
+                };
+                if let Some(amount) = value
+                    .pointer(&format!("/{}", field.replace('.', "/")))
+                    .and_then(Value::as_f64)
+                {
+                    result.insert(
+                        Selector {
+                            fast,
+                            threshold,
+                            kind,
+                        },
+                        (amount, source.clone()),
+                    );
+                }
+            }
         }
     }
-    if let Some(rate) = price.web_search_per_1k {
-        rates.push(RecordedRate {
-            fingerprint: context.fingerprint.into(),
-            provider: context.provider.into(),
-            model: context.model.into(),
-            kind: "web_search_request",
-            tier: tier_name,
-            speed: context.speed.map(Into::into),
-            threshold_tokens: threshold,
-            unit: "request",
-            usd_per_unit: rate / 1_000.0,
-            learned_at: context.learned_at,
-        });
-    }
-    if tier.is_none()
-        && let Some(long) = price.long_context
-    {
-        append_rates(rates, context, price, Some(&long));
-    }
+    Ok(result)
 }
 
 // Bump when model alias or provider resolution rules change.
-const LOOKUP_RULES_VERSION: u32 = 3;
+const LOOKUP_RULES_VERSION: u32 = 6;
 
 pub(crate) fn gateway_billing_only(id: &str) -> bool {
     id.starts_with("onsager/codex/gpt-6")
 }
 
 impl EffectiveTable {
-    pub(crate) fn routed_price(&self, id: &str) -> Option<Price> {
+    pub(super) fn execution_price(&self, provider: &str, id: &str, at: i64) -> Option<Price> {
         if gateway_billing_only(id) {
             return None;
         }
-        let (_, native) = id.rsplit_once('/')?;
-        let mut matches = PROVIDERS
-            .iter()
-            .filter_map(|provider| self.price_for(provider, native));
-        let price = matches.next()?;
-        matches.next().is_none().then_some(price)
+        let routed = id.rsplit_once('/');
+        let id = routed.map_or(id, |(_, native)| native);
+        let alias = normalize_model_id(id);
+        let mut matched = None;
+        for (name, models) in &self.history {
+            if routed.is_none() && name != provider {
+                continue;
+            }
+            let active = |key: &str| models.get(key).and_then(|s| history::price_at(s, at));
+            let price = if let Some(price) = active(id).or_else(|| active(alias)) {
+                price
+            } else {
+                let mut candidates = models
+                    .iter()
+                    .filter(|(key, _)| normalize_model_id(key) == alias)
+                    .filter_map(|(_, series)| history::price_at(series, at));
+                let Some(price) = candidates.next() else {
+                    continue;
+                };
+                if candidates.next().is_some() {
+                    return None;
+                }
+                price
+            };
+            if matched.replace(price).is_some() {
+                return None;
+            }
+        }
+        matched
+    }
+
+    pub(crate) fn observe_rates(&mut self, previous: Option<&Self>) -> io::Result<()> {
+        let at = i64::try_from(self.fetched_at).map_err(|_| invalid("invalid observation time"))?;
+        let mut history = previous.map(|p| p.history.clone()).unwrap_or_default();
+        for (provider, rows) in &self.providers {
+            let models = history.entry(provider.clone()).or_default();
+            for (id, series) in models.iter_mut() {
+                let rates = rows
+                    .get(id)
+                    .map(observed_rates)
+                    .transpose()?
+                    .unwrap_or_default();
+                history::observe(series, rates, at);
+            }
+            for (id, row) in rows {
+                if !models.contains_key(id) {
+                    let rates = observed_rates(row)?;
+                    if !rates.is_empty() {
+                        history::observe(models.entry(id.clone()).or_default(), rates, at);
+                    }
+                }
+            }
+        }
+        self.history = history;
+        self.seal()
     }
 
     pub(crate) fn price_for(&self, provider: &str, id: &str) -> Option<Price> {
@@ -255,7 +262,8 @@ impl EffectiveTable {
             "{:x}",
             Sha256::digest(serde_json::to_vec(&(
                 LOOKUP_RULES_VERSION,
-                fingerprint_rows
+                fingerprint_rows,
+                &self.history
             ))?)
         );
         Ok(())
@@ -264,6 +272,29 @@ impl EffectiveTable {
     fn validate(&self) -> io::Result<()> {
         if self.version != CACHE_VERSION || self.providers.len() != PROVIDERS.len() {
             return Err(invalid("unsupported pricing cache"));
+        }
+        for models in self.history.values() {
+            for series in models.values().flatten() {
+                for (n, interval) in series.intervals.iter().enumerate() {
+                    validate_rate(interval.amount)?;
+                    if !matches!(interval.source.as_str(), "models_dev" | "models_dev_v2")
+                        || interval
+                            .valid_to
+                            .is_some_and(|end| end <= interval.valid_from)
+                        || (n > 0
+                            && series.intervals[n - 1]
+                                .valid_to
+                                .is_none_or(|end| end > interval.valid_from))
+                        || (interval.valid_from < interval.learned_at
+                            && interval
+                                .effective_date_source
+                                .as_deref()
+                                .is_none_or(str::is_empty))
+                    {
+                        return Err(invalid("invalid pricing interval"));
+                    }
+                }
+            }
         }
         for provider in PROVIDERS {
             let rows = self
@@ -348,6 +379,7 @@ fn bundled() -> EffectiveTable {
         fetched_at: 0,
         fingerprint: String::new(),
         providers,
+        history: History::new(),
     };
     table.seal().expect("bundled table serializes");
     table
@@ -377,7 +409,43 @@ static TABLE: OnceLock<RwLock<Arc<EffectiveTable>>> = OnceLock::new();
 fn store() -> &'static RwLock<Arc<EffectiveTable>> {
     TABLE.get_or_init(|| RwLock::new(Arc::new(bundled())))
 }
+#[cfg(test)]
+thread_local! {
+    static FIXTURE_TABLE: std::cell::RefCell<Option<Arc<EffectiveTable>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Install synthetic observations for a consumer test on its own thread.
+#[cfg(test)]
+pub(crate) fn fixture_prices() -> impl Drop {
+    struct Scope(Option<Arc<EffectiveTable>>);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            FIXTURE_TABLE.replace(self.0.take());
+        }
+    }
+    let mut api: Value =
+        serde_json::from_slice(include_bytes!("fixtures/models-dev.json")).unwrap();
+    for (id, cost) in [
+        (
+            "claude-sonnet-4-6",
+            serde_json::json!({"input":3,"output":15,"cache_read":0.3}),
+        ),
+        (
+            "claude-opus-5",
+            serde_json::json!({"input":5,"output":25,"cache_read":0.5,"cache_write_5m":6.25,"cache_write_1h":10}),
+        ),
+    ] {
+        api["anthropic"]["models"][id] = serde_json::json!({"id":id,"cost":cost});
+    }
+    let table = adapt(&serde_json::to_vec(&api).unwrap(), 1).unwrap();
+    Scope(FIXTURE_TABLE.replace(Some(Arc::new(table))))
+}
+
 pub(crate) fn snapshot() -> Arc<EffectiveTable> {
+    #[cfg(test)]
+    if let Some(table) = FIXTURE_TABLE.with_borrow(Clone::clone) {
+        return table;
+    }
     Arc::clone(&store().read().unwrap_or_else(|e| e.into_inner()))
 }
 
@@ -499,6 +567,22 @@ fn rates(cost: &Value, provider: &str) -> io::Result<FastRates> {
     })
 }
 
+fn context_boundary(entry: &Value) -> io::Result<Option<u64>> {
+    let kind = entry
+        .pointer("/tier/type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("field cost.tiers[].tier.type: invalid type"))?;
+    if kind != "context" {
+        return Ok(None);
+    }
+    entry
+        .pointer("/tier/size")
+        .and_then(Value::as_u64)
+        .filter(|size| *size > 0)
+        .map(Some)
+        .ok_or_else(|| invalid("field cost.tiers[].tier.size: invalid boundary"))
+}
+
 fn long_context(cost: &Value, provider: &str) -> io::Result<Option<LongContextPrice>> {
     let explicit = match cost.get("tiers") {
         None | Some(Value::Null) => None,
@@ -510,19 +594,17 @@ fn long_context(cost: &Value, provider: &str) -> io::Result<Option<LongContextPr
             // calculator. More than one context boundary cannot be represented.
             let mut context = None;
             for tier in tiers {
-                if tier.pointer("/tier/type").and_then(Value::as_str) != Some("context") {
+                if tier.pointer("/tier/type").and_then(Value::as_str).is_none() {
                     continue;
                 }
+                let Some(size) = context_boundary(tier)? else {
+                    continue;
+                };
                 if context.is_some() {
                     return Err(invalid(
                         "field cost.tiers: multiple context tiers unsupported",
                     ));
                 }
-                let size = tier
-                    .pointer("/tier/size")
-                    .and_then(Value::as_u64)
-                    .filter(|v| *v > 0)
-                    .ok_or_else(|| invalid("field cost.tiers[].tier.size: invalid boundary"))?;
                 context = Some((size, tier));
             }
             context
@@ -633,19 +715,7 @@ pub(crate) fn adapt(body: &[u8], fetched_at: u64) -> io::Result<EffectiveTable> 
             let r = overlay_rates(raw, base_rates(base));
             let explicit_tier =
                 long_context(cost, provider).map_err(|error| model_error(provider, id, error))?;
-            let tier = match (explicit_tier, base.long_context) {
-                // A compatibility 200k field may not erase an authored exact
-                // hotfix tier. Explicit tiers are authoritative.
-                (Some(_), Some(b))
-                    if cost
-                        .get("tiers")
-                        .and_then(Value::as_array)
-                        .is_none_or(Vec::is_empty) =>
-                {
-                    Some(b)
-                }
-                (u, b) => overlay_tier(u, b),
-            };
+            let tier = overlay_tier(explicit_tier, base.long_context);
             let mut price = Price {
                 input: r.input,
                 output: r.output,
@@ -664,13 +734,7 @@ pub(crate) fn adapt(body: &[u8], fetched_at: u64) -> io::Result<EffectiveTable> 
                 cache_read: raw.cache_read,
                 cache_write_5m: raw.cache_write_5m,
                 cache_write_1h: raw.cache_write_1h,
-                long_context: explicit_tier.filter(|_| {
-                    base.long_context.is_none()
-                        || cost
-                            .get("tiers")
-                            .and_then(Value::as_array)
-                            .is_some_and(|tiers| !tiers.is_empty())
-                }),
+                long_context: explicit_tier,
                 fast: None,
                 web_search_per_1k: None,
             };
@@ -749,7 +813,7 @@ pub(crate) fn adapt(body: &[u8], fetched_at: u64) -> io::Result<EffectiveTable> 
         }
     }
     table.validate()?;
-    table.seal()?;
+    table.observe_rates(None)?;
     Ok(table)
 }
 
@@ -760,17 +824,17 @@ struct TtlRates {
 }
 
 fn v2_ttl_rates(value: &Value, field: &str) -> io::Result<TtlRates> {
-    if !value.is_object() {
-        return Err(invalid(format!("field {field}: invalid cost object")));
+    let mut object = value
+        .as_object()
+        .ok_or_else(|| invalid(format!("field {field}: invalid cost object")))?;
+    for key in ["text", "input", "cache", "write"] {
+        let Some(child) = object.get(key) else {
+            return Ok(TtlRates::default());
+        };
+        object = child
+            .as_object()
+            .ok_or_else(|| invalid(format!("field {field}: invalid {key} object")))?;
     }
-    let Some(write) = value.pointer("/text/input/cache/write") else {
-        return Ok(TtlRates::default());
-    };
-    let object = write.as_object().ok_or_else(|| {
-        invalid(format!(
-            "field {field}.text.input.cache.write: invalid object"
-        ))
-    })?;
     let mut rates = TtlRates::default();
     for (key, target) in [("5m", &mut rates.five_minutes), ("1h", &mut rates.one_hour)] {
         if let Some(value) = object.get(key).filter(|value| !value.is_null()) {
@@ -785,6 +849,28 @@ fn v2_ttl_rates(value: &Value, field: &str) -> io::Result<TtlRates> {
                 ))
             })?;
             *target = Some(rate);
+        }
+    }
+    Ok(rates)
+}
+
+fn v2_context_ttls(cost: &Value, threshold: u64) -> io::Result<Option<TtlRates>> {
+    let Some(tiers) = cost.get("tiers").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let entries = tiers
+        .as_array()
+        .ok_or_else(|| invalid("field cost.tiers: invalid array"))?;
+    let mut rates = None;
+    for entry in entries {
+        if context_boundary(entry)? == Some(threshold) {
+            if rates.is_some() {
+                return Err(invalid("field cost.tiers: duplicate context boundary"));
+            }
+            rates = Some(v2_ttl_rates(
+                entry.get("cost").unwrap_or(entry),
+                "cost.tiers[].cost",
+            )?);
         }
     }
     Ok(rates)
@@ -1005,48 +1091,9 @@ fn supplement_v2(
         let Some(threshold) = v1_threshold else {
             continue;
         };
-        let tier_entries = match cost.get("tiers") {
-            None | Some(Value::Null) => continue,
-            Some(Value::Array(entries)) => entries,
-            Some(_) => {
-                eprintln!(
-                    "semon: ignored models.dev v2 provider anthropic model {id} field cost.tiers: invalid array"
-                );
-                if let Some(prior) = previous
-                    .and_then(|table| table.providers.get("anthropic"))
-                    .and_then(|rows| rows.get(id))
-                {
-                    for path in ["long_context.cache_write_5m", "long_context.cache_write_1h"] {
-                        copy_v2_category(current, prior, path);
-                    }
-                }
-                continue;
-            }
-        };
-        let mut matching = tier_entries.iter().filter(|tier| {
-            tier.pointer("/tier/type").and_then(Value::as_str) == Some("context")
-                && tier.pointer("/tier/size").and_then(Value::as_u64) == Some(threshold)
-        });
-        let Some(entry) = matching.next() else {
-            continue;
-        };
-        if matching.next().is_some() {
-            eprintln!(
-                "semon: ignored models.dev v2 provider anthropic model {id} field cost.tiers: duplicate context boundary"
-            );
-            if let Some(prior) = previous
-                .and_then(|table| table.providers.get("anthropic"))
-                .and_then(|rows| rows.get(id))
-            {
-                for path in ["long_context.cache_write_5m", "long_context.cache_write_1h"] {
-                    copy_v2_category(current, prior, path);
-                }
-            }
-            continue;
-        }
-        let tier_cost = entry.get("cost").unwrap_or(entry);
-        let tier = match v2_ttl_rates(tier_cost, "cost.tiers[].cost") {
-            Ok(rates) => rates,
+        let tier = match v2_context_ttls(cost, threshold) {
+            Ok(Some(rates)) => rates,
+            Ok(None) => continue,
             Err(error) => {
                 eprintln!("semon: ignored models.dev v2 provider anthropic model {id} {error}");
                 if let Some(prior) = previous
@@ -1180,14 +1227,38 @@ impl Fetcher for HttpFetcher {
 }
 
 fn refresh(path: &Path, fetcher: &impl Fetcher) -> io::Result<EffectiveTable> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("missing cache directory"))?;
+    fs::create_dir_all(parent)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))?;
+    lock.lock()?;
+    let previous = match read_cache(path) {
+        Ok(table) => Some(table),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err),
+    };
     let body = fetcher.fetch()?;
-    let previous = read_cache(path).ok();
+    let v2 = fetcher.fetch_v2();
     let fetched_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+        .map_err(io::Error::other)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| invalid("invalid observation time"))?;
+    if previous
+        .as_ref()
+        .is_some_and(|prior| prior.fetched_at > fetched_at)
+    {
+        return Err(invalid("pricing observation clock did not advance"));
+    }
     let mut table = adapt(&body, fetched_at)?;
-    match fetcher.fetch_v2() {
+    match v2 {
         Ok(v2) => {
             let mut candidate = table.clone();
             match supplement_v2(&mut candidate, &body, &v2, fetched_at, previous.as_ref()) {
@@ -1208,7 +1279,12 @@ fn refresh(path: &Path, fetcher: &impl Fetcher) -> io::Result<EffectiveTable> {
         }
     }
     table.validate()?;
-    table.seal()?;
+    table.observe_rates(previous.as_ref())?;
+    if previous.as_ref().is_some_and(|prior| {
+        prior.fetched_at == fetched_at && prior.fingerprint != table.fingerprint
+    }) {
+        return Err(invalid("distinct prices at the same observation time"));
+    }
     // A disk failure is an unsuccessful update. The old table remains active.
     persist(path, &table)?;
     Ok(table)
@@ -1219,11 +1295,11 @@ static INITIALIZED: OnceLock<PathBuf> = OnceLock::new();
 /// admitting consumers. One-shot commands may use this without starting threads.
 pub fn initialize(data_dir: &Path) {
     INITIALIZED.get_or_init(|| {
-        let path = data_dir.join("models-dev-pricing.json");
+        let path = data_dir.join("models-dev-rate-history.json");
         match read_cache(&path) {
             Ok(table) => install(table),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => eprintln!("semon: invalid pricing cache; using bundled prices"),
+            Err(_) => eprintln!("semon: invalid pricing history; usage has no verified rates"),
         }
         path
     });
@@ -1400,6 +1476,29 @@ mod tests {
     }
 
     #[test]
+    fn v1_validates_only_recognized_context_tiers() {
+        let mut catalog = fixture();
+        catalog["anthropic"]["models"]["claude-new"] = serde_json::json!({
+            "id":"claude-new","cost":{"input":7,"tiers":[
+                {"tier":{"size":"unknown"},"input":"ignored"},
+                {"tier":{"type":42},"input":"ignored"},
+                {"tier":{"type":"context","size":200000},"input":11}
+            ]}
+        });
+        let effective = adapt(&serde_json::to_vec(&catalog).unwrap(), 100).unwrap();
+        let price = effective.price_for("anthropic", "claude-new").unwrap();
+        assert_eq!(price.input, Some(7.0));
+        let tier = price.long_context.unwrap();
+        assert_eq!(tier.threshold_tokens, 200_000);
+        assert_eq!(tier.input, Some(11.0));
+
+        catalog["anthropic"]["models"]["claude-new"]["cost"]["tiers"][2]["tier"]["size"] =
+            Value::from("200000");
+        let error = adapt(&serde_json::to_vec(&catalog).unwrap(), 100).unwrap_err();
+        assert!(error.to_string().contains("invalid boundary"));
+    }
+
+    #[test]
     fn v2_ttl_supplement_prices_new_exact_anthropic_ids_and_matching_context_tiers() {
         let mut v1 = fixture();
         v1["anthropic"]["models"]["claude-new"] = serde_json::json!({
@@ -1458,12 +1557,15 @@ mod tests {
         let used = MessageUsage {
             model: Some("claude-new".into()),
             billing: BillingUsage {
+                timestamp: Some(200),
                 cache_write_5m: 100_000,
                 prompt_size: 100_000,
                 ..Default::default()
             },
             ..Default::default()
         };
+        effective.fetched_at = 200;
+        effective.observe_rates(None).unwrap();
         let effective = Arc::new(effective);
         let mut cost = CostBuild::with_table(Arc::clone(&effective));
         cost.message(&used);
@@ -1673,6 +1775,7 @@ mod tests {
         let mut used = MessageUsage {
             model: Some("claude-new".into()),
             billing: BillingUsage {
+                timestamp: Some(10),
                 input: 1_000_000,
                 prompt_size: 1_000_000,
                 ..Default::default()
@@ -1705,7 +1808,7 @@ mod tests {
                 cache_write: 0,
                 cache_read: 0,
             },
-            timestamp: None,
+            timestamp: Some(10),
         };
         let mut at = CostBuild::with_table(Arc::clone(&table));
         at.codex(&event);
@@ -1717,36 +1820,322 @@ mod tests {
         assert_eq!(cost.finish().usd, Some(1.088004));
         // The shared calculator accepts explicit billing dimensions, including
         // nonuniform fast rates, independently of native adapter selection.
-        let p = table.price_for("openai", "gpt-new").unwrap();
-        let mut message = MessageUsage {
-            model: Some("synthetic".into()),
-            billing: BillingUsage {
-                input: 1_000_000,
-                output: 1_000_000,
-                speed: Some("fast".into()),
-                prompt_size: 1,
-                ..Default::default()
-            },
+        let mut billing = BillingUsage {
+            timestamp: Some(10),
+            input: 1_000_000,
+            output: 1_000_000,
+            speed: Some("fast".into()),
+            prompt_size: 1,
             ..Default::default()
         };
-        assert_eq!(
-            super::super::calculate_cost_with(&[message.clone()], &[], |_| Some(p)).usd,
-            Some(21.0)
-        );
-        message.billing.prompt_size = 300_000;
+        let fast_cost = |usage: &BillingUsage| {
+            let mut build = CostBuild::with_table(table.clone());
+            build.observe("openai", Some("gpt-new"), usage);
+            build.finish().usd
+        };
+        assert_eq!(fast_cost(&billing), Some(21.0));
+        billing.prompt_size = 300_000;
         // No upstream fast long-context tier or same-boundary bundled fast
         // fallback exists for this model: unknown is the honest result.
+        assert_eq!(fast_cost(&billing), None);
+    }
+
+    #[test]
+    fn dated_aliases_resolve_only_among_models_active_at_execution() {
+        let mut catalog = fixture();
+        let mut previous = None;
+        for (at, active) in [
+            (100, vec![("family-20260101", 1)]),
+            (200, vec![("family-20260201", 2)]),
+            (300, vec![("family-20260201", 2), ("family-20260301", 3)]),
+            (400, vec![("family-20260201", 2), ("family", 4)]),
+        ] {
+            let models = catalog["openai"]["models"].as_object_mut().unwrap();
+            models.retain(|key, _| !key.starts_with("family"));
+            for (id, amount) in active {
+                models.insert(
+                    id.into(),
+                    serde_json::json!({"id":id, "cost":{"input":amount,"output":amount}}),
+                );
+            }
+            let mut next = adapt(&serde_json::to_vec(&catalog).unwrap(), at).unwrap();
+            next.observe_rates(previous.as_ref()).unwrap();
+            previous = Some(next);
+        }
+        let table = previous.unwrap();
+        for id in ["family", "gateway/route/family"] {
+            for (at, rate) in [
+                (99, None),
+                (100, Some(1.0)),
+                (200, Some(2.0)),
+                (300, None),
+                (400, Some(4.0)),
+            ] {
+                assert_eq!(
+                    table
+                        .execution_price("openai", id, at)
+                        .and_then(|p| p.input),
+                    rate
+                );
+            }
+        }
         assert_eq!(
-            super::super::calculate_cost_with(&[message], &[], |_| Some(p)).usd,
-            None
+            table
+                .execution_price("openai", "family-20260301", 300)
+                .unwrap()
+                .input,
+            Some(3.0)
         );
+    }
+
+    #[test]
+    fn zero_token_steps_keep_zero_components_but_require_coverage_for_list_cost() {
+        let mut catalog = fixture();
+        catalog["openai"]["models"]["gpt-5"]["cost"]["input"] = Value::from(0);
+        let table = Arc::new(adapt(&serde_json::to_vec(&catalog).unwrap(), 100).unwrap());
+        for (time, input, expected) in [(99, 0, None), (100, 0, Some(0.0)), (100, 7, Some(0.0))] {
+            let mut cost = CostBuild::with_table(table.clone());
+            cost.observe(
+                "openai",
+                Some("gpt-5"),
+                &BillingUsage {
+                    timestamp: Some(time),
+                    input,
+                    ..Default::default()
+                },
+            );
+            let step = cost.clone().finish_step();
+            assert_eq!(step.list, expected);
+            assert_eq!(
+                [
+                    step.fresh_input,
+                    step.output,
+                    step.cache_read,
+                    step.cache_write
+                ],
+                [Some(0.0); 4]
+            );
+            let total = cost.finish();
+            assert_eq!(
+                total.provenance == crate::CostProvenance::ListPriced,
+                expected.is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn context_metadata_alone_cannot_price_a_step_or_hide_a_priced_alias() {
+        let mut catalog = fixture();
+        let id = "boundary-model";
+        catalog["openai"]["models"][id] = serde_json::json!({
+            "id":id,"cost":{"tiers":[{"tier":{"type":"context","size":200000}}]}
+        });
+        let price_step = |catalog: &Value, prompt, input| {
+            let table = Arc::new(adapt(&serde_json::to_vec(catalog).unwrap(), 100).unwrap());
+            let mut cost = CostBuild::with_table(table);
+            cost.observe(
+                "openai",
+                Some(id),
+                &BillingUsage {
+                    timestamp: Some(100),
+                    prompt_size: prompt,
+                    input,
+                    ..Default::default()
+                },
+            );
+            cost.finish_step().list
+        };
+        assert_eq!(price_step(&catalog, 0, 0), None);
+        let alias = "boundary-model-20260101";
+        catalog["openai"]["models"][alias] = serde_json::json!({"id":alias,"cost":{"input":0}});
+        assert_eq!(price_step(&catalog, 1, 1), Some(0.0));
+        // Once the exact model has a real base rate, its threshold still
+        // selects the unpriced long tier. The alias cannot fill that tier.
+        catalog["openai"]["models"][id]["cost"]["input"] = Value::from(7);
+        assert_eq!(price_step(&catalog, 200000, 1_000_000), Some(7.0));
+        assert_eq!(price_step(&catalog, 200001, 1_000_000), None);
+        assert_eq!(price_step(&catalog, 200001, 0), None);
+    }
+
+    #[test]
+    fn malformed_v2_context_size_preserves_only_the_matching_ttl_history() {
+        let mut previous = None;
+        for (at, v1_size, v2_size) in [
+            (100, 200000, Value::from(200000)),
+            (200, 200000, Value::from("200000")),
+            (300, 200000, Value::from(200000)),
+            (400, 200000, Value::from(300000)), // valid, no matching tier
+            (500, 300000, Value::from(300000)),
+            (600, 300000, Value::Null), // tier removed
+        ] {
+            let mut v1 = fixture();
+            v1["anthropic"]["models"]["claude-new"] = serde_json::json!({
+                "id":"claude-new","cost":{"input":1,"output":2,
+                "tiers":[{"tier":{"type":"context","size":v1_size},"input":3}]}
+            });
+            let v1 = serde_json::to_vec(&v1).unwrap();
+            let mut v2: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+            let cost = &mut v2["anthropic"]["models"]["claude-new"]["cost"];
+            cost["text"]["input"]["cache"]["write"]["1h"] = Value::from(at);
+            if v2_size.is_null() {
+                cost.as_object_mut().unwrap().remove("tiers");
+            } else {
+                cost["tiers"][0]["tier"]["size"] = v2_size;
+            }
+            let mut next = adapt(&v1, at).unwrap();
+            supplement_v2(
+                &mut next,
+                &v1,
+                &serde_json::to_vec(&v2).unwrap(),
+                at,
+                previous.as_ref(),
+            )
+            .unwrap();
+            next.observe_rates(previous.as_ref()).unwrap();
+            let price = next
+                .execution_price("anthropic", "claude-new", at as i64)
+                .unwrap();
+            assert_eq!(price.cache_write_1h, Some(at as f64));
+            previous = Some(next);
+        }
+        let table = previous.unwrap();
+        let intervals: Vec<_> = recorded_rates(&recorded_snapshot(&table), &table.fingerprint)
+            .unwrap()
+            .into_iter()
+            .filter(|r| {
+                r.model == "claude-new"
+                    && r.kind == "cache_write_1h"
+                    && r.threshold_tokens.is_some()
+            })
+            .map(|r| {
+                (
+                    r.threshold_tokens.unwrap(),
+                    r.learned_at,
+                    r.valid_from,
+                    r.valid_to,
+                    r.usd_per_unit,
+                )
+            })
+            .collect();
+        assert_eq!(
+            intervals,
+            [
+                (200000, 100, 100, Some(400), 8.0),
+                (300000, 500, 500, Some(600), 8.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_v2_ancestor_keeps_the_interval_until_verified_removal() {
+        let mut v1 = fixture();
+        v1["anthropic"]["models"]["claude-new"] =
+            serde_json::json!({"id":"claude-new","cost":{"input":7,"output":11}});
+        let v1 = serde_json::to_vec(&v1).unwrap();
+        let mut previous = None;
+        for (at, cache) in [
+            (100, serde_json::json!({"write":{"1h":6}})),
+            (200, Value::from("bad")),
+            (300, serde_json::json!({"write":{"1h":6}})),
+            (400, serde_json::json!({})),
+        ] {
+            let mut v2: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+            v2["anthropic"]["models"]["claude-new"]["cost"]["text"]["input"]["cache"] = cache;
+            let mut next = adapt(&v1, at).unwrap();
+            supplement_v2(
+                &mut next,
+                &v1,
+                &serde_json::to_vec(&v2).unwrap(),
+                at,
+                previous.as_ref(),
+            )
+            .unwrap();
+            next.observe_rates(previous.as_ref()).unwrap();
+            previous = Some(next);
+        }
+        let final_table = previous.unwrap();
+        let ttl: Vec<_> =
+            recorded_rates(&recorded_snapshot(&final_table), &final_table.fingerprint)
+                .unwrap()
+                .into_iter()
+                .filter(|r| {
+                    r.model == "claude-new" && r.kind == "cache_write_1h" && r.tier.is_none()
+                })
+                .map(|r| (r.learned_at, r.valid_from, r.valid_to, r.usd_per_unit))
+                .collect();
+        assert_eq!(ttl, [(100, 100, Some(400), 6.0)]);
+    }
+
+    #[test]
+    fn execution_cost_tracks_each_rate_across_changes_gaps_and_reload() {
+        let mut catalog = fixture();
+        let id = "synthetic-exact";
+        let model = serde_json::json!({"id":id,"cost":{"input":2,"output":3}});
+        catalog["openai"]["models"][id] = model.clone();
+        let observation = |catalog: &Value, at, previous: Option<&EffectiveTable>| {
+            let mut next = adapt(&serde_json::to_vec(catalog).unwrap(), at).unwrap();
+            next.observe_rates(previous).unwrap();
+            next
+        };
+        let first = observation(&catalog, 100, None);
+        let unchanged = observation(&catalog, 150, Some(&first));
+        assert_eq!(first.fingerprint, unchanged.fingerprint);
+        catalog["openai"]["models"][id]["cost"]["output"] = Value::from(0);
+        let updated = observation(&catalog, 200, Some(&unchanged));
+        catalog["openai"]["models"]
+            .as_object_mut()
+            .unwrap()
+            .remove(id);
+        let removed = observation(&catalog, 300, Some(&updated));
+        catalog["openai"]["models"][id] = model;
+        let restored = observation(&catalog, 400, Some(&removed));
+        assert_ne!(first.fingerprint, restored.fingerprint);
+        let path = path();
+        persist(&path, &restored).unwrap();
+        let restored = Arc::new(read_cache(&path).unwrap());
+        for (time, expected) in [
+            (None, None),
+            (Some(99), None),
+            (Some(100), Some(5.0)),
+            (Some(199), Some(5.0)),
+            (Some(200), Some(2.0)),
+            (Some(299), Some(2.0)),
+            (Some(300), None),
+            (Some(399), None),
+            (Some(400), Some(5.0)),
+        ] {
+            let mut cost = CostBuild::with_table(restored.clone());
+            cost.codex(&crate::events::CodexUsageEvent {
+                model: id.into(),
+                timestamp: time,
+                tokens: crate::events::ModelTokens {
+                    input: 1_000_000,
+                    output: 1_000_000,
+                    ..Default::default()
+                },
+            });
+            let cost = cost.finish();
+            assert_eq!(cost.usd, expected, "at {time:?}");
+            assert_eq!(
+                cost.priced_tokens,
+                if expected.is_some() { 2_000_000 } else { 0 }
+            );
+        }
+        let rates = recorded_rates(&recorded_snapshot(&restored), &restored.fingerprint).unwrap();
+        let input: Vec<_> = rates
+            .iter()
+            .filter(|r| r.model == id && r.kind == "input")
+            .map(|r| (r.valid_from, r.valid_to, r.learned_at))
+            .collect();
+        assert_eq!(input, [(100, Some(300), 100), (400, None, 400)]);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn recorded_snapshot_keeps_historical_rates_after_a_later_table_changes() {
         let before = table(fixture());
         let snapshot = recorded_snapshot(&before);
-        let old_input = recorded_rates(&snapshot)
+        let old_input = recorded_rates(&snapshot, &before.fingerprint)
             .unwrap()
             .into_iter()
             .find(|rate| {
@@ -1763,7 +2152,7 @@ mod tests {
         let after = table(changed);
         assert_ne!(before.fingerprint, after.fingerprint);
 
-        let historical = recorded_rates(&snapshot)
+        let historical = recorded_rates(&snapshot, &before.fingerprint)
             .unwrap()
             .into_iter()
             .find(|rate| {
@@ -1837,10 +2226,13 @@ mod tests {
         let path = path();
         let first = refresh(&path, &Offline(Ok(FIXTURE.to_vec()))).unwrap();
         assert_eq!(read_cache(&path).unwrap().fingerprint, first.fingerprint);
-        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
         let mut reordered = fixture();
         reordered["openai"]["models"]["gpt-6.1-sol"]["name"] = Value::from("irrelevant metadata");
-        assert_eq!(table(reordered).fingerprint, first.fingerprint);
+        let mut unchanged = table(reordered);
+        unchanged.fetched_at = first.fetched_at + 1;
+        unchanged.observe_rates(Some(&first)).unwrap();
+        assert_eq!(unchanged.fingerprint, first.fingerprint);
         fs::write(&path, b"corrupt").unwrap();
         assert!(read_cache(&path).is_err());
         // The startup selection has the same pure, offline fallback rule.

@@ -115,7 +115,7 @@ struct Work {
     #[serde(alias = "fingerprint")]
     target_fingerprint: String,
     completed_fingerprint: String,
-    fetched_at: u64,
+    observed_at_ms: u64,
     phase: u8,
     file_after: i64,
     session_after: String,
@@ -207,7 +207,7 @@ fn step_inner(
         .unwrap_or_default();
     // A second process using an older last-known-good table may not roll a
     // newer process's completed/partial work back to its older fetch.
-    if work.fetched_at > table.fetched_at {
+    if work.observed_at_ms > table.fetched_at {
         return Ok(false);
     }
     if work.target_fingerprint.is_empty() && work.phase == 3 {
@@ -222,7 +222,7 @@ fn step_inner(
     if work.target_fingerprint != table.fingerprint {
         work = Work {
             target_fingerprint: table.fingerprint.clone(),
-            fetched_at: table.fetched_at,
+            observed_at_ms: table.fetched_at,
             ..Work::default()
         };
     }
@@ -598,7 +598,7 @@ fn retained_cost(
                 [warehouse_source], |r| r.get(0),
             )?;
             if !forked {
-                build.merge(&snapshot_cost);
+                build.merge(snapshot_cost);
             }
         }
     }
@@ -1141,12 +1141,12 @@ mod tests {
             ..Default::default()
         };
         for seq in 0..facts {
-            let record = serde_json::json!({"type":"token_usage_record","timestamp":"1970-01-01T00:00:00Z","payload":{"thread_id":"thread","session_id":"session","turn_id":format!("turn-{seq}"),"response_id":format!("response-{seq}"),"usage":{"input_tokens":100,"output_tokens":0,"total_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
+            let record = serde_json::json!({"type":"token_usage_record","timestamp":"1970-01-01T00:00:01Z","payload":{"thread_id":"thread","session_id":"session","turn_id":format!("turn-{seq}"),"response_id":format!("response-{seq}"),"usage":{"input_tokens":100,"output_tokens":0,"total_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
             CodexNativeUsage::observe(
                 &mut index.codex_native_usage,
                 &record["payload"],
                 model.to_owned(),
-                Some(0),
+                Some(1000),
             );
             let bytes = serde_json::to_vec(&record).unwrap();
             index.native_usage_observations.as_mut().unwrap().push(
@@ -1486,7 +1486,7 @@ mod tests {
         );
         let appended_payload = serde_json::json!({
             "model":"gpt-6.1-sol",
-            "timestamp":0,
+            "timestamp":1000,
             "tokens":{"input":100,"cached_input":0,"output":0,"reasoning_output":0,"total":100},
             "model_tokens":{"input":100,"output":0,"cache_write":0,"cache_read":0}
         });
@@ -1679,7 +1679,7 @@ mod tests {
         assert_ne!(replacement_id, old_id);
         let replacement_payload = serde_json::json!({
             "model":"gpt-6.1-sol",
-            "timestamp":0,
+            "timestamp":1000,
             "tokens":{"input":300,"cached_input":0,"output":0,"reasoning_output":0,"total":300},
             "model_tokens":{"input":300,"output":0,"cache_write":0,"cache_read":0}
         });
@@ -1804,7 +1804,7 @@ mod tests {
             billing: BillingUsage {
                 input: 1_000_000,
                 prompt_size: 1_000_000,
-                timestamp: Some(0),
+                timestamp: Some(1000),
                 ..Default::default()
             },
             ..Default::default()
@@ -1905,7 +1905,7 @@ mod tests {
             billing: BillingUsage {
                 input: 1_000_000,
                 prompt_size: 1_000_000,
-                timestamp: Some(0),
+                timestamp: Some(1000),
                 ..Default::default()
             },
             ..Default::default()
@@ -1917,7 +1917,7 @@ mod tests {
             .write_one(native, None, None, &ledger, &index)
             .unwrap();
         let old = crate::pricing::calculate_cost(&[used], &[]);
-        assert_eq!(old.usd, Some(4.0));
+        assert_eq!(old.usd, None);
         publish(&store, &row(native, &ledger, old, "claude"));
         let before: String = store
             .connection
@@ -2001,12 +2001,17 @@ mod tests {
             ..Default::default()
         };
         for seq in 0..129 {
-            let record = serde_json::json!({"type":"token_usage_record","timestamp":"1970-01-01T00:00:00Z","payload":{"thread_id":"thread","session_id":"session","turn_id":format!("turn-{seq}"),"response_id":format!("response-{seq}"),"usage":{"input_tokens":100,"output_tokens":0,"total_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
+            let at = if seq == 0 {
+                "1970-01-01T00:00:00Z"
+            } else {
+                "1970-01-01T00:00:01Z"
+            };
+            let record = serde_json::json!({"type":"token_usage_record","timestamp":at,"payload":{"thread_id":"thread","session_id":"session","turn_id":format!("turn-{seq}"),"response_id":format!("response-{seq}"),"usage":{"input_tokens":100,"output_tokens":0,"total_tokens":100,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
             CodexNativeUsage::observe(
                 &mut index.codex_native_usage,
                 &record["payload"],
                 "gpt-6.1-sol".into(),
-                Some(0),
+                crate::events::record_time(&record),
             );
             let bytes = serde_json::to_vec(&record).unwrap();
             index.native_usage_observations.as_mut().unwrap().push(
@@ -2029,7 +2034,11 @@ mod tests {
             )
             .unwrap();
         drop(store);
-        let table = table("openai", "gpt-6.1-sol", 7.0, 1);
+        let historical = table("openai", "gpt-6.1-sol", 4.0, 0);
+        let mut table = table("openai", "gpt-6.1-sol", 7.0, 1000);
+        Arc::make_mut(&mut table)
+            .observe_rates(Some(&historical))
+            .unwrap();
         assert!(step_inner(&path, Arc::clone(&table), false).unwrap());
         let c = Connection::open(&path).unwrap();
         assert_eq!(
@@ -2045,7 +2054,7 @@ mod tests {
         drain(&path, &table);
         let c = Connection::open(&path).unwrap();
         let amount:f64=c.query_row("SELECT json_extract(value,'$.usd') FROM native_usage_dimensions WHERE kind='cost_model'",[],|r|r.get(0)).unwrap();
-        assert!((amount - 0.0903).abs() < 1e-12);
+        assert!((amount - 0.09).abs() < 1e-12);
         let day: f64 = c
             .query_row(
                 "SELECT CAST(value AS REAL) FROM native_usage_dimensions WHERE kind='cost_day'",

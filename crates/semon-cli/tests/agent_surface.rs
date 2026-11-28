@@ -242,7 +242,7 @@ fn turn_id(model: &Value, sid: &str) -> Value {
 fn summaries(model: &Value) -> BTreeMap<&'static str, Value> {
     let claude = |id: &str| {
         let observed = json!({"input":3000,"cached_input":2000,"output":500,"reasoning_output":0,"total":3500});
-        json!({"usage":{"coverage":"partial","ownership":"exclusive","cost_provenance":"list_priced",
+        json!({"usage":{"coverage":"partial","ownership":"exclusive","cost_provenance":"unknown",
                 "observed":observed,"exclusive":observed,"fresh":observed,"shared":{},"shared_models":{},"shared_owner":null},
             "id": id, "harness": "claude", "kind": "session", "model": "opus-5.5", "repo": null, "branch": null,
             "machine": "testbox", "parent": null, "children": [], "exit": null,
@@ -1206,8 +1206,8 @@ fn lane_health_reports_published_agent_lineage_in_cli_and_mcp() {
             .unwrap()
     };
     assert_eq!(bucket("exclusive")["steps"], 4);
-    assert_eq!(bucket("exclusive")["priced_steps"], 3);
-    assert_eq!(bucket("exclusive")["unpriced_steps"], 1);
+    assert_eq!(bucket("exclusive")["priced_steps"], 0);
+    assert_eq!(bucket("exclusive")["unpriced_steps"], 4);
     assert_eq!(bucket("copied")["steps"], 2);
     assert!(report["runtime"]["observed_at"].is_number(), "{report}");
     assert!(

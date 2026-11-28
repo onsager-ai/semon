@@ -1094,6 +1094,78 @@ fn codex_logical_fork_and_physical_history_are_independent_native_fields() {
 }
 
 #[test]
+fn one_shot_codex_publication_withholds_restored_costs_until_replay() {
+    let _prices = crate::pricing::runtime::fixture_prices();
+    let home = Home::new();
+    let write = |id: &str, input: u64| {
+        home.codex(id,json!({}), &[
+            codex_line(ts(1,0),"turn_context",json!({"model":"gpt-6.1-sol"})),
+            codex_line(ts(1,1),"token_usage_record",json!({
+                "thread_id":id,"session_id":id,"turn_id":"turn","response_id":"response",
+                "usage":{"input_tokens":input,"cached_input_tokens":0,"output_tokens":0,
+                         "cache_write_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":input}
+            })),
+        ]);
+        home.options
+            .codex_home
+            .join(format!("sessions/2026/09/24/rollout-{id}.jsonl"))
+    };
+    let scan = |path: &Path| {
+        events::scan_file(
+            path,
+            "codex",
+            &mut EventCache::open_scoped(&home.options.cache).unwrap(),
+            &mut false,
+        )
+        .unwrap()
+    };
+    let stale = write("old", 100_000);
+    assert_eq!(scan(&stale).codex_cost().finish().usd, Some(0.2));
+    // Simulate the durable, individually priced file from the previous rules.
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    assert_eq!(db.execute("UPDATE files SET codex_native_usage=json_set(codex_native_usage,'$.cost.pricing_fingerprint','previous-rules') WHERE path=?1",
+        [stale.to_str().unwrap()]).unwrap(),1);
+    drop(db);
+    let current = write("fresh", 75_000);
+    let restored = scan(&stale);
+    let fresh = scan(&current);
+    for files in [
+        [restored.as_ref(), fresh.as_ref()],
+        [fresh.as_ref(), restored.as_ref()],
+    ] {
+        let mixed = crate::pricing::codex_files_cost(files);
+        assert_eq!(mixed.usd, None);
+        assert_eq!(mixed.provenance, crate::CostProvenance::Unknown);
+        assert_eq!(
+            (mixed.priced_tokens, mixed.unpriced_tokens),
+            (75_000, 100_000)
+        );
+        let model = &mixed.by_model["gpt-6.1-sol"];
+        assert_eq!(model.tokens.input, 175_000);
+        assert_eq!(model.usd, None);
+        assert_eq!(model.usd_by_kind["input"], 0.15);
+        assert_eq!(mixed.by_day.values().sum::<f64>(), 0.15);
+        assert_ne!(
+            mixed.pricing_fingerprint,
+            crate::pricing::snapshot().fingerprint
+        );
+    }
+    let query = home.build_query();
+    let old = &query.sessions["old"].cost;
+    assert_eq!(
+        (old.usd, old.priced_tokens, old.unpriced_tokens),
+        (None, 0, 100_000)
+    );
+    assert_eq!(query.sessions["fresh"].cost.usd, Some(0.15));
+    let (_, catalog) = read_catalog(&home);
+    let published = catalog.iter().find(|row| row.key == "old").unwrap();
+    assert_eq!(
+        (published.cost.usd, published.cost.unpriced_tokens),
+        (None, 100_000)
+    );
+}
+
+#[test]
 fn codex_model_switch_attributes_cumulative_token_deltas_to_the_current_model() {
     let home = Home::new();
     home.codex(
@@ -5649,6 +5721,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
 
 #[test]
 fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
+    let _prices = crate::pricing::runtime::fixture_prices();
     let home = Home::new();
     let real_usage = json!({
         "input_tokens":1034,

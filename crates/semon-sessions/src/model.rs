@@ -2996,11 +2996,7 @@ impl<'a> Builder<'a> {
         });
         let billing_messages: Vec<events::MessageUsage> = usage.values().cloned().collect();
         let mut cost = if harness == "codex" {
-            let mut cost = crate::pricing::CostBuild::default();
-            for file in &files {
-                cost.merge(&file.summary.codex_cost());
-            }
-            cost.finish()
+            crate::pricing::codex_files_cost(files.iter().map(|file| file.summary.as_ref()))
         } else {
             crate::pricing::calculate_cost(&billing_messages, &[])
         };
