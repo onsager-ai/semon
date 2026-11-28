@@ -151,6 +151,9 @@ class CompatibilityFixtures(unittest.TestCase):
 
                     turn_time = duration_ms(agreed([(row['started_at'], row['completed_at'])
                                                    for row in group]))
+                    if any('model' in row['payload_json'] for row in group):
+                        # Pinned AntigravityChildWork.ts rejects other IDs before reading a model.
+                        self.assertRegex(cascade, r'^[A-Za-z0-9-]{1,64}$')
                     executed = agreed([row['payload_json'].get('model')
                                        if row.get('source_profile') == 'upstream_executed_model'
                                        else None for row in group])

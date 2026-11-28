@@ -21,11 +21,11 @@
     },
     {
       "path": "t3-projections.jsonl",
-      "fixture_sha256": "8449fee16fd4bd28b0ba37d7a9d5dbaf2ee0d425314d7f387c0ae73080010859"
+      "fixture_sha256": "0de5334be10679cc06f5d8667301b860a54e59e60b9a241c9cbe9e5c4c15bc57"
     },
     {
       "path": "source-witness.md",
-      "fixture_sha256": "6ed269cf24d68bad8aab804dc07533fc130d7e2c2442b5aad027974ff3c84a20"
+      "fixture_sha256": "e9607caa25f43048b44981b43abc8188bb45a0d269fd3662068127e340cc1c07"
     }
   ],
   "native_databases": {
@@ -92,7 +92,7 @@
       "fixture%20east/antigravity/fixture-cascade%2B/t/fixture-turn%2F1": [
         10000,
         "fixture-neon",
-        "fixture-executed",
+        null,
         "complete"
       ],
       "fixture%20east/antigravity/fixture-cascade%2B/t/fixture-turn-2": [
@@ -104,7 +104,7 @@
       "fixture%20east/antigravity/fixture-next/t/fixture-turn-3": [
         null,
         "fixture-neon",
-        null,
+        "fixture-executed",
         "unavailable"
       ],
       "fixture%20east/antigravity/fixture-next/t/fixture-turn-4": [

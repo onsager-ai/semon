@@ -63,7 +63,10 @@ per-model token allocation implied. The shared usage schema also allows
 `turnTokenUsage.models` as an optional array of provider-reported model IDs.
 The pinned ACP writers do not populate that array. The fixture's
 `upstream_executed_model` marker identifies simulated evidence from the
-later writer. The generic array on the other origin demonstrates a field
-whose Antigravity provenance is unqualified.
+later writer on `fixture-next`. The writer accepts only IDs matching
+`^[A-Za-z0-9-]{1,64}$` before reading execution metadata. The encoding case
+`fixture-cascade+` therefore has unknown execution. The generic array on
+the other origin demonstrates a field whose Antigravity provenance is unqualified.
 [Executed-model change](https://github.com/pingdotgg/t3code/commit/5d94090ed031fd37d27cca847f571ab5ce2da26c) ·
+[Native ID check](https://github.com/pingdotgg/t3code/blob/5d94090ed031fd37d27cca847f571ab5ce2da26c/apps/server/src/provider/acp/AntigravityChildWork.ts#L1510-L1514) ·
 [Shared usage schema](https://github.com/pingdotgg/t3code/blob/5d94090ed031fd37d27cca847f571ab5ce2da26c/packages/contracts/src/providerRuntime.ts#L56-L85)
