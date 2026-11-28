@@ -1369,9 +1369,9 @@ fn coverage_counts_exclusive_pricing_timing_and_classifier_gaps() {
         table(),
     );
     let coverage = analytics::Analytics::of(&result).counts.coverage;
-    assert_eq!(coverage.pricing.full_steps, 2);
+    assert_eq!(coverage.pricing.full_steps, 1);
     assert_eq!(coverage.pricing.partial_steps, 1);
-    assert_eq!(coverage.pricing.unpriced_steps, 1);
+    assert_eq!(coverage.pricing.unpriced_steps, 2);
     // Only the first step has a successor timestamp.
     assert_eq!(coverage.timing.known_steps, 1);
     assert_eq!(coverage.timing.unknown_steps, 3);

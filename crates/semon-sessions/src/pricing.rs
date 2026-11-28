@@ -340,11 +340,29 @@ impl CostBuild {
         self.observe("openai", Some(&event.model), &billing);
     }
 
-    pub(crate) fn merge(&mut self, other: &Self) {
-        if self.models.is_empty() {
-            self.pricing_fingerprint = other.pricing_fingerprint.clone();
-        } else if self.pricing_fingerprint != other.pricing_fingerprint {
+    pub(crate) fn merge(&mut self, mut other: Self) {
+        if other.models.is_empty() {
+            return;
+        }
+        let target = self.table.get_or_insert_with(snapshot);
+        if other.pricing_fingerprint != target.fingerprint {
+            // Restored file totals have lost their per-step execution times.
+            // Only replay of the retained facts can qualify these amounts.
             self.pricing_fingerprint.clear();
+            other.usd = 0.0;
+            other.by_day.clear();
+            other.has_unpriced = true;
+            other.priced_tokens = 0;
+            other.unpriced_tokens = 0;
+            for (model, cost) in &mut other.models {
+                cost.unpriced = true;
+                cost.usd = 0.0;
+                cost.usd_by_kind.clear();
+                other.unpriced_models.insert(model.clone());
+                let t = &cost.tokens;
+                other.unpriced_tokens +=
+                    t.input + t.output + t.cache_read + t.cache_write_5m + t.cache_write_1h;
+            }
         }
         self.usd += other.usd;
         self.has_unpriced |= other.has_unpriced;
@@ -480,8 +498,8 @@ impl CostBuild {
             ),
         ];
         let mut entry_usd = 0.0;
-        // Gateway-only models have no list-priced USD even for a zero-token record.
-        let mut has_unpriced = timestamp.is_none() || runtime::gateway_billing_only(model);
+        let mut has_unpriced =
+            price.is_none() || timestamp.is_none() || runtime::gateway_billing_only(model);
         let model_cost = self.models.entry(model.to_owned()).or_default();
         for (kind, tokens, rate) in categories {
             add_tokens(&mut model_cost.tokens, kind, tokens);
@@ -632,6 +650,16 @@ pub(crate) fn calculate_cost(messages: &[MessageUsage], codex_events: &[CodexUsa
     }
     for event in codex_events {
         cost.codex(event);
+    }
+    cost.finish()
+}
+
+pub(crate) fn codex_files_cost<'a>(
+    files: impl IntoIterator<Item = &'a crate::events::FileIndex>,
+) -> Cost {
+    let mut cost = CostBuild::with_table(snapshot());
+    for file in files {
+        cost.merge(file.codex_cost());
     }
     cost.finish()
 }

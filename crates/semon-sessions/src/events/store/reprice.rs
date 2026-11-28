@@ -598,7 +598,7 @@ fn retained_cost(
                 [warehouse_source], |r| r.get(0),
             )?;
             if !forked {
-                build.merge(&snapshot_cost);
+                build.merge(snapshot_cost);
             }
         }
     }

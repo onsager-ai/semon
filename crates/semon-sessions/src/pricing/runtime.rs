@@ -166,7 +166,7 @@ fn observed_rates(row: &Row) -> io::Result<Rates> {
 }
 
 // Bump when model alias or provider resolution rules change.
-const LOOKUP_RULES_VERSION: u32 = 4;
+const LOOKUP_RULES_VERSION: u32 = 5;
 
 pub(crate) fn gateway_billing_only(id: &str) -> bool {
     id.starts_with("onsager/codex/gpt-6")
@@ -177,24 +177,35 @@ impl EffectiveTable {
         if gateway_billing_only(id) {
             return None;
         }
-        let lookup = |provider: &str, id: &str| {
-            let models = self.history.get(provider)?;
-            let alias = normalize_model_id(id);
-            let series = models.get(id).or_else(|| models.get(alias)).or_else(|| {
-                models
+        let routed = id.rsplit_once('/');
+        let id = routed.map_or(id, |(_, native)| native);
+        let alias = normalize_model_id(id);
+        let mut matched = None;
+        for (name, models) in &self.history {
+            if routed.is_none() && name != provider {
+                continue;
+            }
+            let active = |key: &str| models.get(key).and_then(|s| history::price_at(s, at));
+            let price = if let Some(price) = active(id).or_else(|| active(alias)) {
+                price
+            } else {
+                let mut candidates = models
                     .iter()
-                    .find(|(key, _)| normalize_model_id(key) == alias)
-                    .map(|(_, v)| v)
-            })?;
-            history::price_at(series, at)
-        };
-        if let Some((_, native)) = id.rsplit_once('/') {
-            let mut matches = PROVIDERS.iter().filter_map(|p| lookup(p, native));
-            let price = matches.next()?;
-            matches.next().is_none().then_some(price)
-        } else {
-            lookup(provider, id)
+                    .filter(|(key, _)| normalize_model_id(key) == alias)
+                    .filter_map(|(_, series)| history::price_at(series, at));
+                let Some(price) = candidates.next() else {
+                    continue;
+                };
+                if candidates.next().is_some() {
+                    return None;
+                }
+                price
+            };
+            if matched.replace(price).is_some() {
+                return None;
+            }
         }
+        matched
     }
 
     pub(crate) fn observe_rates(&mut self, previous: Option<&Self>) -> io::Result<()> {
@@ -799,17 +810,17 @@ struct TtlRates {
 }
 
 fn v2_ttl_rates(value: &Value, field: &str) -> io::Result<TtlRates> {
-    if !value.is_object() {
-        return Err(invalid(format!("field {field}: invalid cost object")));
+    let mut object = value
+        .as_object()
+        .ok_or_else(|| invalid(format!("field {field}: invalid cost object")))?;
+    for key in ["text", "input", "cache", "write"] {
+        let Some(child) = object.get(key) else {
+            return Ok(TtlRates::default());
+        };
+        object = child
+            .as_object()
+            .ok_or_else(|| invalid(format!("field {field}: invalid {key} object")))?;
     }
-    let Some(write) = value.pointer("/text/input/cache/write") else {
-        return Ok(TtlRates::default());
-    };
-    let object = write.as_object().ok_or_else(|| {
-        invalid(format!(
-            "field {field}.text.input.cache.write: invalid object"
-        ))
-    })?;
     let mut rates = TtlRates::default();
     for (key, target) in [("5m", &mut rates.five_minutes), ("1h", &mut rates.one_hour)] {
         if let Some(value) = object.get(key).filter(|value| !value.is_null()) {
@@ -1789,29 +1800,147 @@ mod tests {
         assert_eq!(cost.finish().usd, Some(1.088004));
         // The shared calculator accepts explicit billing dimensions, including
         // nonuniform fast rates, independently of native adapter selection.
-        let p = table.price_for("openai", "gpt-new").unwrap();
-        let mut message = MessageUsage {
-            model: Some("synthetic".into()),
-            billing: BillingUsage {
-                input: 1_000_000,
-                output: 1_000_000,
-                speed: Some("fast".into()),
-                prompt_size: 1,
-                ..Default::default()
-            },
+        let mut billing = BillingUsage {
+            timestamp: Some(10),
+            input: 1_000_000,
+            output: 1_000_000,
+            speed: Some("fast".into()),
+            prompt_size: 1,
             ..Default::default()
         };
-        assert_eq!(
-            super::super::calculate_cost_with(&[message.clone()], &[], |_| Some(p)).usd,
-            Some(21.0)
-        );
-        message.billing.prompt_size = 300_000;
+        let fast_cost = |usage: &BillingUsage| {
+            let mut build = CostBuild::with_table(table.clone());
+            build.observe("openai", Some("gpt-new"), usage);
+            build.finish().usd
+        };
+        assert_eq!(fast_cost(&billing), Some(21.0));
+        billing.prompt_size = 300_000;
         // No upstream fast long-context tier or same-boundary bundled fast
         // fallback exists for this model: unknown is the honest result.
+        assert_eq!(fast_cost(&billing), None);
+    }
+
+    #[test]
+    fn dated_aliases_resolve_only_among_models_active_at_execution() {
+        let mut catalog = fixture();
+        let mut previous = None;
+        for (at, active) in [
+            (100, vec![("family-20260101", 1)]),
+            (200, vec![("family-20260201", 2)]),
+            (300, vec![("family-20260201", 2), ("family-20260301", 3)]),
+            (400, vec![("family-20260201", 2), ("family", 4)]),
+        ] {
+            let models = catalog["openai"]["models"].as_object_mut().unwrap();
+            models.retain(|key, _| !key.starts_with("family"));
+            for (id, amount) in active {
+                models.insert(
+                    id.into(),
+                    serde_json::json!({"id":id, "cost":{"input":amount,"output":amount}}),
+                );
+            }
+            let mut next = adapt(&serde_json::to_vec(&catalog).unwrap(), at).unwrap();
+            next.observe_rates(previous.as_ref()).unwrap();
+            previous = Some(next);
+        }
+        let table = previous.unwrap();
+        for id in ["family", "gateway/route/family"] {
+            for (at, rate) in [
+                (99, None),
+                (100, Some(1.0)),
+                (200, Some(2.0)),
+                (300, None),
+                (400, Some(4.0)),
+            ] {
+                assert_eq!(
+                    table
+                        .execution_price("openai", id, at)
+                        .and_then(|p| p.input),
+                    rate
+                );
+            }
+        }
         assert_eq!(
-            super::super::calculate_cost_with(&[message], &[], |_| Some(p)).usd,
-            None
+            table
+                .execution_price("openai", "family-20260301", 300)
+                .unwrap()
+                .input,
+            Some(3.0)
         );
+    }
+
+    #[test]
+    fn zero_token_steps_keep_zero_components_but_require_coverage_for_list_cost() {
+        let mut catalog = fixture();
+        catalog["openai"]["models"]["gpt-5"]["cost"]["input"] = Value::from(0);
+        let table = Arc::new(adapt(&serde_json::to_vec(&catalog).unwrap(), 100).unwrap());
+        for (time, input, expected) in [(99, 0, None), (100, 0, Some(0.0)), (100, 7, Some(0.0))] {
+            let mut cost = CostBuild::with_table(table.clone());
+            cost.observe(
+                "openai",
+                Some("gpt-5"),
+                &BillingUsage {
+                    timestamp: Some(time),
+                    input,
+                    ..Default::default()
+                },
+            );
+            let step = cost.clone().finish_step();
+            assert_eq!(step.list, expected);
+            assert_eq!(
+                [
+                    step.fresh_input,
+                    step.output,
+                    step.cache_read,
+                    step.cache_write
+                ],
+                [Some(0.0); 4]
+            );
+            let total = cost.finish();
+            assert_eq!(
+                total.provenance == crate::CostProvenance::ListPriced,
+                expected.is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_v2_ancestor_keeps_the_interval_until_verified_removal() {
+        let mut v1 = fixture();
+        v1["anthropic"]["models"]["claude-new"] =
+            serde_json::json!({"id":"claude-new","cost":{"input":7,"output":11}});
+        let v1 = serde_json::to_vec(&v1).unwrap();
+        let mut previous = None;
+        for (at, cache) in [
+            (100, serde_json::json!({"write":{"1h":6}})),
+            (200, Value::from("bad")),
+            (300, serde_json::json!({"write":{"1h":6}})),
+            (400, serde_json::json!({})),
+        ] {
+            let mut v2: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+            v2["anthropic"]["models"]["claude-new"]["cost"]["text"]["input"]["cache"] = cache;
+            let mut next = adapt(&v1, at).unwrap();
+            supplement_v2(
+                &mut next,
+                &v1,
+                &serde_json::to_vec(&v2).unwrap(),
+                at,
+                previous.as_ref(),
+            )
+            .unwrap();
+            next.observe_rates(previous.as_ref()).unwrap();
+            previous = Some(next);
+        }
+        let final_table = previous.unwrap();
+        let ttl: Vec<_> =
+            recorded_rates(&recorded_snapshot(&final_table), &final_table.fingerprint)
+                .unwrap()
+                .into_iter()
+                .filter(|r| {
+                    r.model == "claude-new" && r.kind == "cache_write_1h" && r.tier.is_none()
+                })
+                .map(|r| (r.learned_at, r.valid_from, r.valid_to, r.usd_per_unit))
+                .collect();
+        assert_eq!(ttl, [(100, 100, Some(400), 6.0)]);
     }
 
     #[test]

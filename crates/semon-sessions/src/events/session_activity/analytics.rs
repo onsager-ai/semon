@@ -370,7 +370,7 @@ impl Coverage {
             }
         }
         match (priced, unpriced) {
-            (_, 0) => self.pricing.full_steps += 1,
+            (_, 0) if step.list_cost_usd.is_some() => self.pricing.full_steps += 1,
             (0, _) => self.pricing.unpriced_steps += 1,
             _ => self.pricing.partial_steps += 1,
         }

@@ -89,14 +89,21 @@ are UTC epoch milliseconds. A successful observation opens an interval at the
 observation time. It covers steps at or after that instant and strictly before
 its end. A changed or removed rate closes the interval. Reappearance opens a
 new one. Unchanged categories keep their first observation, including explicit
-zero rates. A retained optional v2 supplement keeps its original interval.
+zero rates. A malformed v2 cache-write object retains its previous supplement
+and interval. A later valid response that omits the rate closes that interval.
+
+Lookup resolves exact IDs and aliases against intervals covering the execution.
+An active exact ID takes precedence. If the base ID also has no active rate,
+there must be exactly one matching dated alias. Overlapping fallback candidates
+leave the estimate unknown.
 
 Only amounts attributed to models.dev enter valuation history. Bundled
 fallbacks, model release dates, log ingestion times and the latest fetch date
 cannot establish a price for an earlier execution. An earlier effective start
 requires evidence for that exact rate and a recorded source for the date. The
 HTTP importer currently uses first observations exclusively. Without execution
-time or a covering interval the list cost is unknown. Known component amounts
+time or a covering interval the list cost is unknown, including for a zero-token
+step. Its unused components still cost zero. Known component amounts
 and token coverage remain available for partially priced steps. Gateway-only
 identities retain their separate billing semantics.
 
@@ -153,7 +160,10 @@ with 1 MiB metadata values. Legacy, over-budget, changed-source or incomplete
 observations retain their prior cost and older/absent fingerprint. They are not
 zeroed or relabeled as current and are reconsidered only after a price change or
 a new retained-fact write. Appends onto a restored stale accumulator stay
-explicitly unpriced until its retained facts are recomputed. A superseded table
+explicitly unpriced until its retained facts are recomputed. When a one-shot
+read combines restored Codex files, it counts tokens from stale files as
+unpriced and keeps only amounts verified against the selected fingerprint.
+A superseded table
 cannot publish further work in the process; an older fetched table cannot roll
 back a newer durable job.
 
