@@ -1337,7 +1337,7 @@ mod tests {
 
         drain(&path, &target);
         assert_eq!(count_pending(&store), 0);
-        let usage: (u64, String) = store.connection.query_row(
+        let usage: (i64, String) = store.connection.query_row(
             "SELECT json_extract(codex_native_usage,'$.tokens.total'),codex_pricing_fingerprint FROM files WHERE path=?1",
             [native],
             |row| Ok((row.get(0)?, row.get(1)?)),
