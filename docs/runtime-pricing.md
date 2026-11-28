@@ -89,8 +89,10 @@ are UTC epoch milliseconds. A successful observation opens an interval at the
 observation time. It covers steps at or after that instant and strictly before
 its end. A changed or removed rate closes the interval. Reappearance opens a
 new one. Unchanged categories keep their first observation, including explicit
-zero rates. A malformed v2 cache-write object retains its previous supplement
-and interval. A later valid response that omits the rate closes that interval.
+zero rates. A context threshold selects a tier. Pricing requires a monetary
+rate within the selected tier. A malformed v2 cache-write object or context
+size retains the affected supplement at its existing v1 boundary. A valid
+response that removes the rate or changes its boundary closes that interval.
 
 Lookup resolves exact IDs and aliases against intervals covering the execution.
 An active exact ID takes precedence. If the base ID also has no active rate,

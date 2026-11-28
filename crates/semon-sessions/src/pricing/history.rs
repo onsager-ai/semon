@@ -109,8 +109,8 @@ pub(super) fn price_at(series: &[Series], at: i64) -> Option<Price> {
         else {
             continue;
         };
-        has_price = true;
         let selector = s.selector;
+        has_price |= selector.kind != Kind::Boundary;
         let rates = if selector.fast {
             has_fast = true;
             &mut fast

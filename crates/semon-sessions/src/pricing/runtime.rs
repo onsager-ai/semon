@@ -166,7 +166,7 @@ fn observed_rates(row: &Row) -> io::Result<Rates> {
 }
 
 // Bump when model alias or provider resolution rules change.
-const LOOKUP_RULES_VERSION: u32 = 5;
+const LOOKUP_RULES_VERSION: u32 = 6;
 
 pub(crate) fn gateway_billing_only(id: &str) -> bool {
     id.starts_with("onsager/codex/gpt-6")
@@ -567,6 +567,22 @@ fn rates(cost: &Value, provider: &str) -> io::Result<FastRates> {
     })
 }
 
+fn context_boundary(entry: &Value) -> io::Result<Option<u64>> {
+    let kind = entry
+        .pointer("/tier/type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("field cost.tiers[].tier.type: invalid type"))?;
+    if kind != "context" {
+        return Ok(None);
+    }
+    entry
+        .pointer("/tier/size")
+        .and_then(Value::as_u64)
+        .filter(|size| *size > 0)
+        .map(Some)
+        .ok_or_else(|| invalid("field cost.tiers[].tier.size: invalid boundary"))
+}
+
 fn long_context(cost: &Value, provider: &str) -> io::Result<Option<LongContextPrice>> {
     let explicit = match cost.get("tiers") {
         None | Some(Value::Null) => None,
@@ -578,19 +594,14 @@ fn long_context(cost: &Value, provider: &str) -> io::Result<Option<LongContextPr
             // calculator. More than one context boundary cannot be represented.
             let mut context = None;
             for tier in tiers {
-                if tier.pointer("/tier/type").and_then(Value::as_str) != Some("context") {
+                let Some(size) = context_boundary(tier)? else {
                     continue;
-                }
+                };
                 if context.is_some() {
                     return Err(invalid(
                         "field cost.tiers: multiple context tiers unsupported",
                     ));
                 }
-                let size = tier
-                    .pointer("/tier/size")
-                    .and_then(Value::as_u64)
-                    .filter(|v| *v > 0)
-                    .ok_or_else(|| invalid("field cost.tiers[].tier.size: invalid boundary"))?;
                 context = Some((size, tier));
             }
             context
@@ -840,6 +851,28 @@ fn v2_ttl_rates(value: &Value, field: &str) -> io::Result<TtlRates> {
     Ok(rates)
 }
 
+fn v2_context_ttls(cost: &Value, threshold: u64) -> io::Result<Option<TtlRates>> {
+    let Some(tiers) = cost.get("tiers").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let entries = tiers
+        .as_array()
+        .ok_or_else(|| invalid("field cost.tiers: invalid array"))?;
+    let mut rates = None;
+    for entry in entries {
+        if context_boundary(entry)? == Some(threshold) {
+            if rates.is_some() {
+                return Err(invalid("field cost.tiers: duplicate context boundary"));
+            }
+            rates = Some(v2_ttl_rates(
+                entry.get("cost").unwrap_or(entry),
+                "cost.tiers[].cost",
+            )?);
+        }
+    }
+    Ok(rates)
+}
+
 fn cache_write_path(one_hour: bool) -> &'static str {
     if one_hour {
         "cache_write_1h"
@@ -1055,48 +1088,9 @@ fn supplement_v2(
         let Some(threshold) = v1_threshold else {
             continue;
         };
-        let tier_entries = match cost.get("tiers") {
-            None | Some(Value::Null) => continue,
-            Some(Value::Array(entries)) => entries,
-            Some(_) => {
-                eprintln!(
-                    "semon: ignored models.dev v2 provider anthropic model {id} field cost.tiers: invalid array"
-                );
-                if let Some(prior) = previous
-                    .and_then(|table| table.providers.get("anthropic"))
-                    .and_then(|rows| rows.get(id))
-                {
-                    for path in ["long_context.cache_write_5m", "long_context.cache_write_1h"] {
-                        copy_v2_category(current, prior, path);
-                    }
-                }
-                continue;
-            }
-        };
-        let mut matching = tier_entries.iter().filter(|tier| {
-            tier.pointer("/tier/type").and_then(Value::as_str) == Some("context")
-                && tier.pointer("/tier/size").and_then(Value::as_u64) == Some(threshold)
-        });
-        let Some(entry) = matching.next() else {
-            continue;
-        };
-        if matching.next().is_some() {
-            eprintln!(
-                "semon: ignored models.dev v2 provider anthropic model {id} field cost.tiers: duplicate context boundary"
-            );
-            if let Some(prior) = previous
-                .and_then(|table| table.providers.get("anthropic"))
-                .and_then(|rows| rows.get(id))
-            {
-                for path in ["long_context.cache_write_5m", "long_context.cache_write_1h"] {
-                    copy_v2_category(current, prior, path);
-                }
-            }
-            continue;
-        }
-        let tier_cost = entry.get("cost").unwrap_or(entry);
-        let tier = match v2_ttl_rates(tier_cost, "cost.tiers[].cost") {
-            Ok(rates) => rates,
+        let tier = match v2_context_ttls(cost, threshold) {
+            Ok(Some(rates)) => rates,
+            Ok(None) => continue,
             Err(error) => {
                 eprintln!("semon: ignored models.dev v2 provider anthropic model {id} {error}");
                 if let Some(prior) = previous
@@ -1901,6 +1895,109 @@ mod tests {
                 expected.is_some()
             );
         }
+    }
+
+    #[test]
+    fn context_metadata_alone_cannot_price_a_step_or_hide_a_priced_alias() {
+        let mut catalog = fixture();
+        let id = "boundary-model";
+        catalog["openai"]["models"][id] = serde_json::json!({
+            "id":id,"cost":{"tiers":[{"tier":{"type":"context","size":200000}}]}
+        });
+        let price_step = |catalog: &Value, prompt, input| {
+            let table = Arc::new(adapt(&serde_json::to_vec(catalog).unwrap(), 100).unwrap());
+            let mut cost = CostBuild::with_table(table);
+            cost.observe(
+                "openai",
+                Some(id),
+                &BillingUsage {
+                    timestamp: Some(100),
+                    prompt_size: prompt,
+                    input,
+                    ..Default::default()
+                },
+            );
+            cost.finish_step().list
+        };
+        assert_eq!(price_step(&catalog, 0, 0), None);
+        let alias = "boundary-model-20260101";
+        catalog["openai"]["models"][alias] = serde_json::json!({"id":alias,"cost":{"input":0}});
+        assert_eq!(price_step(&catalog, 1, 1), Some(0.0));
+        // Once the exact model has a real base rate, its threshold still
+        // selects the unpriced long tier. The alias cannot fill that tier.
+        catalog["openai"]["models"][id]["cost"]["input"] = Value::from(7);
+        assert_eq!(price_step(&catalog, 200000, 1_000_000), Some(7.0));
+        assert_eq!(price_step(&catalog, 200001, 1_000_000), None);
+        assert_eq!(price_step(&catalog, 200001, 0), None);
+    }
+
+    #[test]
+    fn malformed_v2_context_size_preserves_only_the_matching_ttl_history() {
+        let mut previous = None;
+        for (at, v1_size, v2_size) in [
+            (100, 200000, Value::from(200000)),
+            (200, 200000, Value::from("200000")),
+            (300, 200000, Value::from(200000)),
+            (400, 200000, Value::from(300000)), // valid, no matching tier
+            (500, 300000, Value::from(300000)),
+            (600, 300000, Value::Null), // tier removed
+        ] {
+            let mut v1 = fixture();
+            v1["anthropic"]["models"]["claude-new"] = serde_json::json!({
+                "id":"claude-new","cost":{"input":1,"output":2,
+                "tiers":[{"tier":{"type":"context","size":v1_size},"input":3}]}
+            });
+            let v1 = serde_json::to_vec(&v1).unwrap();
+            let mut v2: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+            let cost = &mut v2["anthropic"]["models"]["claude-new"]["cost"];
+            cost["text"]["input"]["cache"]["write"]["1h"] = Value::from(at);
+            if v2_size.is_null() {
+                cost.as_object_mut().unwrap().remove("tiers");
+            } else {
+                cost["tiers"][0]["tier"]["size"] = v2_size;
+            }
+            let mut next = adapt(&v1, at).unwrap();
+            supplement_v2(
+                &mut next,
+                &v1,
+                &serde_json::to_vec(&v2).unwrap(),
+                at,
+                previous.as_ref(),
+            )
+            .unwrap();
+            next.observe_rates(previous.as_ref()).unwrap();
+            let price = next
+                .execution_price("anthropic", "claude-new", at as i64)
+                .unwrap();
+            assert_eq!(price.cache_write_1h, Some(at as f64));
+            previous = Some(next);
+        }
+        let table = previous.unwrap();
+        let intervals: Vec<_> = recorded_rates(&recorded_snapshot(&table), &table.fingerprint)
+            .unwrap()
+            .into_iter()
+            .filter(|r| {
+                r.model == "claude-new"
+                    && r.kind == "cache_write_1h"
+                    && r.threshold_tokens.is_some()
+            })
+            .map(|r| {
+                (
+                    r.threshold_tokens.unwrap(),
+                    r.learned_at,
+                    r.valid_from,
+                    r.valid_to,
+                    r.usd_per_unit,
+                )
+            })
+            .collect();
+        assert_eq!(
+            intervals,
+            [
+                (200000, 100, 100, Some(400), 8.0),
+                (300000, 500, 500, Some(600), 8.0)
+            ]
+        );
     }
 
     #[test]

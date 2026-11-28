@@ -498,8 +498,10 @@ impl CostBuild {
             ),
         ];
         let mut entry_usd = 0.0;
+        let has_rate = categories.iter().any(|(_, _, rate)| rate.is_some())
+            || price.and_then(|p| p.web_search_per_1k).is_some();
         let mut has_unpriced =
-            price.is_none() || timestamp.is_none() || runtime::gateway_billing_only(model);
+            !has_rate || timestamp.is_none() || runtime::gateway_billing_only(model);
         let model_cost = self.models.entry(model.to_owned()).or_default();
         for (kind, tokens, rate) in categories {
             add_tokens(&mut model_cost.tokens, kind, tokens);
