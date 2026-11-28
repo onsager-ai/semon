@@ -1,4 +1,4 @@
--- Materialize as conversations/fixture-cascade.db.
+-- Materialize as conversations/fixture-next.db.
 -- ACP 1.5.18 metadata projection. All values are synthetic.
 CREATE TABLE trajectory_meta (
     trajectory_id TEXT PRIMARY KEY,
@@ -8,12 +8,12 @@ CREATE TABLE trajectory_meta (
 );
 CREATE TABLE steps (
     idx INTEGER PRIMARY KEY,
-    step_type INTEGER,
-    status INTEGER,
-    has_subtrajectory NUMERIC
+    step_type INTEGER NOT NULL,
+    status INTEGER NOT NULL,
+    has_subtrajectory NUMERIC NOT NULL
 );
 CREATE INDEX idx_steps_step_type ON steps (step_type);
 CREATE INDEX idx_steps_status ON steps (status);
 
-INSERT INTO trajectory_meta VALUES ('fixture-trajectory', 'fixture-cascade', 0, 0);
+INSERT INTO trajectory_meta VALUES ('fixture-next-trajectory', 'fixture-next', 0, 0);
 INSERT INTO steps VALUES (0, 31, 1, 0), (1, 8, 2, 1), (2, 31, 1, 0);

@@ -2,66 +2,176 @@
   "version": 1,
   "harness": "Managed Antigravity ACP",
   "harness_version": "1.5.18",
-  "evidence_origin": "Wholly synthetic values shaped by bounded, WAL-aware, read-only SQLite metadata inspection on hp-code-2.",
+  "evidence_origin": "Wholly synthetic fixture with an allowlisted read-only source witness.",
+  "deployed_t3": {
+    "version": "0.1.13",
+    "source_commit": "bc0f04da94f64b5e487c598761a43b4cf06b2ac9",
+    "gnu_build_id": "a1f01912317a13388dfea0a2dd138539d0eee970",
+    "sqlite_migration_head": 119
+  },
+  "upstream_executed_model": "5d94090ed031fd37d27cca847f571ab5ce2da26c",
   "fixtures": [
     {
-      "path": "conversations/fixture-cascade.db.sql",
-      "fixture_sha256": "ec57a5592066d66ef399cea97534d1a85a56931af72c25be3636af857dcca655"
+      "path": "conversations/fixture-cascade+.db.sql",
+      "fixture_sha256": "2311ad3c2adf0262b2545818b72b4074bbf4663988a9cc5d23990fef0607d103"
+    },
+    {
+      "path": "conversations/fixture-next.db.sql",
+      "fixture_sha256": "de23edfb5258cd3b91ffaca0c4df64a5fc98e295677c46e60d3af5bad68c7dd6"
     },
     {
       "path": "t3-projections.jsonl",
-      "fixture_sha256": "992facacc10bdf467de640f3e59f324403b78e99e7168418102e57eedfaa189a"
+      "fixture_sha256": "8449fee16fd4bd28b0ba37d7a9d5dbaf2ee0d425314d7f387c0ae73080010859"
+    },
+    {
+      "path": "source-witness.md",
+      "fixture_sha256": "6ed269cf24d68bad8aab804dc07533fc130d7e2c2442b5aad027974ff3c84a20"
     }
   ],
+  "native_databases": {
+    "fixture east": [
+      "conversations/fixture-cascade+.db.sql",
+      "conversations/fixture-next.db.sql"
+    ],
+    "fixture/west": [
+      "conversations/fixture-cascade+.db.sql"
+    ]
+  },
   "representation": {
-    "native": "SQL recreates the metadata subset of the named database. Binary payload columns are omitted.",
-    "supplement": "JSONL contains allowlisted T3 projection columns with payload_json decoded and reduced to selected metadata. Repeated primary keys are observations across reads, including identical replay and conflicting usage."
+    "native": "SQL recreates the metadata subset of each named database. The same SQL is materialized separately on two fixture origins.",
+    "supplement": "JSONL projects T3 rows with payload_json decoded. The outer origin and source_profile are fixture provenance. Repeated primary keys represent replay or conflicting observations."
   },
   "expected": {
-    "cascade_id": "fixture-cascade",
-    "completed_runs": [
-      "fixture-run-1",
-      "fixture-run-2",
-      "fixture-run-3",
-      "fixture-run-4",
-      "fixture-run-7"
+    "session_uids": [
+      "fixture%20east/antigravity/fixture-cascade%2B",
+      "fixture%20east/antigravity/fixture-next",
+      "fixture%2Fwest/antigravity/fixture-cascade%2B"
     ],
-    "run_latency_ms": {
-      "fixture-run-1": 20000,
-      "fixture-run-2": null,
-      "fixture-run-3": null,
-      "fixture-run-4": 20000,
-      "fixture-run-7": 20000
+    "runs": {
+      "fixture east": {
+        "fixture-run-1": [
+          "fixture%20east/antigravity/fixture-cascade%2B",
+          20000,
+          "fixture-neon"
+        ],
+        "fixture-run-2": [
+          "fixture%20east/antigravity/fixture-cascade%2B",
+          null,
+          "fixture-carbon"
+        ],
+        "fixture-run-3": [
+          "fixture%20east/antigravity/fixture-next",
+          null,
+          "fixture-neon"
+        ],
+        "fixture-run-4": [
+          "fixture%20east/antigravity/fixture-next",
+          null,
+          null
+        ],
+        "fixture-run-7": [
+          "fixture%20east/antigravity/fixture-next",
+          0,
+          "fixture-neon"
+        ],
+        "fixture-run-9": [
+          "fixture%20east/antigravity/fixture-next",
+          null,
+          "fixture-neon"
+        ]
+      },
+      "fixture/west": {
+        "fixture-run-1": [
+          "fixture%2Fwest/antigravity/fixture-cascade%2B",
+          20000,
+          "fixture-neon"
+        ]
+      }
     },
-    "completed_provider_turns": [
-      "fixture-turn-1",
-      "fixture-turn-2",
-      "fixture-turn-3",
-      "fixture-turn-4"
+    "turns": {
+      "fixture%20east/antigravity/fixture-cascade%2B/t/fixture-turn%2F1": [
+        10000,
+        "fixture-neon",
+        "fixture-executed",
+        "complete"
+      ],
+      "fixture%20east/antigravity/fixture-cascade%2B/t/fixture-turn-2": [
+        0,
+        "fixture-carbon",
+        null,
+        "complete"
+      ],
+      "fixture%20east/antigravity/fixture-next/t/fixture-turn-3": [
+        null,
+        "fixture-neon",
+        null,
+        "unavailable"
+      ],
+      "fixture%20east/antigravity/fixture-next/t/fixture-turn-4": [
+        null,
+        null,
+        null,
+        "unknown"
+      ],
+      "fixture%20east/antigravity/fixture-next/t/fixture-turn-9": [
+        null,
+        "fixture-neon",
+        null,
+        "unknown"
+      ],
+      "fixture%2Fwest/antigravity/fixture-cascade%2B/t/fixture-turn%2F1": [
+        null,
+        "fixture-neon",
+        null,
+        "complete"
+      ]
+    },
+    "run_columns": [
+      "session_uid",
+      "duration_ms",
+      "selected_model"
     ],
-    "observed_turn_usage": [
-      "fixture-turn-1",
-      "fixture-turn-2"
+    "turn_columns": [
+      "duration_ms",
+      "selected_model",
+      "executed_model",
+      "usage_status"
     ],
-    "turn_link_unknown": [
-      "fixture-run-7"
-    ],
-    "outside_native_scope": {
+    "timing_populations": {
+      "runs": 3,
+      "turns": 2
+    },
+    "unattributed_runs": {
       "wrong_driver": "fixture-run-5",
-      "missing_native_ref": "fixture-run-6"
+      "missing_historical_binding": "fixture-run-6",
+      "conflicting_historical_binding": "fixture-run-8"
     },
-    "timed_provider_turns": 3,
-    "turn_selected_model": {
-      "fixture-turn-1": "fixture-neon",
-      "fixture-turn-2": "fixture-carbon",
-      "fixture-turn-3": "fixture-neon",
-      "fixture-turn-4": "fixture-neon"
+    "run_without_attributed_turn": "fixture-run-7",
+    "current_thread": {
+      "fixture east": [
+        "fixture%20east/antigravity/fixture-next",
+        "2026-11-01T00:00:00Z",
+        "2026-11-01T00:12:00Z",
+        "fixture-carbon"
+      ],
+      "fixture/west": [
+        "fixture%2Fwest/antigravity/fixture-cascade%2B",
+        "2026-11-01T00:00:00Z",
+        "2026-11-01T00:12:00Z",
+        "fixture-carbon"
+      ]
     },
-    "turn_executed_model": null
+    "current_thread_columns": [
+      "session_uid",
+      "thread_created_at",
+      "thread_updated_at",
+      "selected_model"
+    ]
   },
   "unverified": [
     "Runtime ingestion and Semon reads",
-    "Executed model",
+    "Production historical binding coverage",
+    "Production executed-model coverage",
     "Model calls",
     "Exact rates and spend"
   ]
